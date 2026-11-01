@@ -16,6 +16,7 @@
 #include "imgui/renderer/imgui_core.h"
 #include "imgui/renderer/imgui_impl_vulkan.h"
 #include "imgui/shadnet_notifications_layer.h"
+#include "launcher/overlay.h"
 #include "launcher/session.h"
 #include "sdl_window.h"
 #include "video_core/buffer_cache/buffer.h"
@@ -493,6 +494,14 @@ Presenter::Presenter(Frontend::WindowSDL& window_, AmdGpu::Liverpool* liverpool_
     fsr_pass.Create(device, instance.GetAllocator(), num_images);
     pp_pass.Create(device, swapchain.GetSurfaceFormat().format);
 
+    Launcher::Overlay::Create({
+        .instance = instance.GetInstance(),
+        .physical_device = instance.GetPhysicalDevice(),
+        .device = device,
+        .queue_family = instance.GetGraphicsQueueFamilyIndex(),
+        .get_instance_proc_addr = VULKAN_HPP_DEFAULT_DISPATCHER.vkGetInstanceProcAddr,
+    });
+
     ImGui::Layer::AddLayer(Common::Singleton<Core::Devtools::Layer>::Instance());
     ImGui::Friends::Register();
     ImGui::ShadNetNotify::Register();
@@ -511,6 +520,7 @@ Presenter::~Presenter() {
     Check(draw_scheduler.CommandBuffer().reset());
     Check(present_scheduler.CommandBuffer().reset());
     Check(flip_scheduler.CommandBuffer().reset());
+    Launcher::Overlay::Destroy();
 
     const vk::Device device = instance.GetDevice();
     for (auto& frame : present_frames) {
@@ -881,6 +891,18 @@ void Presenter::Present(Frame* frame, bool is_reusing_frame, bool is_game_frame)
 
     auto& scheduler = present_scheduler;
     const auto cmdbuf = scheduler.CommandBuffer();
+
+    // The launcher's quick menu, drawn over this frame
+    const auto gpu_tick = [&] {
+        scheduler.GetWorkSemaphore()->Refresh();
+        return scheduler.GetWorkSemaphore()->KnownGpuTick();
+    };
+    const bool launcher_capture =
+        Launcher::Overlay::Begin(gpu_tick(), swapchain.GetExtent(), [&](u64 tick) {
+            scheduler.Wait(tick);
+            return gpu_tick();
+        });
+
     const u32 capture_with_overlays_count = VideoCore::ConsumeWithOverlaysScreenshotRequests();
     std::optional<ScreenshotReadback> pending_screenshot;
 
@@ -938,6 +960,45 @@ void Presenter::Present(Frame* frame, bool is_reusing_frame, bool is_game_frame)
                                    vk::PipelineStageFlagBits::eFragmentShader,
                                {}, {}, {}, pre_barriers);
 
+        if (launcher_capture) {
+            // The game's frame, without shadPS4's own overlays, for the menu's background
+            const auto frame_layout = [&](vk::ImageLayout from, vk::ImageLayout to,
+                                          vk::AccessFlags src, vk::AccessFlags dst) {
+                return vk::ImageMemoryBarrier{
+                    .srcAccessMask = src,
+                    .dstAccessMask = dst,
+                    .oldLayout = from,
+                    .newLayout = to,
+                    .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+                    .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+                    .image = frame->image,
+                    .subresourceRange{
+                        .aspectMask = vk::ImageAspectFlagBits::eColor,
+                        .baseMipLevel = 0,
+                        .levelCount = 1,
+                        .baseArrayLayer = 0,
+                        .layerCount = VK_REMAINING_ARRAY_LAYERS,
+                    },
+                };
+            };
+            cmdbuf.pipelineBarrier(vk::PipelineStageFlagBits::eColorAttachmentOutput |
+                                       vk::PipelineStageFlagBits::eFragmentShader,
+                                   vk::PipelineStageFlagBits::eTransfer, {}, {}, {},
+                                   frame_layout(vk::ImageLayout::eShaderReadOnlyOptimal,
+                                                vk::ImageLayout::eTransferSrcOptimal,
+                                                vk::AccessFlagBits::eShaderRead,
+                                                vk::AccessFlagBits::eTransferRead));
+            Launcher::Overlay::Capture(cmdbuf, frame->image,
+                                       static_cast<VkFormat>(swapchain.GetSurfaceFormat().format),
+                                       {frame->width, frame->height});
+            cmdbuf.pipelineBarrier(vk::PipelineStageFlagBits::eTransfer,
+                                   vk::PipelineStageFlagBits::eFragmentShader, {}, {}, {},
+                                   frame_layout(vk::ImageLayout::eTransferSrcOptimal,
+                                                vk::ImageLayout::eShaderReadOnlyOptimal,
+                                                vk::AccessFlagBits::eTransferRead,
+                                                vk::AccessFlagBits::eShaderRead));
+        }
+
         { // Draw the game
             ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2{0.0f});
             ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, 0.0f);
@@ -991,6 +1052,9 @@ void Presenter::Present(Frame* frame, bool is_reusing_frame, bool is_game_frame)
             ImGui::PopStyleColor();
         }
         ImGui::Core::Render(cmdbuf, swapchain_image_view, swapchain.GetExtent());
+        Launcher::Overlay::Draw(cmdbuf, swapchain_image_view,
+                                static_cast<VkFormat>(swapchain.GetSurfaceFormat().format),
+                                swapchain.GetExtent());
 
         if (capture_with_overlays_count > 0) {
             auto& readback = pending_screenshot.emplace(
@@ -1072,7 +1136,9 @@ void Presenter::Present(Frame* frame, bool is_reusing_frame, bool is_game_frame)
     info.AddWait(frame->ready_semaphore, frame->ready_tick);
     info.AddSignal(swapchain.GetPresentReadySemaphore());
     info.AddSignal(frame->present_done);
+    const u64 present_tick = scheduler.CurrentTick();
     scheduler.Flush(info);
+    Launcher::Overlay::End(present_tick);
 
     // Present to swapchain.
     {

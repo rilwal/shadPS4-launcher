@@ -10,11 +10,15 @@
 #include <SDL3/SDL_properties.h>
 #include <SDL3/SDL_video.h>
 #include <launcher_client.h>
+#include <launcher_overlay.h>
 
 #include "common/logging/log.h"
 #include "common/scm_rev.h"
+#include "common/singleton.h"
+#include "core/debug_state.h"
 #include "core/emulator_settings.h"
 #include "core/user_settings.h"
+#include "input/controller.h"
 #include "launcher/session.h"
 #include "launcher/settings.h"
 #include "launcher/trophies.h"
@@ -33,6 +37,9 @@ lc_session* g_session = nullptr;
 std::vector<std::pair<std::string, std::optional<std::string>>> g_values;
 std::atomic_flag g_ready;
 std::atomic_flag g_achievements_sent;
+// The quick menu paused the game, which it resumes when it closes. A game the player had paused
+// already (shadPS4's pause key) stays paused.
+std::atomic_bool g_paused_for_menu;
 
 void Log(void*, lc_log_level level, const char* line) {
     if (level == LC_LOG_ERROR) {
@@ -44,6 +51,9 @@ void Log(void*, lc_log_level level, const char* line) {
 
 void Quit(void*) {
     LOG_INFO(Frontend, "Launcher: quit");
+    if (g_paused_for_menu.exchange(false)) {
+        DebugState.ResumeGuestThreads();
+    }
     if (g_window == nullptr) {
         // Still booting, before the window that would take the event
         std::quick_exit(0);
@@ -51,6 +61,28 @@ void Quit(void*) {
     SDL_Event event{};
     event.type = SDL_EVENT_QUIT;
     SDL_PushEvent(&event);
+}
+
+// The present thread keeps showing the frame the game paused on (VideoOutDriver::PresentThread),
+// and with the overlay drawn in the game's window the next of those presents is copied for the
+// shell, as the menu's background (Launcher::Overlay)
+void MenuOpened(void*, bool opened) {
+    LOG_INFO(Frontend, "Launcher: quick menu {}", opened ? "opened" : "closed");
+    auto* controllers = Common::Singleton<Input::GameControllers>::Instance();
+    if (opened) {
+        // The pad is the menu's before the game pauses, and the game's again after it resumes
+        controllers->HoldForLauncher(true);
+        if (!DebugState.IsGuestThreadsPaused()) {
+            g_paused_for_menu = true;
+            DebugState.PauseGuestThreads();
+        }
+    } else {
+        if (g_paused_for_menu.exchange(false)) {
+            DebugState.ResumeGuestThreads();
+        }
+        controllers->HoldForLauncher(false);
+    }
+    lc_paused(g_session, DebugState.IsGuestThreadsPaused());
 }
 
 u64 NativeWindow() {
@@ -78,10 +110,17 @@ void Connect(std::vector<std::string> settings) {
     lc_callbacks cb{};
     cb.log = Log;
     cb.quit = Quit;
+    cb.overlay = MenuOpened;
 
     const std::string name = std::string("shadPS4 ") + Common::g_version;
     lc_connect_info info{};
     info.name = name.c_str();
+#ifdef LAUNCHER_CLIENT_VULKAN
+    // The presenter draws the launcher's quick menu into the game's frames (launcher/overlay.h)
+    if (lc_overlay_supported()) {
+        info.capabilities |= LC_CAP_COMPOSITED_OVERLAY;
+    }
+#endif
     std::array<char, 512> error{};
     g_session = lc_connect(&info, &cb, error.data(), error.size());
     if (g_session == nullptr) {

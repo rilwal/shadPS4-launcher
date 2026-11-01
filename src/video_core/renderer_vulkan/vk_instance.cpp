@@ -9,6 +9,7 @@
 #include "common/debug.h"
 #include "common/types.h"
 #include "imgui/renderer/imgui_core.h"
+#include "launcher/overlay.h"
 #include "sdl_window.h"
 #include "video_core/renderdoc.h"
 #include "video_core/renderer_vulkan/liverpool_to_vk.h"
@@ -96,8 +97,8 @@ Instance::Instance(bool enable_validation, bool enable_crash_diagnostic)
 
 Instance::Instance(Frontend::WindowSDL& window, s32 physical_device_index,
                    bool enable_validation /*= false*/, bool enable_crash_diagnostic /*= false*/)
-    : instance{
-          CreateInstance(window.GetWindowInfo().type, enable_validation, enable_crash_diagnostic)},
+    : instance{CreateInstance(window.GetWindowInfo().type, enable_validation,
+                              enable_crash_diagnostic)},
       physical_devices{EnumeratePhysicalDevices(instance)} {
     if (enable_validation) {
         debug_callback = CreateDebugCallback(*instance);
@@ -238,7 +239,7 @@ bool Instance::CreateDevice() {
         return false;
     }
 
-    boost::container::static_vector<const char*, 32> enabled_extensions;
+    boost::container::static_vector<const char*, 40> enabled_extensions;
     const auto add_extension = [&](std::string_view extension) -> bool {
         const auto result =
             std::find_if(available_extensions.begin(), available_extensions.end(),
@@ -366,6 +367,11 @@ bool Instance::CreateDevice() {
     }
     const bool calibrated_timestamps =
         TRACY_GPU_ENABLED ? add_extension(VK_EXT_CALIBRATED_TIMESTAMPS_EXTENSION_NAME) : false;
+    // For the game launcher's quick menu in the game's window, which shares images with the
+    // launcher; without them the launcher shows the menu in its own window
+    for (const char* extension : Launcher::Overlay::DeviceExtensions()) {
+        add_extension(extension);
+    }
 
     const auto family_properties = physical_device.getQueueFamilyProperties();
     if (family_properties.empty()) {
