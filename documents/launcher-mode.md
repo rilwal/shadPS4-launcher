@@ -1,0 +1,95 @@
+<!--
+SPDX-FileCopyrightText: 2026 shadPS4 Emulator Project
+SPDX-License-Identifier: GPL-2.0-or-later
+-->
+
+# Launcher mode
+
+This fork of shadPS4 works with the [game launcher](https://github.com/rilwal/game-launcher) as a
+patched emulator (the launcher's design decision D26). The launcher draws all UI; shadPS4 reports
+to it over the launcher's plugin protocol (`docs/plugin-api.md` there), through the launcher's
+client library, vendored in `externals/launcher-client`.
+
+shadPS4 is the launcher's plugin for its own games: the launcher has no shadPS4 code of its own.
+
+```toml
+[plugins.shadps4]
+exe = "/path/to/shadps4"
+[plugins.shadps4.settings]
+game_dirs = ["~/Games/PS4"]
+```
+
+## The plugin
+
+Started with no arguments (or `--launcher-plugin [--game-dir <folders>]`) and the launcher's
+environment, `shadps4` is a plugin runner (`src/launcher/plugin.cpp`):
+
+- `library`: the games in its game folders and in shadPS4's own (its config's enabled game
+  install folders), each a game's folder or `.zar` archive, or a folder of them, two levels deep.
+  A game's update (`-UPDATE` or `-patch` next to it) gives its title and pictures when it has
+  them, as when the game boots: the icon (`icon0.png`) and the background (`pic1.png`).
+- `launch`: answered with a `spawn` of itself, `--game <game>`, in the folder the plugin runs in,
+  so the game finds the same user folder (a portable `user` folder there, or the system one). A
+  player's per-game arguments replace those, with `{game_dir}`, `{boot}` and `{title_id}` filled
+  in.
+- `achievements`: a game's trophies and the default user's unlocks, before it's ever played. The
+  trophy files are extracted to shadPS4's trophy folder as a booting game would, so this needs the
+  trophy key in shadPS4's keys file.
+- `settings` and `game_settings`, below.
+
+The plugin logs to `shadps4_plugin.log` in shadPS4's log folder.
+
+## How a game starts
+
+The plugin has launcherd start `shadps4 --game <game>` with two environment variables:
+
+- `LAUNCHER_ENDPOINT`: the launcher's socket (Unix) or named pipe (Windows).
+- `LAUNCHER_SESSION`: a token for this game session.
+
+When both are set, shadPS4 connects before it boots (`src/launcher/session.cpp`). Without them,
+nothing changes and shadPS4 runs as before.
+
+## What shadPS4 sends and does
+
+| When | Message |
+| --- | --- |
+| Connected | `booting` |
+| First game frame on screen | `ready {pid, window}`: the HWND, X11 window id or NSWindow number (0 on Wayland) |
+| Settings the launcher sent can't be applied | `notify` (error) |
+| The game opens its trophy set | `achievements`: every trophy of the game's sets with the default user's unlocks |
+| A trophy (and maybe the platinum) unlocks | `unlocked {id, at}` per trophy |
+| An assertion fails | `failed {reason, code: "fatal_error"}` |
+| The game can't be found or loaded | `failed {code: "invalid_file_or_folder"}` |
+| `quit` | the window closes as if the player closed it, and shadPS4 exits |
+
+In launcher mode shadPS4's own trophy pop-ups are off, since the launcher shows them.
+
+Trophy ids are the trophy ids as text, prefixed with the service label for any trophy set past
+the first (`"1:12"`), as the Kyty fork does. Only the default user's trophies are reported.
+
+## Settings
+
+The options the launcher shows are in `src/launcher/settings.cpp`, on shadPS4's page under
+Emulators. Each one's default is what shadPS4's own config says, so a player who never changes it
+in the launcher keeps shadPS4's value (and its per-game config).
+
+- The plugin's own settings: the game folders (the launcher's folder picker) and the console
+  language, which the plugin lists trophies in. It passes the language to the games it starts as
+  `--launcher-setting console-language=<n>`.
+- Everything else is a game setting (`game_settings`): toggles and choices, numbers being offered
+  as steps. The launcher stores the player's values, globally and per game, and sends them with
+  `configure` before boot. shadPS4 applies them after loading its config for the game, as
+  game-specific values over both its global and per-game config, and never saves them.
+
+All of them are read while the game boots for now.
+
+## Not done yet
+
+- The quick menu in the game window (composited overlay), with pausing and a capture for its
+  background.
+- Settings that change while the game runs.
+- The launcher's on-screen keyboard for the game's text input.
+- The console language is global only, since the plugin needs it for trophy lists. Trophy lists
+  aren't sent again when the language changes.
+- A game that restarts itself (`sceSystemServiceLoadExec`) starts a new process, which connects
+  again with the same session.

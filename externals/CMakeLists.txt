@@ -430,3 +430,7 @@ if (NOT TARGET ZArchive::zarchive)
     target_compile_features(zarchive PRIVATE cxx_std_20)
     add_library(ZArchive::zarchive ALIAS zarchive)
 endif()
+
+# The game launcher's client library (rilwal/game-launcher's client/), for running as its plugin
+set(LAUNCHER_CLIENT_VULKAN OFF CACHE BOOL "")
+add_subdirectory(launcher-client/client EXCLUDE_FROM_ALL)

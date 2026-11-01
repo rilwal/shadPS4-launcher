@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 #include "emulator.h"
+#include "launcher/session.h"
 
 namespace Core {
 
@@ -10,3 +11,9 @@ Emulator::~Emulator() {}
 void Emulator::Shutdown() {}
 
 } // namespace Core
+
+namespace Launcher::Session {
+
+void Failed(std::string_view, const char*) {}
+
+} // namespace Launcher::Session

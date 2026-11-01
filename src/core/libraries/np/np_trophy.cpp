@@ -19,6 +19,7 @@
 #include "core/libraries/np/trophy_ui.h"
 #include "core/libraries/system/userservice.h"
 #include "core/memory.h"
+#include "launcher/session.h"
 
 namespace Libraries::Np::NpTrophy {
 
@@ -1037,6 +1038,7 @@ int PS4_SYSV_ABI sceNpTrophyRegisterContext(OrbisNpTrophyContext context,
     ctx.registered = true;
     LOG_INFO(Lib_NpTrophy, "Context {} registered", context);
     CheckAndUnlockPlatinum(ctx);
+    Launcher::Session::TrophiesOpened(trophyMap, ctx.user_id);
 
     // Sync with shadNet
     {
@@ -1234,6 +1236,11 @@ int PS4_SYSV_ABI sceNpTrophyUnlockTrophy(OrbisNpTrophyContext context, OrbisNpTr
     ApplyUnlockToXmlFile(ctx.xml_save_file, trophyId, trophy_timestamp, unlock_platinum,
                          platinum_id, platinum_timestamp);
     LOG_INFO(Lib_NpTrophy, "Trophy {} successfully saved.", trophyId);
+    Launcher::Session::TrophyUnlocked(ctx.user_id, ctx.service_label, trophyId, trophy_timestamp);
+    if (unlock_platinum) {
+        Launcher::Session::TrophyUnlocked(ctx.user_id, ctx.service_label, platinum_id,
+                                          platinum_timestamp);
+    }
     auto& np = NpHandler::GetInstance();
     np.ReportTrophyUnlock(ctx.user_id, ctx.service_label, trophyId, trophy_timestamp);
     if (unlock_platinum) {

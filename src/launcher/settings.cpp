@@ -1,0 +1,433 @@
+// SPDX-FileCopyrightText: Copyright 2026 shadPS4 Emulator Project
+// SPDX-License-Identifier: GPL-2.0-or-later
+
+#include <algorithm>
+#include <array>
+#include <charconv>
+#include <functional>
+#include <fmt/format.h>
+
+#include "core/emulator_settings.h"
+#include "launcher/settings.h"
+
+namespace Launcher::Settings {
+
+namespace {
+
+using Options = std::vector<std::pair<std::string, std::string>>;
+
+struct Entry {
+    const char* key;
+    const char* label;
+    const char* section;
+    const char* help;
+    Row::Kind kind;
+    Options options;
+    std::function<std::string()> get;
+    // False if the value isn't one it takes
+    std::function<bool(const std::string&)> set;
+    bool runner = false;
+    // A choice that also takes values that aren't among its options (sizes, steps), as shadPS4's
+    // own config may hold one
+    bool free = false;
+};
+
+std::optional<long> ParseNumber(std::string_view text) {
+    long value{};
+    const auto [end, error] = std::from_chars(text.data(), text.data() + text.size(), value);
+    if (error != std::errc{} || end != text.data() + text.size()) {
+        return std::nullopt;
+    }
+    return value;
+}
+
+std::optional<std::pair<u32, u32>> ParseSize(std::string_view text) {
+    const auto x = text.find('x');
+    if (x == std::string_view::npos) {
+        return std::nullopt;
+    }
+    const auto w = ParseNumber(text.substr(0, x));
+    const auto h = ParseNumber(text.substr(x + 1));
+    if (!w || !h || *w < 320 || *h < 240 || *w > 16384 || *h > 16384) {
+        return std::nullopt;
+    }
+    return std::pair<u32, u32>{static_cast<u32>(*w), static_cast<u32>(*h)};
+}
+
+std::string Bool(bool value) {
+    return value ? "true" : "false";
+}
+
+std::optional<bool> ParseBool(std::string_view text) {
+    if (text == "true") {
+        return true;
+    }
+    if (text == "false") {
+        return false;
+    }
+    return std::nullopt;
+}
+
+Entry Toggle(const char* key, const char* label, const char* section, const char* help,
+             std::function<bool()> get, std::function<void(bool)> set) {
+    return Entry{key,
+                 label,
+                 section,
+                 help,
+                 Row::Kind::Toggle,
+                 {},
+                 [get] { return Bool(get()); },
+                 [set](const std::string& value) {
+                     const auto b = ParseBool(value);
+                     if (b) {
+                         set(*b);
+                     }
+                     return b.has_value();
+                 }};
+}
+
+Entry Choice(const char* key, const char* label, const char* section, const char* help,
+             Options options, std::function<std::string()> get,
+             std::function<void(const std::string&)> set) {
+    return Entry{key,
+                 label,
+                 section,
+                 help,
+                 Row::Kind::Choice,
+                 std::move(options),
+                 std::move(get),
+                 [set](const std::string& value) {
+                     set(value);
+                     return true;
+                 }};
+}
+
+Entry Size(const char* key, const char* label, const char* section, const char* help,
+           std::initializer_list<const char*> sizes, std::function<std::pair<u32, u32>()> get,
+           std::function<void(u32, u32)> set) {
+    Options options;
+    for (const auto* size : sizes) {
+        options.emplace_back(size, size);
+    }
+    return Entry{key,
+                 label,
+                 section,
+                 help,
+                 Row::Kind::Choice,
+                 std::move(options),
+                 [get] {
+                     const auto [w, h] = get();
+                     return fmt::format("{}x{}", w, h);
+                 },
+                 [set](const std::string& value) {
+                     const auto size = ParseSize(value);
+                     if (size) {
+                         set(size->first, size->second);
+                     }
+                     return size.has_value();
+                 },
+                 false,
+                 true};
+}
+
+// A number offered as steps, as the launcher's game settings can't be free numbers
+Entry Steps(const char* key, const char* label, const char* section, const char* help,
+            std::vector<long> steps, std::function<std::string(long)> step_label,
+            std::function<long()> get, std::function<void(long)> set) {
+    Options options;
+    for (const auto step : steps) {
+        options.emplace_back(std::to_string(step), step_label(step));
+    }
+    return Entry{key,
+                 label,
+                 section,
+                 help,
+                 Row::Kind::Choice,
+                 std::move(options),
+                 [get] { return std::to_string(get()); },
+                 [set](const std::string& value) {
+                     const auto number = ParseNumber(value);
+                     if (number) {
+                         set(*number);
+                     }
+                     return number.has_value();
+                 },
+                 false,
+                 true};
+}
+
+constexpr std::array<const char*, 31> LANGUAGES = {
+    "Japanese",
+    "English (US)",
+    "French",
+    "Spanish",
+    "German",
+    "Italian",
+    "Dutch",
+    "Portuguese (Portugal)",
+    "Russian",
+    "Korean",
+    "Chinese (Traditional)",
+    "Chinese (Simplified)",
+    "Finnish",
+    "Swedish",
+    "Danish",
+    "Norwegian",
+    "Polish",
+    "Portuguese (Brazil)",
+    "English (UK)",
+    "Turkish",
+    "Spanish (Latin America)",
+    "Arabic",
+    "French (Canada)",
+    "Czech",
+    "Hungarian",
+    "Greek",
+    "Romanian",
+    "Thai",
+    "Vietnamese",
+    "Indonesian",
+    "Ukrainian",
+};
+
+const std::vector<Entry>& Entries() {
+    // Applied as game-specific values, which win over both shadPS4's global and per-game config
+    constexpr bool G = true;
+    static const std::vector<Entry> entries = [] {
+        std::vector<Entry> e;
+
+        // Display
+        e.push_back(Size(
+            "window-size", "Window size", "Display",
+            "The game window's size when it isn't fullscreen.",
+            {"1280x720", "1600x900", "1920x1080", "2560x1440", "3840x2160"},
+            [] {
+                return std::pair{EmulatorSettings.GetWindowWidth(),
+                                 EmulatorSettings.GetWindowHeight()};
+            },
+            [](u32 w, u32 h) {
+                EmulatorSettings.SetWindowWidth(w, G);
+                EmulatorSettings.SetWindowHeight(h, G);
+            }));
+        e.push_back(Choice(
+            "display-mode", "Display mode", "Display",
+            "Exclusive fullscreen changes the display's mode; borderless covers the desktop.",
+            {{"windowed", "Windowed"},
+             {"fullscreen", "Fullscreen"},
+             {"borderless", "Borderless fullscreen"}},
+            [] {
+                if (!EmulatorSettings.IsFullScreen()) {
+                    return std::string("windowed");
+                }
+                return std::string(EmulatorSettings.GetFullScreenMode() == "Fullscreen"
+                                       ? "fullscreen"
+                                       : "borderless");
+            },
+            [](const std::string& value) {
+                EmulatorSettings.SetFullScreen(value != "windowed", G);
+                if (value != "windowed") {
+                    EmulatorSettings.SetFullScreenMode(
+                        value == "fullscreen" ? "Fullscreen" : "Fullscreen (Borderless)", G);
+                }
+            }));
+        e.push_back(Size(
+            "output-resolution", "Output resolution", "Display",
+            "The resolution games are told the console outputs.",
+            {"1280x720", "1920x1080", "2560x1440", "3840x2160"},
+            [] {
+                return std::pair{EmulatorSettings.GetInternalScreenWidth(),
+                                 EmulatorSettings.GetInternalScreenHeight()};
+            },
+            [](u32 w, u32 h) {
+                EmulatorSettings.SetInternalScreenWidth(w, G);
+                EmulatorSettings.SetInternalScreenHeight(h, G);
+            }));
+        e.push_back(Choice(
+            "present-mode", "Present mode", "Display",
+            "Fifo waits for the display, Mailbox replaces waiting frames, Immediate can tear.",
+            {{"Mailbox", "Mailbox"}, {"Fifo", "Fifo (vsync)"}, {"Immediate", "Immediate"}},
+            [] { return EmulatorSettings.GetPresentMode(); },
+            [](const std::string& value) { EmulatorSettings.SetPresentMode(value, G); }));
+        e.push_back(Toggle(
+            "hdr", "HDR", "Display", "Output HDR10 when the game and the display support it.",
+            [] { return EmulatorSettings.IsHdrAllowed(); },
+            [](bool v) { EmulatorSettings.SetHdrAllowed(v, G); }));
+        e.push_back(Toggle(
+            "fsr", "FSR upscaling", "Display",
+            "Upscale the game's frame to the window with AMD FidelityFX Super Resolution.",
+            [] { return EmulatorSettings.IsFsrEnabled(); },
+            [](bool v) { EmulatorSettings.SetFsrEnabled(v, G); }));
+        e.push_back(Toggle(
+            "rcas", "RCAS sharpening", "Display", "Sharpen the upscaled frame (with FSR).",
+            [] { return EmulatorSettings.IsRcasEnabled(); },
+            [](bool v) { EmulatorSettings.SetRcasEnabled(v, G); }));
+        e.push_back(Steps(
+            "rcas-attenuation", "Sharpening strength", "Display",
+            "How much RCAS holds back: lower is sharper.",
+            {0, 100, 250, 500, 750, 1000, 1500, 2000},
+            [](long v) { return fmt::format("{:.2f}", v / 1000.0); },
+            [] { return EmulatorSettings.GetRcasAttenuation(); },
+            [](long v) {
+                EmulatorSettings.SetRcasAttenuation(static_cast<int>(std::clamp(v, 0L, 3000L)), G);
+            }));
+        e.push_back(Steps(
+            "vblank-frequency", "Vblank frequency", "Display",
+            "The emulated display's refresh rate. Above 60 Hz speeds up games that count vblanks.",
+            {60, 120, 144, 240}, [](long v) { return fmt::format("{} Hz", v); },
+            [] { return static_cast<long>(EmulatorSettings.GetVblankFrequency()); },
+            [](long v) {
+                EmulatorSettings.SetVblankFrequency(static_cast<u32>(std::clamp(v, 30L, 480L)), G);
+            }));
+        e.push_back(Toggle(
+            "splash", "Splash screen", "Display", "Show the game's splash screen while it starts.",
+            [] { return EmulatorSettings.IsShowSplash(); },
+            [](bool v) { EmulatorSettings.SetShowSplash(v, G); }));
+        e.push_back(Toggle(
+            "fps-counter", "Frame rate", "Display", "Show shadPS4's frame rate counter.",
+            [] { return EmulatorSettings.IsShowFpsCounter(); },
+            [](bool v) { EmulatorSettings.SetShowFpsCounter(v, G); }));
+        e.push_back(Choice(
+            "hide-cursor", "Hide the cursor", "Display", "When the mouse cursor hides.",
+            {{"0", "Never"}, {"1", "When idle"}, {"2", "Always"}},
+            [] { return std::to_string(EmulatorSettings.GetCursorState()); },
+            [](const std::string& value) {
+                EmulatorSettings.SetCursorState(std::stoi(value), G);
+            }));
+
+        // Accuracy
+        e.push_back(Choice(
+            "readbacks", "GPU readbacks", "Accuracy",
+            "Copy what the GPU writes back to the game's memory. Some games need it; it's slower.",
+            {{"0", "Off"}, {"1", "Relaxed"}, {"2", "Precise"}},
+            [] { return std::to_string(EmulatorSettings.GetReadbacksMode()); },
+            [](const std::string& value) {
+                EmulatorSettings.SetReadbacksMode(static_cast<u32>(std::stoi(value)), G);
+            }));
+        e.push_back(Toggle(
+            "readback-linear-images", "Read back linear images", "Accuracy",
+            "Also copy linear images the GPU writes back to memory.",
+            [] { return EmulatorSettings.IsReadbackLinearImagesEnabled(); },
+            [](bool v) { EmulatorSettings.SetReadbackLinearImagesEnabled(v, G); }));
+        e.push_back(Toggle(
+            "direct-memory-access", "Direct memory access", "Accuracy",
+            "Let shaders reach the game's memory directly, as some games expect.",
+            [] { return EmulatorSettings.IsDirectMemoryAccessEnabled(); },
+            [](bool v) { EmulatorSettings.SetDirectMemoryAccessEnabled(v, G); }));
+        e.push_back(Toggle(
+            "copy-gpu-buffers", "Copy GPU buffers", "Accuracy",
+            "Copy the game's command buffers before running them, for games that rewrite them.",
+            [] { return EmulatorSettings.IsCopyGpuBuffers(); },
+            [](bool v) { EmulatorSettings.SetCopyGpuBuffers(v, G); }));
+        e.push_back(Toggle(
+            "pipeline-cache", "Pipeline cache", "Accuracy",
+            "Keep compiled pipelines on disk, so later runs stutter less.",
+            [] { return EmulatorSettings.IsPipelineCacheEnabled(); },
+            [](bool v) { EmulatorSettings.SetPipelineCacheEnabled(v, G); }));
+
+        // System
+        e.push_back(Toggle(
+            "neo", "PS4 Pro mode", "System", "Tell games they run on a PS4 Pro.",
+            [] { return EmulatorSettings.IsNeo(); },
+            [](bool v) { EmulatorSettings.SetNeo(v, G); }));
+        e.push_back(Toggle(
+            "network", "Connected to the network", "System", "Tell games the console is online.",
+            [] { return EmulatorSettings.IsConnectedToNetwork(); },
+            [](bool v) { EmulatorSettings.SetConnectedToNetwork(v, G); }));
+        {
+            Options languages;
+            for (size_t i = 0; i < LANGUAGES.size(); i++) {
+                languages.emplace_back(std::to_string(i), LANGUAGES[i]);
+            }
+            auto language = Choice(
+                "console-language", "Console language", "Profile",
+                "The console's language, which games and trophy lists use.", std::move(languages),
+                [] { return std::to_string(EmulatorSettings.GetConsoleLanguage()); },
+                [](const std::string& value) {
+                    EmulatorSettings.SetConsoleLanguage(std::stoi(value), G);
+                });
+            language.runner = true;
+            e.push_back(std::move(language));
+        }
+
+        // Audio
+        e.push_back(Steps(
+            "volume", "Volume", "Audio", "The game's volume.",
+            {0, 10, 20, 30, 40, 50, 60, 70, 80, 90, 100, 120, 150},
+            [](long v) { return fmt::format("{}%", v); },
+            [] { return static_cast<long>(EmulatorSettings.GetVolumeSlider()); },
+            [](long v) {
+                EmulatorSettings.SetVolumeSlider(static_cast<int>(std::clamp(v, 0L, 500L)), G);
+            }));
+        e.push_back(Choice(
+            "audio-backend", "Audio backend", "Audio", "How sound reaches the system.",
+            {{"0", "SDL"}, {"1", "OpenAL"}},
+            [] { return std::to_string(EmulatorSettings.GetAudioBackend()); },
+            [](const std::string& value) {
+                EmulatorSettings.SetAudioBackend(static_cast<u32>(std::stoi(value)), G);
+            }));
+
+        // Controls
+        e.push_back(Toggle(
+            "circle-enter", "Confirm with Circle", "Controls",
+            "Japanese-style buttons: Circle confirms and Cross cancels, in games that ask.",
+            [] { return EmulatorSettings.IsCircleEnter(); },
+            [](bool v) { EmulatorSettings.SetCircleEnter(v, G); }));
+        e.push_back(Toggle(
+            "motion-controls", "Motion controls", "Controls",
+            "Pass the controller's gyro and accelerometer to games.",
+            [] { return EmulatorSettings.IsMotionControlsEnabled(); },
+            [](bool v) { EmulatorSettings.SetMotionControlsEnabled(v, G); }));
+        e.push_back(Toggle(
+            "background-input", "Input in the background", "Controls",
+            "Keep reading the controller while the game window isn't focused.",
+            [] { return EmulatorSettings.IsBackgroundControllerInput(); },
+            [](bool v) { EmulatorSettings.SetBackgroundControllerInput(v, G); }));
+        return e;
+    }();
+    return entries;
+}
+
+} // namespace
+
+std::vector<Row> Rows() {
+    std::vector<Row> rows;
+    for (const auto& e : Entries()) {
+        Row row;
+        row.key = e.key;
+        row.label = e.label;
+        row.section = e.section;
+        row.help = e.help;
+        row.kind = e.kind;
+        row.options = e.options;
+        row.default_value = e.get();
+        row.runner = e.runner;
+        if (row.kind == Row::Kind::Choice && std::ranges::none_of(row.options, [&](const auto& o) {
+                return o.first == row.default_value;
+            })) {
+            // A value set in shadPS4's own config that isn't one of the steps
+            row.options.emplace_back(row.default_value, row.default_value);
+        }
+        rows.push_back(std::move(row));
+    }
+    return rows;
+}
+
+std::string Apply(std::string_view key, const std::optional<std::string>& value) {
+    const auto& entries = Entries();
+    const auto it = std::ranges::find_if(entries, [&](const Entry& e) { return e.key == key; });
+    if (it == entries.end()) {
+        return fmt::format("shadPS4 has no setting {}", key);
+    }
+    if (!value) {
+        return {};
+    }
+    const bool listed =
+        it->kind == Row::Kind::Toggle ||
+        std::ranges::any_of(it->options, [&](const auto& o) { return o.first == *value; });
+    if ((!listed && !it->free) || !it->set(*value)) {
+        return fmt::format("{} can't be {}", it->label, *value);
+    }
+    return {};
+}
+
+} // namespace Launcher::Settings

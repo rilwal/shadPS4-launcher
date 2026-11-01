@@ -1295,6 +1295,18 @@ set(EMULATOR src/emulator.cpp
              src/sdl_window.cpp
 )
 
+set(LAUNCHER src/launcher/library.cpp
+             src/launcher/library.h
+             src/launcher/plugin.cpp
+             src/launcher/plugin.h
+             src/launcher/session.cpp
+             src/launcher/session.h
+             src/launcher/settings.cpp
+             src/launcher/settings.h
+             src/launcher/trophies.cpp
+             src/launcher/trophies.h
+)
+
 # shadNet protobuf generation
 set(SHADNET_PROTO_OUT "${CMAKE_CURRENT_BINARY_DIR}/shadnet_proto_gen")
 file(MAKE_DIRECTORY "${SHADNET_PROTO_OUT}")
@@ -1333,6 +1345,7 @@ add_executable(shadps4
     ${SHADER_RECOMPILER}
     ${VIDEO_CORE}
     ${EMULATOR}
+    ${LAUNCHER}
     ${SHADNET}
     src/main.cpp
     src/emulator.cpp
@@ -1351,6 +1364,7 @@ target_link_libraries(shadps4 PRIVATE Freetype::Freetype)
 target_link_libraries(shadps4 PRIVATE libprotobuf)
 target_link_libraries(shadps4 PRIVATE ZArchive::zarchive)
 target_link_libraries(shadps4 PRIVATE zstd::libzstd)
+target_link_libraries(shadps4 PRIVATE launcher_client)
 target_include_directories(shadps4 PRIVATE "${SHADNET_PROTO_OUT}")
 
 if (${CMAKE_SYSTEM_NAME} STREQUAL "FreeBSD")
