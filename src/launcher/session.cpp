@@ -120,11 +120,16 @@ void ApplySettings() {
     if (g_session == nullptr) {
         return;
     }
+    // Again after shadPS4's own settings dialog reloads its config, which says nothing new
+    static std::atomic_flag applied;
+    const bool again = applied.test_and_set();
     for (const auto& [key, value] : g_values) {
         const auto error = Settings::Apply(key, value);
         if (!error.empty()) {
             LOG_ERROR(Frontend, "Launcher: {}", error);
-            lc_notify(g_session, "shadPS4 skipped a setting", error.c_str(), true);
+            if (!again) {
+                lc_notify(g_session, "shadPS4 skipped a setting", error.c_str(), true);
+            }
         } else {
             LOG_INFO(Frontend, "Launcher: {} = {}", key, value.value_or("(default)"));
         }

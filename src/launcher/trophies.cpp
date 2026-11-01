@@ -35,15 +35,6 @@ std::vector<fs::path> Roots(const fs::path& game) {
     return roots;
 }
 
-std::optional<fs::path> GameFile(const std::vector<fs::path>& roots, std::string_view rel) {
-    for (const auto& root : roots) {
-        if (auto path = Core::FileSys::ResolveGameFilePath(root, rel)) {
-            return path;
-        }
-    }
-    return std::nullopt;
-}
-
 std::string Grade(std::string_view ttype) {
     if (ttype == "P") {
         return "platinum";
@@ -116,8 +107,8 @@ std::vector<Trophy> List(const std::map<s32, std::string>& sets, s32 user_id, in
             const std::string_view ttype = node.attribute("ttype").value();
             t.grade = Grade(ttype);
             t.hidden = std::string_view(node.attribute("hidden").value()) == "yes";
-            // Base-game trophies count towards the platinum; the rest come with add-ons
-            t.dlc = ttype != "P" && node.attribute("pid").as_int(-1) == -1;
+            // Trophies of a group (gid) come with add-ons
+            t.dlc = node.attribute("gid").as_int(-1) >= 0;
             if (const auto it = unlocks.find(id); it != unlocks.end()) {
                 t.unlocked_at = it->second;
             }
@@ -131,9 +122,14 @@ std::map<s32, std::string> ExtractSets(const fs::path& game) {
     std::map<s32, std::string> sets;
     const auto roots = Roots(game);
 
-    const auto npbind_path = GameFile(roots, "sce_sys/npbind.dat");
+    std::optional<std::vector<u8>> npbind_data;
+    for (const auto& root : roots) {
+        if ((npbind_data = Core::FileSys::ReadGameFile(root, "sce_sys/npbind.dat"))) {
+            break;
+        }
+    }
     NPBindFile npbind;
-    if (!npbind_path || !npbind.Load(npbind_path->string())) {
+    if (!npbind_data || !npbind.Load(std::span<const u8>(*npbind_data))) {
         return sets;
     }
     const auto np_comm_ids = npbind.GetNpCommIds();

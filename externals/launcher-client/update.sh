@@ -1,6 +1,6 @@
 #!/bin/sh
 # Copies the launcher's client/ library here and records the commit it came from.
-# Usage: 3rdparty/launcher-client/update.sh /path/to/game-launcher
+# Usage: externals/launcher-client/update.sh /path/to/game-launcher
 set -eu
 src=${1:?usage: $0 /path/to/game-launcher}
 here=$(cd "$(dirname "$0")" && pwd)

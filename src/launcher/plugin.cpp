@@ -166,11 +166,22 @@ public:
         };
         rc.list_achievements = [](void* user, uint64_t game, const char* external_id,
                                   const char* game_dir) {
-            // Extracting trophy files takes a while: on the worker, so launches don't wait
+            // Extracting trophy files takes a while: on the worker, so launches don't wait. One
+            // job a game, however often it's asked for before the worker gets to it.
             auto* self = static_cast<Plugin*>(user);
+            {
+                std::scoped_lock lock(self->m_mutex);
+                if (!self->m_achievements_queued.insert(game).second) {
+                    return;
+                }
+            }
             std::string id = external_id != nullptr ? external_id : "";
             std::string dir = game_dir != nullptr ? game_dir : "";
             self->Post([self, game, id = std::move(id), dir = std::move(dir)] {
+                {
+                    std::scoped_lock lock(self->m_mutex);
+                    self->m_achievements_queued.erase(game);
+                }
                 self->OnListAchievements(game, id, dir);
             });
         };
@@ -198,7 +209,8 @@ public:
             m_cv.wait_for(lock, GAME_DIRS_WAIT, [this] { return m_have_game_dirs || m_closed; });
             m_started = true;
         }
-        Post([this] { SendLibrary(); });
+        // Ahead of the trophy lists asked for meanwhile, which need the games it finds
+        Post([this] { SendLibrary(); }, true);
 
         std::unique_lock lock(m_mutex);
         m_cv.wait(lock, [this] { return m_closed; });
@@ -211,9 +223,13 @@ public:
 private:
     // Scans and trophy lists run one at a time on the worker, in order, so the library sent last
     // is always the newest
-    void Post(std::function<void()> job) {
+    void Post(std::function<void()> job, bool first = false) {
         std::scoped_lock lock(m_mutex);
-        m_jobs.push_back(std::move(job));
+        if (first) {
+            m_jobs.push_front(std::move(job));
+        } else {
+            m_jobs.push_back(std::move(job));
+        }
         m_cv.notify_all();
     }
 
@@ -473,6 +489,7 @@ private:
     bool m_have_game_dirs = false;
     bool m_started = false; // The first library is queued
     std::deque<std::function<void()>> m_jobs;
+    std::set<uint64_t> m_achievements_queued; // Games with a trophy list job waiting
     std::thread m_worker;
     std::vector<fs::path> m_setting_dirs;
     std::set<std::string> m_own_keys;            // The rows marked runner, besides game_dirs
