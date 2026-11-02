@@ -170,8 +170,10 @@ class ImeDialogUi final : public ImGui::Layer {
     // was last asked for
     u32 launcher_osk = 0;
     u64 launcher_osk_generation = ~0ull;
-    // The launcher's last edit applied, and the text and cursor (in characters) it was last sent
+    // The launcher's last edit applied, and the edit, text and cursor (in characters) it was last
+    // sent
     u64 launcher_osk_seq = 0;
+    u64 launcher_osk_sent_seq = 0;
     std::string launcher_osk_text;
     u32 launcher_osk_cursor = 0;
 
