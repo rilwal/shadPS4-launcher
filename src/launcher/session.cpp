@@ -158,7 +158,6 @@ void MenuOpened(void*, bool opened) {
     }
     // Logged after the resume (Say holds lines while the guest is paused)
     if (!opened) {
-        WriteHeld();
         Say(Level::Info, "quick menu closed");
     }
     lc_paused(g_session, DebugState.IsGuestThreadsPaused());
