@@ -73,6 +73,9 @@ void DebugStateImpl::PauseGuestThreads() {
         waiting_submit_pause = false;
         should_show_frame_dump = true;
     }
+#ifndef _WIN32
+    Core::SetGuestSleep(true);
+#endif
     bool self_guest = false;
     ThreadID self_id = ThisThreadID();
     for (const auto& id : guest_threads) {
@@ -98,6 +101,9 @@ void DebugStateImpl::ResumeGuestThreads() {
 
     u64 delta_time = Libraries::Kernel::Dev::GetClock()->GetUptime() - pause_time;
     Libraries::Kernel::Dev::GetInitialPtc() += delta_time;
+#ifndef _WIN32
+    Core::SetGuestSleep(false);
+#endif
     for (const auto& id : guest_threads) {
         ResumeThread(id);
     }

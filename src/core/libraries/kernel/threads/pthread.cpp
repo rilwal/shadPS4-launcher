@@ -1228,6 +1228,7 @@ int PS4_SYSV_ABI posix_pthread_suspend_user_context_np(PthreadT thread) {
     if (thread->native_thr && thread != g_curthread) {
         pthread_t pthr = reinterpret_cast<pthread_t>(thread->native_thr->GetHandle());
         if (pthr) {
+            thread->suspend_requested.store(true, std::memory_order_release);
             pthread_kill(pthr, SIGSLEEP);
             for (int i = 0; i < 1000 && !thread->is_suspended_in_signal; ++i) {
                 std::this_thread::yield();
@@ -1269,6 +1270,7 @@ int PS4_SYSV_ABI posix_pthread_resume_user_context_np(PthreadT thread) {
     if (thread->native_thr && thread != g_curthread) {
         pthread_t pthr = reinterpret_cast<pthread_t>(thread->native_thr->GetHandle());
         if (pthr) {
+            thread->suspend_requested.store(false, std::memory_order_release);
             pthread_kill(pthr, SIGSLEEP);
         }
     }

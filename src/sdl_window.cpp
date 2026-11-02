@@ -27,6 +27,7 @@
 #include "input/controller.h"
 #include "input/input_handler.h"
 #include "input/input_mouse.h"
+#include "launcher/input.h"
 #include "sdl_window.h"
 #include "video_core/renderdoc.h"
 
@@ -209,6 +210,11 @@ void WindowSDL::WaitEvent() {
         return;
     }
 
+    // The launcher's menu or keyboard, shown in the game's frames, has the keys and mouse
+    if (Launcher::Input::Forward(window, event)) {
+        return;
+    }
+
     if (Libraries::Mouse::PushSDLEvent(event) || Libraries::Keyboard::PushSDLEvent(event)) {
         return;
     }
@@ -351,11 +357,13 @@ void WindowSDL::InitTimers() {
     SDL_AddTimer(33, Input::MousePolling, (void*)controllers[0]);
 }
 
+// Neither waits for the main thread: the presenter calls them for the launcher's menu, and may
+// do so as the game quits, when the main thread has stopped taking events
 void WindowSDL::RequestKeyboard() {
     if (keyboard_grab == 0) {
         SDL_RunOnMainThread(
             [](void* userdata) { SDL_StartTextInput(static_cast<SDL_Window*>(userdata)); }, window,
-            true);
+            false);
     }
     keyboard_grab++;
 }
@@ -366,7 +374,7 @@ void WindowSDL::ReleaseKeyboard() {
     if (keyboard_grab == 0) {
         SDL_RunOnMainThread(
             [](void* userdata) { SDL_StopTextInput(static_cast<SDL_Window*>(userdata)); }, window,
-            true);
+            false);
     }
 }
 

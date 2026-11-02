@@ -165,6 +165,35 @@ static void sent() {
 	check_sent(protocol::osk_open(2, empty), {"title", "placeholder", "max_length", "languages", "anchor"});
 	check_sent(protocol::osk_text(1, 4, "Anné", 4));
 	check_sent(protocol::osk_closed(1, LC_OSK_ACCEPTED));
+	lc_input arrow {};
+	arrow.kind = LC_INPUT_KEY;
+	arrow.key  = "ArrowUp";
+	arrow.down = true;
+	arrow.mods = LC_MOD_SHIFT;
+	check_sent(protocol::overlay_input(arrow));
+	{
+		// The rest of the kinds, as the launcher reads them
+		const auto input = [](const lc_input& in) {
+			const auto built = lc::json::parse(protocol::overlay_input(in).json);
+			return built ? std::optional<Value>(*built->find("input")) : std::nullopt;
+		};
+		lc_input text {};
+		text.kind = LC_INPUT_TEXT;
+		text.text = "é";
+		CHECK(input(text)->text("kind") == "text" && input(text)->text("text") == "é");
+		lc_input wheel {};
+		wheel.kind = LC_INPUT_WHEEL;
+		wheel.y    = -1.5f;
+		CHECK(input(wheel)->find("y")->as_int() == -150 && !input(wheel)->find("pixels")->as_bool());
+		lc_input button {};
+		button.kind   = LC_INPUT_BUTTON;
+		button.button = 1;
+		button.down   = true;
+		CHECK(input(button)->find("button")->as_uint() == 1 && input(button)->find("down")->as_bool());
+		// Nothing to say
+		lc_input nameless {};
+		CHECK(protocol::overlay_input(nameless).type.empty());
+	}
 
 	// A plugin runner's
 	lc_game portal {};

@@ -29,7 +29,7 @@ extern "C" {
 #endif
 
 /* The plugin API version the library speaks. */
-#define LC_PLUGIN_API 4
+#define LC_PLUGIN_API 5
 
 typedef struct lc_session lc_session;
 
