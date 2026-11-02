@@ -1,6 +1,8 @@
 #include "internal.h"
 #include "transport.h"
 
+#include <cstring>
+
 #ifndef _WIN32
 #include <unistd.h>
 #endif
@@ -21,6 +23,7 @@ struct SurfaceSet {
 	std::unique_ptr<lc_surface>              header;
 	uint32_t                                 width  = 0;
 	uint32_t                                 height = 0;
+	bool                                     lists  = false; // The buffers are draw-list slots
 };
 
 // A capture the emulator handed over, until it's sent
@@ -39,9 +42,11 @@ struct Capture {
 } // namespace
 
 struct lc_overlay {
-	explicit lc_overlay(lc_session& s): session(s) {}
+	lc_overlay(lc_session& s, bool lists): session(s), draws_lists(lists) {}
 
 	lc_session& session;
+	// LC_CAP_DRAW_LISTS: the shell sends draw lists, never buffers, and wants no capture
+	const bool draws_lists;
 
 	// Held while the service or its surfaces change, and while the capture goes out, so a capture
 	// never goes to a service whose surfaces the game isn't using yet
@@ -86,6 +91,14 @@ struct lc_overlay {
 	bool                           in_present   = false; // Between lc_overlay_begin and lc_overlay_end
 	bool                           capturing    = false; // This present was asked for the capture
 	uint32_t                       capture_menu = 0; // ...for this menu
+	// Draw lists: the current set's slots, mapped, and the list from the slot the game holds,
+	// copied out of it (so the shell can't change it under the emulator) and checked
+	std::vector<std::unique_ptr<transport::SlotMap>> slots;
+	std::vector<uint64_t>                            list_bytes;
+	lc_list                                          list {};
+	bool                                             has_list   = false;
+	bool                                             list_unread = false; // `mine` is a list not yet read
+	bool                                             list_fresh = false; // This present's list is new
 
 	void log(lc_log_level level, const char* format, ...) LC_PRINTF(3, 4) {
 		va_list args;
@@ -160,8 +173,8 @@ void lc_overlay::run_sender() {
 
 namespace lc {
 
-lc_overlay* overlay_create(lc_session& session) {
-	auto* overlay   = new lc_overlay(session);
+lc_overlay* overlay_create(lc_session& session, bool lists) {
+	auto* overlay   = new lc_overlay(session, lists);
 	overlay->sender = std::thread([overlay]() { overlay->run_sender(); });
 	return overlay;
 }
@@ -204,17 +217,22 @@ void overlay_on_surfaces(lc_overlay* overlay, const protocol::HostMessage& msg) 
 	std::string error;
 	if (msg.buffers.empty()) {
 		overlay->service.disconnect();
+	} else if (msg.lists != overlay->draws_lists) {
+		overlay->log(LC_LOG_ERROR, "overlay_surface: the launcher sent %s to a session that draws %s",
+		             msg.lists ? "draw lists" : "buffers", overlay->draws_lists ? "draw lists" : "buffers");
+		overlay->service.disconnect();
 	} else if (msg.service.empty()) {
 		overlay->log(LC_LOG_ERROR, "overlay_surface: no service to get the surfaces from");
 	} else if (!overlay->service.connect(msg.service, error)) {
 		overlay->log(LC_LOG_ERROR, "overlay_surface: %s", error.c_str());
-	} else if (auto surfaces = overlay->service.fetch(msg.buffers, msg.header, msg.width, msg.height, error)) {
+	} else if (auto surfaces = overlay->service.fetch(msg.buffers, msg.header, msg.width, msg.height, msg.lists, error)) {
 		set.buffers = std::move(surfaces->buffers);
 		set.header  = std::move(surfaces->header);
 		set.width   = msg.width;
 		set.height  = msg.height;
-		overlay->log(LC_LOG_INFO, "overlay: %zu buffer(s) of %ux%u, header %u", set.buffers.size(), set.width, set.height,
-		             msg.header);
+		set.lists   = msg.lists;
+		overlay->log(LC_LOG_INFO, "overlay: %zu %s for %ux%u, header %u", set.buffers.size(),
+		             msg.lists ? "draw-list slot(s)" : "buffer(s)", set.width, set.height, msg.header);
 	} else {
 		overlay->log(LC_LOG_ERROR, "overlay_surface: %s", error.c_str());
 		// No capture goes out without the surfaces, so the shell comes to the front instead
@@ -245,8 +263,139 @@ void overlay_on_menu(lc_overlay* overlay, bool opened) {
 	std::lock_guard lock(overlay->mutex);
 	overlay->drop_capture();
 	overlay->menu++;
-	// The next present copies the frame it paused on for the shell
-	overlay->capture_requested = opened;
+	// The next present copies the frame it paused on for the shell; one drawing lists draws the
+	// menu over its live frame, so the shell needs none
+	overlay->capture_requested = opened && !overlay->draws_lists;
+}
+
+// Maps the current set's draw-list slots. Under the mutex, on the present thread.
+bool map_slots(lc_overlay& o) {
+	for (const auto& buffer: o.current.buffers) {
+		auto slot = std::make_unique<transport::SlotMap>();
+		if (!slot->map(*buffer)) {
+			o.log(LC_LOG_ERROR, "overlay: draw-list slot %u is missing or not sealed", buffer->id);
+			o.slots.clear();
+			return false;
+		}
+		o.slots.push_back(std::move(slot));
+	}
+	return !o.slots.empty();
+}
+
+// Draw lists that can't be drawn: the overlay lets the shell's service go, as for surfaces the
+// emulator couldn't import, so the shell comes to the front instead of leaving a menu nobody
+// sees with the input. Without the mutex.
+void lists_failed(lc_overlay& o) {
+	o.broken   = true;
+	o.has_list = false;
+	{
+		std::lock_guard lock(o.mutex);
+		o.drop_capture();
+		o.drop_service = !o.pending;
+	}
+	o.cv.notify_all();
+}
+
+bool overlay_draws_lists(lc_overlay* overlay) {
+	return overlay->draws_lists;
+}
+
+void overlay_lists_failed(lc_overlay* overlay) {
+	if (!overlay->broken) {
+		overlay->log(LC_LOG_ERROR, "overlay: the emulator can't draw the launcher's menu; it comes to the front instead");
+		lists_failed(*overlay);
+	}
+}
+
+void overlay_gpu_times(lc_overlay* overlay, float render, float glass, float draw, float composite) {
+	auto& o = *overlay;
+	if (!o.current.lists || !o.header.mapped()) {
+		return;
+	}
+	auto* words = o.header.lock();
+	if (words == nullptr) {
+		return;
+	}
+	// A sequence lock: the count is odd while the times are written, so the shell reads all four
+	// from one present or tries again
+	auto&       count  = words[transport::HeaderMap::GPU_COUNT];
+	const float times[4] = {render, glass, draw, composite};
+	count.fetch_add(1, std::memory_order_relaxed);
+	std::atomic_thread_fence(std::memory_order_release);
+	for (size_t i = 0; i < 4; i++) {
+		uint32_t bits = 0;
+		std::memcpy(&bits, &times[i], sizeof(bits));
+		words[transport::HeaderMap::GPU_TIMES + i].store(bits, std::memory_order_relaxed);
+	}
+	count.fetch_add(1, std::memory_order_release);
+	o.header.unlock();
+}
+
+// Copies the list in the slot the game holds out of it, and checks it. False if the slot can't be
+// read just now (it's read again next present); a list that doesn't read breaks the overlay.
+bool read_list(lc_overlay& o) {
+	size_t         size  = 0;
+	const uint8_t* bytes = o.slots[o.mine]->lock(size);
+	if (bytes == nullptr) {
+		return false;
+	}
+	// The bytes the shell says it used, if the slot holds that many
+	uint32_t used = 0;
+	if (size >= 12) {
+		std::memcpy(&used, bytes + 8, 4);
+	}
+	const bool fits = used != 0 && used <= size;
+	if (fits) {
+		o.list_bytes.resize((used + 7) / 8);
+		std::memcpy(o.list_bytes.data(), bytes, used);
+	}
+	o.slots[o.mine]->unlock();
+	if (!fits || !lc_list_read(o.list_bytes.data(), used, &o.list)) {
+		o.log(LC_LOG_ERROR, "overlay: the launcher sent a draw list this library can't read; the menu isn't drawn");
+		lists_failed(o);
+		return true;
+	}
+	o.has_list = true;
+	// So a new set of slots waits for its first list before replacing this one (pending_drawn)
+	o.has_content = true;
+	return true;
+}
+
+// The draw-list side of lc_overlay_begin: takes the shell's newest list, if it has one, and hands
+// over the list the game holds. Each list is taken whole, and read before another is taken, so
+// the emulator sees every list's changes once, in order.
+void begin_lists(lc_overlay& o, bool again, lc_frame* frame) {
+	if (!again && o.visible && !o.broken && o.header.mapped()) {
+		o.list_fresh = false;
+		if (!o.list_unread) {
+			if (auto* words = o.header.lock(); words != nullptr) {
+				const bool newer = words[0].load(std::memory_order_acquire) == transport::HeaderMap::MAGIC &&
+				                   (words[1].load(std::memory_order_acquire) & transport::HeaderMap::NEWER) != 0;
+				if (newer) {
+					// Nothing reads the game's slot once its list is copied out: give it straight back
+					const uint32_t got = words[1].exchange(o.mine, std::memory_order_acq_rel) & ~transport::HeaderMap::NEWER;
+					if (got >= o.slots.size()) {
+						o.log(LC_LOG_ERROR, "overlay: the launcher published slot %u of %zu", got, o.slots.size());
+						o.header.unlock();
+						lists_failed(o);
+						return;
+					} else {
+						o.mine        = got;
+						o.list_unread = true;
+					}
+				}
+				o.header.unlock();
+			}
+		}
+		if (o.list_unread && !o.broken && read_list(o)) {
+			o.list_unread = false;
+			o.list_fresh  = o.has_list;
+		}
+	}
+	if (o.visible && !o.broken && o.has_list) {
+		frame->list       = &o.list;
+		frame->list_fresh = o.list_fresh;
+	}
 }
 
 // Whether to take the pending set now. While the menu shows, its last frame stays up until the
@@ -339,6 +488,18 @@ void lc_overlay_begin(lc_overlay* overlay, uint64_t completed, lc_frame* frame) 
 				o.log(LC_LOG_ERROR, "overlay: header %u is missing, too small or not sealed", o.current.header->id);
 				o.broken = true;
 			}
+			o.slots.clear();
+			o.has_list    = false;
+			o.list_unread = false;
+			o.list_fresh  = false;
+			if (o.current.lists) {
+				o.broken = o.broken || o.current.header == nullptr || !map_slots(o);
+				// Nothing for the emulator to import, so nobody else says they can't be used
+				if (o.broken) {
+					o.drop_service = true;
+					wake           = true;
+				}
+			}
 		}
 		if (o.waiting != nullptr && completed >= o.waiting->serial) {
 			o.ready_capture = std::move(o.waiting);
@@ -365,12 +526,14 @@ void lc_overlay_begin(lc_overlay* overlay, uint64_t completed, lc_frame* frame) 
 
 	frame->generation   = o.generation;
 	frame->buffers      = o.current_ptrs.data();
-	frame->buffer_count = o.broken ? 0 : static_cast<uint32_t>(o.current_ptrs.size());
+	frame->buffer_count = o.broken || o.current.lists ? 0 : static_cast<uint32_t>(o.current_ptrs.size());
 	frame->width        = o.current.width;
 	frame->height       = o.current.height;
 
 	const auto count = frame->buffer_count;
-	if (o.visible && count != 0) {
+	if (o.current.lists) {
+		begin_lists(o, again, frame);
+	} else if (o.visible && count != 0) {
 		if (!o.header.mapped()) {
 			// Without a header the shell may redraw the one buffer at any time
 			frame->draw  = 0;

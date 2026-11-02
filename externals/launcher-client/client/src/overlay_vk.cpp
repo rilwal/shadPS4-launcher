@@ -11,13 +11,10 @@
 // is imported as a VkBuffer and copied into an image of the helper's own when the menu is drawn
 // (a few hundred microseconds at 4K); the capture is an IOSurface of the helper's own, copied into
 // the same way.
-#ifndef VK_NO_PROTOTYPES
-#define VK_NO_PROTOTYPES
-#endif
-#include "launcher_overlay_vk.h"
-
 #include "internal.h"
+#include "list_vk.h"
 #include "overlay_vk_shaders.h"
+#include "vk_internal.h"
 
 #include <algorithm>
 #include <cstdio>
@@ -35,7 +32,100 @@
 #define LC_VK_HOST_SURFACES 1
 #endif
 
+namespace lc::vk {
+
+const char* Fns::load(const lc_vk_info& info, bool shares) {
+	auto get_device = info.get_device_proc_addr;
+	if (get_device == nullptr) {
+		get_device = reinterpret_cast<PFN_vkGetDeviceProcAddr>(info.get_instance_proc_addr(info.instance, "vkGetDeviceProcAddr"));
+	}
+	if (get_device == nullptr) {
+		return "vkGetDeviceProcAddr";
+	}
+#define LC_VK_LOAD_INSTANCE(name)                                                                              \
+	if ((name = reinterpret_cast<PFN_vk##name>(info.get_instance_proc_addr(info.instance, "vk" #name))) == nullptr) { \
+		return "vk" #name;                                                                                     \
+	}
+#define LC_VK_LOAD_DEVICE(name)                                                                       \
+	if ((name = reinterpret_cast<PFN_vk##name>(get_device(info.device, "vk" #name))) == nullptr) { \
+		return "vk" #name;                                                                            \
+	}
+	LC_VK_INSTANCE_FNS(LC_VK_LOAD_INSTANCE)
+	LC_VK_DEVICE_FNS(LC_VK_LOAD_DEVICE)
+	if (shares) {
+#if defined(__linux__)
+		LC_VK_LINUX_FNS(LC_VK_LOAD_DEVICE)
+#endif
+#if defined(LC_VK_HOST_SURFACES)
+		LC_VK_HOST_INSTANCE_FNS(LC_VK_LOAD_INSTANCE)
+		LC_VK_HOST_FNS(LC_VK_LOAD_DEVICE)
+#endif
+	}
+#undef LC_VK_LOAD_INSTANCE
+#undef LC_VK_LOAD_DEVICE
+	return nullptr;
+}
+
+void barrier(const Fns& vk, VkCommandBuffer command, VkImage image, VkImageLayout from, VkImageLayout to, VkAccessFlags src_access,
+             VkAccessFlags dst_access, VkPipelineStageFlags src_stage, VkPipelineStageFlags dst_stage, uint32_t src_queue, uint32_t dst_queue,
+             uint32_t levels) {
+	VkImageMemoryBarrier b {VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER};
+	b.srcAccessMask       = src_access;
+	b.dstAccessMask       = dst_access;
+	b.oldLayout           = from;
+	b.newLayout           = to;
+	b.srcQueueFamilyIndex = src_queue;
+	b.dstQueueFamilyIndex = dst_queue;
+	b.image               = image;
+	b.subresourceRange    = {VK_IMAGE_ASPECT_COLOR_BIT, 0, levels, 0, 1};
+	vk.CmdPipelineBarrier(command, src_stage, dst_stage, 0, 0, nullptr, 0, nullptr, 1, &b);
+}
+
+void memory_barrier(const Fns& vk, VkCommandBuffer command, VkAccessFlags src_access, VkAccessFlags dst_access, VkPipelineStageFlags src_stage,
+                    VkPipelineStageFlags dst_stage) {
+	VkMemoryBarrier b {VK_STRUCTURE_TYPE_MEMORY_BARRIER};
+	b.srcAccessMask = src_access;
+	b.dstAccessMask = dst_access;
+	vk.CmdPipelineBarrier(command, src_stage, dst_stage, 0, 1, &b, 0, nullptr, 0, nullptr);
+}
+
+bool holds_linear(VkFormat format) {
+	switch (format) {
+		case VK_FORMAT_R8G8B8A8_SRGB:
+		case VK_FORMAT_B8G8R8A8_SRGB:
+		case VK_FORMAT_A8B8G8R8_SRGB_PACK32:
+		case VK_FORMAT_R8G8B8_SRGB:
+		case VK_FORMAT_B8G8R8_SRGB:
+		case VK_FORMAT_R16G16B16A16_SFLOAT:
+		case VK_FORMAT_R32G32B32A32_SFLOAT:
+		case VK_FORMAT_B10G11R11_UFLOAT_PACK32: return true;
+		default: return false;
+	}
+}
+
+uint32_t memory_type(const VkPhysicalDeviceMemoryProperties& props, uint32_t bits, VkMemoryPropertyFlags want) {
+	for (uint32_t i = 0; i < props.memoryTypeCount; i++) {
+		if ((bits & (1u << i)) != 0 && (props.memoryTypes[i].propertyFlags & want) == want) {
+			return i;
+		}
+	}
+	for (uint32_t i = 0; i < 32; i++) {
+		if ((bits & (1u << i)) != 0) {
+			return i;
+		}
+	}
+	return 0;
+}
+
+} // namespace lc::vk
+
 namespace {
+
+using lc::vk::barrier;
+using lc::vk::Fns;
+using lc::vk::holds_linear;
+using lc::vk::memory_barrier;
+using lc::vk::round_up;
 
 constexpr VkFormat FORMAT                = VK_FORMAT_B8G8R8A8_UNORM;
 [[maybe_unused]] constexpr uint64_t DRM_FORMAT_MOD_LINEAR = 0;
@@ -52,146 +142,6 @@ const char* const DEVICE_EXTENSIONS[] = {
     VK_KHR_EXTERNAL_MEMORY_EXTENSION_NAME,
 #endif
 };
-
-// Whether an image of `format` holds linear values, which the shader reads and writes: an sRGB
-// format, which the hardware encodes, or a float one (an HDR swapchain's, scRGB). The shell's
-// buffers and the capture hold sRGB-encoded values. A 10-bit UNORM swapchain holds encoded ones,
-// like an 8-bit UNORM one. Values over 1 (HDR highlights) clip in the capture.
-bool holds_linear(VkFormat format) {
-	switch (format) {
-		case VK_FORMAT_R8G8B8A8_SRGB:
-		case VK_FORMAT_B8G8R8A8_SRGB:
-		case VK_FORMAT_A8B8G8R8_SRGB_PACK32:
-		case VK_FORMAT_R8G8B8_SRGB:
-		case VK_FORMAT_B8G8R8_SRGB:
-		case VK_FORMAT_R16G16B16A16_SFLOAT:
-		case VK_FORMAT_R32G32B32A32_SFLOAT:
-		case VK_FORMAT_B10G11R11_UFLOAT_PACK32: return true;
-		default: return false;
-	}
-}
-
-// The functions the helper uses, from the emulator's loader
-struct Fns {
-#define LC_VK_INSTANCE_FNS(X)                    \
-	X(GetPhysicalDeviceMemoryProperties)         \
-	X(GetPhysicalDeviceFormatProperties)         \
-	X(GetPhysicalDeviceImageFormatProperties2)
-#define LC_VK_DEVICE_FNS(X)                     \
-	X(CreateImage)                              \
-	X(DestroyImage)                             \
-	X(GetImageMemoryRequirements)               \
-	X(GetImageSubresourceLayout)                \
-	X(AllocateMemory)                           \
-	X(FreeMemory)                               \
-	X(BindImageMemory)                          \
-	X(CreateImageView)                          \
-	X(DestroyImageView)                         \
-	X(CreateSampler)                            \
-	X(DestroySampler)                           \
-	X(CreateDescriptorSetLayout)                \
-	X(DestroyDescriptorSetLayout)               \
-	X(CreateDescriptorPool)                     \
-	X(DestroyDescriptorPool)                    \
-	X(AllocateDescriptorSets)                   \
-	X(UpdateDescriptorSets)                     \
-	X(CreatePipelineLayout)                     \
-	X(DestroyPipelineLayout)                    \
-	X(CreateShaderModule)                       \
-	X(DestroyShaderModule)                      \
-	X(CreateGraphicsPipelines)                  \
-	X(DestroyPipeline)                          \
-	X(CmdPipelineBarrier)                       \
-	X(CmdBlitImage)                             \
-	X(CmdCopyImage)                             \
-	X(CmdBindPipeline)                          \
-	X(CmdBindDescriptorSets)                    \
-	X(CmdPushConstants)                         \
-	X(CmdSetViewport)                           \
-	X(CmdSetScissor)                            \
-	X(CmdDraw)
-#define LC_VK_LINUX_FNS(X) \
-	X(GetMemoryFdKHR)      \
-	X(GetMemoryFdPropertiesKHR)
-#define LC_VK_HOST_INSTANCE_FNS(X)     \
-	X(GetPhysicalDeviceProperties2)    \
-	X(GetPhysicalDeviceExternalBufferProperties)
-#define LC_VK_HOST_FNS(X)                  \
-	X(CreateBuffer)                        \
-	X(DestroyBuffer)                       \
-	X(GetBufferMemoryRequirements)         \
-	X(BindBufferMemory)                    \
-	X(GetMemoryHostPointerPropertiesEXT)   \
-	X(CmdCopyBufferToImage)                \
-	X(CmdCopyImageToBuffer)
-
-#define LC_VK_DECLARE(name) PFN_vk##name name = nullptr;
-	LC_VK_INSTANCE_FNS(LC_VK_DECLARE)
-	LC_VK_DEVICE_FNS(LC_VK_DECLARE)
-	LC_VK_LINUX_FNS(LC_VK_DECLARE)
-	LC_VK_HOST_INSTANCE_FNS(LC_VK_DECLARE)
-	LC_VK_HOST_FNS(LC_VK_DECLARE)
-#undef LC_VK_DECLARE
-
-	// The name of the first one missing, or nullptr
-	const char* load(const lc_vk_info& info) {
-		auto get_device = info.get_device_proc_addr;
-		if (get_device == nullptr) {
-			get_device = reinterpret_cast<PFN_vkGetDeviceProcAddr>(info.get_instance_proc_addr(info.instance, "vkGetDeviceProcAddr"));
-		}
-		if (get_device == nullptr) {
-			return "vkGetDeviceProcAddr";
-		}
-#define LC_VK_LOAD_INSTANCE(name)                                                                              \
-	if ((name = reinterpret_cast<PFN_vk##name>(info.get_instance_proc_addr(info.instance, "vk" #name))) == nullptr) { \
-		return "vk" #name;                                                                                     \
-	}
-#define LC_VK_LOAD_DEVICE(name)                                                                       \
-	if ((name = reinterpret_cast<PFN_vk##name>(get_device(info.device, "vk" #name))) == nullptr) { \
-		return "vk" #name;                                                                            \
-	}
-		LC_VK_INSTANCE_FNS(LC_VK_LOAD_INSTANCE)
-		LC_VK_DEVICE_FNS(LC_VK_LOAD_DEVICE)
-#if defined(__linux__)
-		LC_VK_LINUX_FNS(LC_VK_LOAD_DEVICE)
-#endif
-#if defined(LC_VK_HOST_SURFACES)
-		LC_VK_HOST_INSTANCE_FNS(LC_VK_LOAD_INSTANCE)
-		LC_VK_HOST_FNS(LC_VK_LOAD_DEVICE)
-#endif
-#undef LC_VK_LOAD_INSTANCE
-#undef LC_VK_LOAD_DEVICE
-		return nullptr;
-	}
-};
-
-void barrier(const Fns& vk, VkCommandBuffer command, VkImage image, VkImageLayout from, VkImageLayout to, VkAccessFlags src_access,
-             VkAccessFlags dst_access, VkPipelineStageFlags src_stage, VkPipelineStageFlags dst_stage,
-             uint32_t src_queue = VK_QUEUE_FAMILY_IGNORED, uint32_t dst_queue = VK_QUEUE_FAMILY_IGNORED) {
-	VkImageMemoryBarrier b {VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER};
-	b.srcAccessMask       = src_access;
-	b.dstAccessMask       = dst_access;
-	b.oldLayout           = from;
-	b.newLayout           = to;
-	b.srcQueueFamilyIndex = src_queue;
-	b.dstQueueFamilyIndex = dst_queue;
-	b.image               = image;
-	b.subresourceRange    = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
-	vk.CmdPipelineBarrier(command, src_stage, dst_stage, 0, 0, nullptr, 0, nullptr, 1, &b);
-}
-
-// Makes writes to memory that other processes share visible, one way or the other
-void memory_barrier(const Fns& vk, VkCommandBuffer command, VkAccessFlags src_access, VkAccessFlags dst_access, VkPipelineStageFlags src_stage,
-                    VkPipelineStageFlags dst_stage) {
-	VkMemoryBarrier b {VK_STRUCTURE_TYPE_MEMORY_BARRIER};
-	b.srcAccessMask = src_access;
-	b.dstAccessMask = dst_access;
-	vk.CmdPipelineBarrier(command, src_stage, dst_stage, 0, 1, &b, 0, nullptr, 0, nullptr);
-}
-
-VkDeviceSize round_up(VkDeviceSize value, VkDeviceSize alignment) {
-	return alignment == 0 ? value : (value + alignment - 1) / alignment * alignment;
-}
 
 // A BGRA8 image: one of the shell's buffers (imported), the capture (exported), or the capture's
 // staging image. On macOS a shell's buffer is an image of the helper's own plus the IOSurface's
@@ -265,6 +215,12 @@ struct lc_vk {
 	lc_overlay* overlay = nullptr;
 	lc_vk_info  info {};
 	Fns         vk;
+
+	// Draw lists (LC_CAP_DRAW_LISTS): drawn by `player` into a canvas, which lc_vk_draw lays over
+	// the frame as it does a shell's buffer; nothing is shared with the shell
+	bool                 lists = false;
+	lc::vk::ListPlayer   player;
+	VkDescriptorSet      list_set = VK_NULL_HANDLE; // The canvas's, this present
 
 	VkPhysicalDeviceMemoryProperties memory_props {};
 	VkDeviceSize                     host_alignment = 0; // minImportedHostPointerAlignment, on macOS
@@ -935,7 +891,14 @@ struct lc_vk {
 		return pipeline;
 	}
 
+	// The player can't draw the lists: the shell comes to the front instead
+	void lists_failed() {
+		list_set = VK_NULL_HANDLE;
+		lc::overlay_lists_failed(overlay);
+	}
+
 	void destroy() {
+		player.destroy();
 		free_set(current);
 		free_retired(0, true);
 		capture.destroy(vk, info.device);
@@ -982,21 +945,31 @@ lc_vk* lc_vk_create(lc_overlay* overlay, const lc_vk_info* info, char* error, si
 		}
 		return nullptr;
 	};
-#if !defined(__linux__) && !defined(LC_VK_HOST_SURFACES)
-	(void)overlay;
-	(void)info;
-	return fail(nullptr, "the Vulkan helper has no backend on this platform yet");
-#else
 	if (overlay == nullptr || info == nullptr || info->device == VK_NULL_HANDLE || info->get_instance_proc_addr == nullptr) {
 		return fail(nullptr, "no overlay or no device");
 	}
+	const bool lists = lc::overlay_draws_lists(overlay);
+#if !defined(__linux__) && !defined(LC_VK_HOST_SURFACES)
+	if (!lists) {
+		return fail(nullptr, "the Vulkan helper can't share the launcher's buffers on this platform (draw lists can be drawn)");
+	}
+#endif
 	auto* vk    = new lc_vk();
 	vk->overlay = overlay;
 	vk->info    = *info;
-	if (const char* missing = vk->vk.load(*info)) {
-		return fail(vk, std::string("this device has no ") + missing + " (enable lc_vk_device_extensions)");
+	vk->lists   = lists;
+	if (const char* missing = vk->vk.load(*info, !lists)) {
+		return fail(vk, std::string("this device has no ") + missing + (lists ? "" : " (enable lc_vk_device_extensions)"));
 	}
 	vk->vk.GetPhysicalDeviceMemoryProperties(info->physical_device, &vk->memory_props);
+	if (lists) {
+		std::string why;
+		const auto  log = [vk](lc_log_level level, const std::string& line) { vk->log(level, "%s", line.c_str()); };
+		if (!vk->create_shared() || !vk->player.create(vk->vk, *info, log, vk->set_layout, vk->sampler, why)) {
+			return fail(vk, why.empty() ? "creating the overlay's sampler, layouts or shaders failed" : why);
+		}
+		return vk;
+	}
 #if defined(LC_VK_HOST_SURFACES)
 	VkPhysicalDeviceExternalMemoryHostPropertiesEXT host_props {VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_EXTERNAL_MEMORY_HOST_PROPERTIES_EXT};
 	VkPhysicalDeviceProperties2                     props {VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2};
@@ -1037,7 +1010,6 @@ lc_vk* lc_vk_create(lc_overlay* overlay, const lc_vk_info* info, char* error, si
 		return fail(vk, "creating the overlay's sampler, layouts or shaders failed");
 	}
 	return vk;
-#endif
 }
 
 void lc_vk_destroy(lc_vk* vk) {
@@ -1047,7 +1019,7 @@ void lc_vk_destroy(lc_vk* vk) {
 	}
 }
 
-void lc_vk_begin(lc_vk* vk, uint64_t completed, VkExtent2D window, lc_vk_frame* out) {
+void lc_vk_begin(lc_vk* vk, uint64_t completed, VkExtent2D window, bool new_frame, lc_vk_frame* out) {
 	if (out != nullptr) {
 		*out = {};
 	}
@@ -1056,6 +1028,26 @@ void lc_vk_begin(lc_vk* vk, uint64_t completed, VkExtent2D window, lc_vk_frame* 
 	}
 	lc_frame frame {};
 	lc_overlay_begin(vk->overlay, completed, &frame);
+
+	if (vk->lists) {
+		vk->list_set = VK_NULL_HANDLE;
+		vk->acquired = false;
+		if (!vk->player.begin(completed, frame.generation, frame.list, frame.list_fresh, new_frame)) {
+			vk->lists_failed();
+		}
+		// For the shell's frame timings
+		if (lc::vk::GpuTimes t; vk->player.gpu_times(t)) {
+			lc::overlay_gpu_times(vk->overlay, t.render, t.glass, t.draw, t.composite);
+		}
+		if (window.width != 0 && window.height != 0) {
+			vk->window = window;
+			lc_overlay_view(vk->overlay, window.width, window.height);
+		}
+		if (out != nullptr) {
+			out->capture = vk->player.wants_frame();
+		}
+		return;
+	}
 
 	if (frame.generation != vk->generation) {
 		vk->generation = frame.generation;
@@ -1088,6 +1080,13 @@ void lc_vk_begin(lc_vk* vk, uint64_t completed, VkExtent2D window, lc_vk_frame* 
 }
 
 void lc_vk_capture(lc_vk* vk, VkCommandBuffer command, VkImage source, VkFormat format, VkExtent2D extent) {
+	if (vk != nullptr && vk->lists) {
+		// For the list's glass, not the shell
+		if (!vk->player.capture(command, source, format, extent)) {
+			vk->lists_failed();
+		}
+		return;
+	}
 	if (vk == nullptr || !vk->capture_wanted) {
 		return;
 	}
@@ -1143,6 +1142,16 @@ void lc_vk_capture(lc_vk* vk, VkCommandBuffer command, VkImage source, VkFormat 
 }
 
 VkImageView lc_vk_acquire(lc_vk* vk, VkCommandBuffer command) {
+	if (vk != nullptr && vk->lists) {
+		VkImageView view = VK_NULL_HANDLE;
+		bool        ok   = true;
+		vk->list_set     = vk->player.prepare(command, &view, ok);
+		if (!ok) {
+			vk->lists_failed();
+		}
+		vk->acquired = vk->list_set != VK_NULL_HANDLE;
+		return vk->acquired ? view : VK_NULL_HANDLE;
+	}
 	if (vk == nullptr || vk->draw < 0) {
 		return VK_NULL_HANDLE;
 	}
@@ -1190,21 +1199,34 @@ void lc_vk_draw(lc_vk* vk, VkCommandBuffer command, VkRenderPass render_pass, ui
 	if (pipeline == VK_NULL_HANDLE) {
 		return;
 	}
-	const auto&      f   = vk->vk;
-	const Image&     buf = vk->current.buffers[static_cast<size_t>(vk->draw)];
+	const auto&           f   = vk->vk;
+	const VkDescriptorSet set = vk->lists ? vk->list_set : vk->current.buffers[static_cast<size_t>(vk->draw)].set;
 	const VkViewport viewport {0, 0, static_cast<float>(vk->window.width), static_cast<float>(vk->window.height), 0, 1};
 	const VkRect2D   scissor {{0, 0}, vk->window};
 	const uint32_t   decode = holds_linear(format) ? 1 : 0;
 	f.CmdBindPipeline(command, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline);
-	f.CmdBindDescriptorSets(command, VK_PIPELINE_BIND_POINT_GRAPHICS, vk->layout, 0, 1, &buf.set, 0, nullptr);
+	f.CmdBindDescriptorSets(command, VK_PIPELINE_BIND_POINT_GRAPHICS, vk->layout, 0, 1, &set, 0, nullptr);
 	f.CmdPushConstants(command, vk->layout, VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(decode), &decode);
 	f.CmdSetViewport(command, 0, 1, &viewport);
 	f.CmdSetScissor(command, 0, 1, &scissor);
+	if (vk->lists) {
+		vk->player.stamp_composite(command, true);
+	}
 	f.CmdDraw(command, 3, 1, 0, 0);
+	if (vk->lists) {
+		vk->player.stamp_composite(command, false);
+	}
 }
 
 void lc_vk_end(lc_vk* vk, uint64_t serial) {
 	if (vk == nullptr) {
+		return;
+	}
+	if (vk->lists) {
+		vk->player.end(serial);
+		lc_overlay_end(vk->overlay, serial, vk->acquired);
+		vk->acquired = false;
+		vk->list_set = VK_NULL_HANDLE;
 		return;
 	}
 	if (vk->acquired) {

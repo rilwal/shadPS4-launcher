@@ -77,7 +77,7 @@ bool Service::connected() const {
 }
 
 std::optional<Surfaces> Service::fetch(const std::vector<uint32_t>& buffer_ids, uint32_t header_id, uint32_t width, uint32_t height,
-                                       std::string& error) {
+                                       bool lists, std::string& error) {
 	const size_t count = buffer_ids.size() + (header_id != 0 ? 1 : 0);
 	if (m_port == MACH_PORT_NULL || count == 0 || count > MAX_PORTS) {
 		error = m_port == MACH_PORT_NULL ? "no service" : "wrong number of surfaces";
@@ -121,10 +121,12 @@ std::optional<Surfaces> Service::fetch(const std::vector<uint32_t>& buffer_ids, 
 				}
 				break;
 			}
-			// The buffers (not the header) are what the emulator imports at the size overlay_surface gave
+			// The buffers (not the header) are what the emulator imports at the size overlay_surface gave;
+			// draw-list slots are bytes, whatever size they are
 			const bool header = header_id != 0 && i == 0;
-			if (!header && (IOSurfaceGetPixelFormat(ref) != PIXEL_FORMAT_BGRA || IOSurfaceGetWidth(ref) != width ||
-			                IOSurfaceGetHeight(ref) != height)) {
+			if (!header && !lists &&
+			    (IOSurfaceGetPixelFormat(ref) != PIXEL_FORMAT_BGRA || IOSurfaceGetWidth(ref) != width ||
+			     IOSurfaceGetHeight(ref) != height)) {
 				error = "IOSurface " + std::to_string(want) + " isn't " + std::to_string(width) + "x" + std::to_string(height) + " BGRA";
 				CFRelease(ref);
 				break;
@@ -231,6 +233,41 @@ std::atomic<uint32_t>* HeaderMap::lock() {
 void HeaderMap::unlock() {
 	if (m_surface != nullptr) {
 		IOSurfaceUnlock(static_cast<IOSurfaceRef>(m_surface), kIOSurfaceLockAvoidSync, nullptr);
+	}
+}
+
+bool SlotMap::map(const lc_surface& surface) {
+	unmap();
+	auto* ref = static_cast<IOSurfaceRef>(surface.iosurface);
+	if (ref == nullptr || IOSurfaceGetAllocSize(ref) == 0) {
+		return false;
+	}
+	CFRetain(ref);
+	m_surface = ref;
+	return true;
+}
+
+void SlotMap::unmap() {
+	if (m_surface != nullptr) {
+		CFRelease(m_surface);
+		m_surface = nullptr;
+	}
+}
+
+// Locked for reading while the game reads it, as an IOSurface's memory has to be
+const uint8_t* SlotMap::lock(size_t& size) {
+	size      = 0;
+	auto* ref = static_cast<IOSurfaceRef>(m_surface);
+	if (ref == nullptr || IOSurfaceLock(ref, kIOSurfaceLockReadOnly | kIOSurfaceLockAvoidSync, nullptr) != kIOReturnSuccess) {
+		return nullptr;
+	}
+	size = IOSurfaceGetAllocSize(ref);
+	return static_cast<const uint8_t*>(IOSurfaceGetBaseAddress(ref));
+}
+
+void SlotMap::unlock() {
+	if (m_surface != nullptr) {
+		IOSurfaceUnlock(static_cast<IOSurfaceRef>(m_surface), kIOSurfaceLockReadOnly | kIOSurfaceLockAvoidSync, nullptr);
 	}
 }
 

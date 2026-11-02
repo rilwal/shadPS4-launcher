@@ -48,6 +48,10 @@ enum {
 	/* With LC_CAP_COMPOSITED_OVERLAY: the game's text input can go on the shell's on-screen
 	   keyboard, drawn into the game's frames, instead of the emulator's own (lc_osk_open). */
 	LC_CAP_OSK = 1u << 5,
+	/* With LC_CAP_COMPOSITED_OVERLAY: the emulator draws the shell's menu itself from draw lists
+	   (launcher_list.h, lc_frame.list), over its live frame, instead of drawing the buffers the
+	   shell drew. The shell then sends lists only, and wants no capture. */
+	LC_CAP_DRAW_LISTS = 1u << 6,
 };
 
 typedef enum lc_log_level {

@@ -21,6 +21,7 @@
 
 inline constexpr uint32_t MAGIC = 0x4C4F5632;
 inline constexpr uint32_t NEWER = 1u << 31;
+inline constexpr size_t   HEADER = 64; // The header's bytes: the trade's words, then the game's GPU times
 
 inline int make_memfd(size_t size, bool sealed = false) {
 	const int fd = ::memfd_create("lc-test", MFD_CLOEXEC | (sealed ? MFD_ALLOW_SEALING : 0u));
@@ -46,8 +47,8 @@ public:
 		::bind(m_listen, reinterpret_cast<sockaddr*>(&addr), static_cast<socklen_t>(offsetof(sockaddr_un, sun_path) + 1 + m_name.size()));
 		::listen(m_listen, 4);
 
-		m_header_fd = make_memfd(16, sealed_header);
-		m_header    = static_cast<std::atomic<uint32_t>*>(::mmap(nullptr, 16, PROT_READ | PROT_WRITE, MAP_SHARED, m_header_fd, 0));
+		m_header_fd = make_memfd(HEADER, sealed_header);
+		m_header    = static_cast<std::atomic<uint32_t>*>(::mmap(nullptr, HEADER, PROT_READ | PROT_WRITE, MAP_SHARED, m_header_fd, 0));
 		m_header[0] = MAGIC;
 		m_header[1] = 1;
 		if (buffers.empty()) {
@@ -67,7 +68,7 @@ public:
 			::shutdown(m_conn, SHUT_RDWR);
 		}
 		m_thread.join();
-		::munmap(m_header, 16);
+		::munmap(m_header, HEADER);
 		::close(m_header_fd);
 		for (int fd: m_buffers) {
 			if (fd >= 0) {
@@ -85,6 +86,16 @@ public:
 	// The shell publishes `buffer`: swaps it into the exchange word and takes what was there
 	uint32_t publish(uint32_t buffer) { return m_header[1].exchange(buffer | NEWER) & ~NEWER; }
 	uint32_t word() const { return m_header[1].load(); }
+	// The GPU times the game wrote (render, glass, draw, composite ms), and how many times it did
+	// (the sequence lock's count, two a write)
+	uint32_t gpu_times(float (&times)[4]) const {
+		const uint32_t count = m_header[4].load(std::memory_order_acquire);
+		for (size_t i = 0; i < 4; i++) {
+			const uint32_t bits = m_header[5 + i].load(std::memory_order_relaxed);
+			std::memcpy(&times[i], &bits, sizeof(bits));
+		}
+		return count / 2;
+	}
 
 	// The capture's id, once LOVc came
 	std::optional<uint32_t> wait_capture() {
@@ -98,6 +109,15 @@ public:
 	}
 
 	std::atomic<int> gets {0};
+	// The game let the service go
+	std::atomic<bool> hung_up {false};
+
+	bool wait_hung_up() const {
+		for (int i = 0; i < 200 && !hung_up; i++) {
+			std::this_thread::sleep_for(std::chrono::milliseconds(10));
+		}
+		return hung_up;
+	}
 
 private:
 	void answer() {
@@ -146,6 +166,7 @@ private:
 			msg.msg_controllen = sizeof(control);
 			const ssize_t n    = ::recvmsg(m_conn, &msg, 0);
 			if (n <= 0) {
+				hung_up = true;
 				return;
 			}
 			if (n == 4 && std::memcmp(data, "LOVg", 4) == 0) {

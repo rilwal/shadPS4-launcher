@@ -53,9 +53,9 @@ public:
 	[[nodiscard]] bool connected() const;
 
 	// Asks for the surfaces, and checks they're the ones with these ids (and, where the platform
-	// can tell, that the buffers are `width` x `height` BGRA)
+	// can tell, that the buffers are `width` x `height` BGRA, or with `lists`, bytes)
 	std::optional<Surfaces> fetch(const std::vector<uint32_t>& buffer_ids, uint32_t header_id, uint32_t width, uint32_t height,
-	                              std::string& error);
+	                              bool lists, std::string& error);
 
 	// Hands the game's capture over; capture_surface names `id` after this
 	bool send_capture(const lc_capture& capture, uint32_t id, std::string& error);
@@ -76,12 +76,16 @@ void adopt_capture(const lc_capture& capture);
 void release_capture(const lc_capture& capture);
 
 // The header's words, mapped: [0] 'LOV2', [1] the exchange word, [2] the shell's publish count,
-// [3] reserved
+// [3] reserved. Drawing lists, the game also writes the GPU time it took, for the shell's frame
+// timings: [5] to [8] render, glass, draw and composite milliseconds (f32), under a sequence lock
+// in [4] (odd while they're written).
 class HeaderMap {
 public:
-	static constexpr uint32_t MAGIC = 0x4C4F5632;
-	static constexpr uint32_t NEWER = 1u << 31;
-	static constexpr size_t   SIZE  = 16;
+	static constexpr uint32_t MAGIC     = 0x4C4F5632;
+	static constexpr uint32_t NEWER     = 1u << 31;
+	static constexpr size_t   GPU_COUNT = 4;
+	static constexpr size_t   GPU_TIMES = 5;
+	static constexpr size_t   SIZE      = 64;
 
 	HeaderMap() = default;
 	~HeaderMap() { unmap(); }
@@ -101,6 +105,30 @@ private:
 	std::atomic<uint32_t>* m_words = nullptr;
 #elif defined(__APPLE__)
 	void* m_surface = nullptr; // The header's IOSurfaceRef, retained
+#endif
+};
+
+// A draw-list slot's bytes, read only. The game reads a slot only while the trade has it hold it.
+class SlotMap {
+public:
+	SlotMap() = default;
+	~SlotMap() { unmap(); }
+	SlotMap(const SlotMap&)            = delete;
+	SlotMap& operator=(const SlotMap&) = delete;
+
+	bool map(const lc_surface& surface);
+	void unmap();
+
+	// The bytes and how many, from lock until unlock; NULL if they can't be had just now
+	const uint8_t* lock(size_t& size);
+	void           unlock();
+
+private:
+#if defined(__linux__)
+	const uint8_t* m_bytes = nullptr;
+	size_t         m_size  = 0;
+#elif defined(__APPLE__)
+	void* m_surface = nullptr; // The slot's IOSurfaceRef, retained
 #endif
 };
 

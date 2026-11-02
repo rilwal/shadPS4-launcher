@@ -13,6 +13,8 @@
 #include <chrono>
 #include <condition_variable>
 #include <cstdint>
+#include <cstring>
+#include <vector>
 #include <mutex>
 #include <optional>
 #include <string>
@@ -21,7 +23,7 @@
 inline constexpr uint32_t MAGIC = 0x4C4F5632;
 inline constexpr uint32_t NEWER = 1u << 31;
 
-// A BGRA surface, or the header's 16 bytes as 4x1 of 4
+// A BGRA surface, or the header's 64 bytes as 16x1 of 4
 inline IOSurfaceRef make_surface(int width, int height) {
 	CFMutableDictionaryRef props = CFDictionaryCreateMutable(nullptr, 0, &kCFTypeDictionaryKeyCallBacks, &kCFTypeDictionaryValueCallBacks);
 	const auto put = [&](CFStringRef key, int value) {
@@ -38,21 +40,38 @@ inline IOSurfaceRef make_surface(int width, int height) {
 	return surface;
 }
 
+// A draw-list slot as the shell makes one: bytes, in rows of 4096 four-byte elements
+inline IOSurfaceRef make_slot(int rows) {
+	CFMutableDictionaryRef props = CFDictionaryCreateMutable(nullptr, 0, &kCFTypeDictionaryKeyCallBacks, &kCFTypeDictionaryValueCallBacks);
+	const auto put = [&](CFStringRef key, int value) {
+		CFNumberRef n = CFNumberCreate(nullptr, kCFNumberIntType, &value);
+		CFDictionarySetValue(props, key, n);
+		CFRelease(n);
+	};
+	put(kIOSurfaceWidth, 4096);
+	put(kIOSurfaceHeight, rows);
+	put(kIOSurfaceBytesPerElement, 4);
+	IOSurfaceRef surface = IOSurfaceCreate(props);
+	CFRelease(props);
+	return surface;
+}
+
 class FakeShell {
 public:
-	FakeShell() {
+	// `lists`: draw-list slots of 64 KiB, not 64x64 BGRA buffers
+	explicit FakeShell(bool lists = false): m_lists(lists) {
 		m_name = "lc-test.overlay." + std::to_string(::getpid()) + "." + std::to_string(s_count++);
 		if (bootstrap_check_in(bootstrap_port, m_name.c_str(), &m_port) != KERN_SUCCESS) {
 			std::fprintf(stderr, "fake shell: couldn't check in %s\n", m_name.c_str());
 			m_port = MACH_PORT_NULL;
 		}
-		m_header = make_surface(4, 1);
+		m_header = make_surface(16, 1);
 		with_header([](std::atomic<uint32_t>* words) {
 			words[0] = MAGIC;
 			words[1] = 1;
 		});
 		for (auto& buffer: m_buffers) {
-			buffer = make_surface(64, 64);
+			buffer = lists ? make_slot(4) : make_surface(64, 64);
 		}
 		m_thread = std::thread([this]() { serve(); });
 	}
@@ -84,7 +103,17 @@ public:
 	std::string offer(int width = 64) const {
 		return R"({"type":"overlay_surface","buffers":[)" + std::to_string(buffer_id(0)) + "," + std::to_string(buffer_id(1)) + "," +
 		       std::to_string(buffer_id(2)) + R"(],"header":)" + std::to_string(header_id()) + R"(,"service":")" + m_name +
-		       R"(","width":)" + std::to_string(width) + R"(,"height":64})";
+		       R"(","width":)" + std::to_string(width) + R"(,"height":64,"lists":)" + (m_lists ? "true" : "false") + "}";
+	}
+
+	// Writes `bytes` into slot `i`, locked as the shell does
+	void write(size_t i, const std::vector<uint8_t>& bytes) {
+		if (IOSurfaceLock(m_buffers[i], 0, nullptr) == kIOReturnSuccess) {
+			if (bytes.size() <= IOSurfaceGetAllocSize(m_buffers[i])) {
+				std::memcpy(IOSurfaceGetBaseAddress(m_buffers[i]), bytes.data(), bytes.size());
+			}
+			IOSurfaceUnlock(m_buffers[i], 0, nullptr);
+		}
 	}
 
 	// The shell publishes `buffer`: swaps it into the exchange word and takes what was there
@@ -183,6 +212,7 @@ private:
 
 	inline static int s_count = 0;
 
+	bool                    m_lists = false;
 	std::string             m_name;
 	mach_port_t             m_port = MACH_PORT_NULL;
 	IOSurfaceRef            m_header = nullptr;

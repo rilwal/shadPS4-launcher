@@ -33,7 +33,7 @@ bool Service::connected() const {
 }
 
 std::optional<Surfaces> Service::fetch(const std::vector<uint32_t>& /*buffer_ids*/, uint32_t /*header_id*/, uint32_t /*width*/,
-                                       uint32_t /*height*/, std::string& error) {
+                                       uint32_t /*height*/, bool /*lists*/, std::string& error) {
 	error = "not supported on this platform";
 	return std::nullopt;
 }
@@ -74,6 +74,19 @@ std::atomic<uint32_t>* HeaderMap::lock() {
 }
 
 void HeaderMap::unlock() {}
+
+bool SlotMap::map(const lc_surface& /*surface*/) {
+	return false;
+}
+
+void SlotMap::unmap() {}
+
+const uint8_t* SlotMap::lock(size_t& size) {
+	size = 0;
+	return nullptr;
+}
+
+void SlotMap::unlock() {}
 
 } // namespace lc::transport
 

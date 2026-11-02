@@ -71,22 +71,24 @@ void Destroy() {
 #endif
 }
 
-bool Begin(u64 completed, VkExtent2D window, const std::function<u64(u64)>& wait) {
+bool Begin(u64 completed, VkExtent2D window, bool new_frame,
+           const std::function<u64(u64)>& wait) {
 #ifdef LAUNCHER_CLIENT_VULKAN
     if (g_vk == nullptr) {
         return false;
     }
     lc_vk_frame frame{};
-    lc_vk_begin(g_vk, completed, window, &frame);
+    lc_vk_begin(g_vk, completed, window, new_frame, &frame);
     // A newer frame of the menu whose buffer an earlier present still reads: once that's done
     // (it's usually a frame old), this present takes it
     if (frame.wait != 0) {
-        lc_vk_begin(g_vk, wait(frame.wait), window, &frame);
+        lc_vk_begin(g_vk, wait(frame.wait), window, new_frame, &frame);
     }
     return frame.capture;
 #else
     (void)completed;
     (void)window;
+    (void)new_frame;
     (void)wait;
     return false;
 #endif

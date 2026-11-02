@@ -339,7 +339,10 @@ static void read() {
 	}
 	if (const auto msg = host("overlay_surface")) {
 		CHECK(msg->buffers == std::vector<uint32_t>({11, 12, 13}));
-		CHECK(msg->header == 10 && !msg->service.empty() && msg->width == 1920 && msg->height == 1080);
+		CHECK(msg->header == 10 && !msg->service.empty() && msg->width == 1920 && msg->height == 1080 && !msg->lists);
+		auto lists = *load("host", "overlay_surface");
+		lists.set("lists", true);
+		CHECK(protocol::parse_host(lists.dump()).lists);
 	}
 	if (const auto msg = host("overlay_visible")) {
 		CHECK(msg->visible);

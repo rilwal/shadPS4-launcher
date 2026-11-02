@@ -900,8 +900,8 @@ void Presenter::Present(Frame* frame, bool is_reusing_frame, bool is_game_frame)
         scheduler.GetWorkSemaphore()->Refresh();
         return scheduler.GetWorkSemaphore()->KnownGpuTick();
     };
-    const bool launcher_capture =
-        Launcher::Overlay::Begin(gpu_tick(), swapchain.GetExtent(), [&](u64 tick) {
+    const bool launcher_capture = Launcher::Overlay::Begin(
+        gpu_tick(), swapchain.GetExtent(), !is_reusing_frame, [&](u64 tick) {
             scheduler.Wait(tick);
             return gpu_tick();
         });
@@ -973,7 +973,7 @@ void Presenter::Present(Frame* frame, bool is_reusing_frame, bool is_game_frame)
                                {}, {}, {}, pre_barriers);
 
         if (launcher_capture) {
-            // The game's frame, without shadPS4's own overlays, for the menu's background
+            // The game's frame, without shadPS4's own overlays, for the menu's glass
             const auto frame_layout = [&](vk::ImageLayout from, vk::ImageLayout to,
                                           vk::AccessFlags src, vk::AccessFlags dst) {
                 return vk::ImageMemoryBarrier{
@@ -1000,8 +1000,8 @@ void Presenter::Present(Frame* frame, bool is_reusing_frame, bool is_game_frame)
                                                 vk::ImageLayout::eTransferSrcOptimal,
                                                 vk::AccessFlagBits::eShaderRead,
                                                 vk::AccessFlagBits::eTransferRead));
-            // An HDR frame holds PQ values, which the launcher would read as sRGB: no capture,
-            // so the launcher's own window shows the menu
+            // An HDR frame holds PQ values, which the menu's glass would read as sRGB: no copy,
+            // so its glass shows no game behind it
             Launcher::Overlay::Capture(cmdbuf, swapchain.GetHDR() ? VK_NULL_HANDLE : frame->image,
                                        static_cast<VkFormat>(swapchain.GetSurfaceFormat().format),
                                        {frame->width, frame->height});
