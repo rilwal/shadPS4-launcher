@@ -102,6 +102,10 @@ private:
 };
 
 void SetWindowIcon(SDL_Window* window, const std::vector<u8>& png);
+#ifdef __APPLE__
+// The window's number (its CGWindowID), which other processes know it by; 0 if it has none
+u64 WindowNumber(SDL_Window* window);
+#endif
 void SetDefaultWindowIcon(SDL_Window* window);
 
 } // namespace Frontend

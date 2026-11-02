@@ -125,15 +125,16 @@ u64 NativeWindow() {
     if (g_window == nullptr || g_window->GetSDLWindow() == nullptr) {
         return 0;
     }
-    const auto props = SDL_GetWindowProperties(g_window->GetSDLWindow());
+    SDL_Window* const window = g_window->GetSDLWindow();
 #if defined(SDL_PLATFORM_WIN32)
-    return reinterpret_cast<u64>(
-        SDL_GetPointerProperty(props, SDL_PROP_WINDOW_WIN32_HWND_POINTER, nullptr));
+    return reinterpret_cast<u64>(SDL_GetPointerProperty(
+        SDL_GetWindowProperties(window), SDL_PROP_WINDOW_WIN32_HWND_POINTER, nullptr));
 #elif defined(SDL_PLATFORM_MACOS)
-    return static_cast<u64>(SDL_GetNumberProperty(props, SDL_PROP_WINDOW_COCOA_WINDOW_NUMBER, 0));
+    return Frontend::WindowNumber(window);
 #else
     // Wayland windows have no id another process can use
-    return static_cast<u64>(SDL_GetNumberProperty(props, SDL_PROP_WINDOW_X11_WINDOW_NUMBER, 0));
+    return static_cast<u64>(SDL_GetNumberProperty(SDL_GetWindowProperties(window),
+                                                  SDL_PROP_WINDOW_X11_WINDOW_NUMBER, 0));
 #endif
 }
 
