@@ -58,10 +58,11 @@ void Log(void*, lc_log_level level, const char* line) {
 }
 
 void Quit(void*) {
-    LOG_INFO(Frontend, "Launcher: quit");
+    // Resumed before logging: a guest thread paused inside the logger holds its lock
     if (g_paused_for_menu.exchange(false)) {
         DebugState.ResumeGuestThreads();
     }
+    LOG_INFO(Frontend, "Launcher: quit");
     if (g_window == nullptr) {
         // Still booting, before the window that would take the event
         std::quick_exit(0);
@@ -75,7 +76,9 @@ void Quit(void*) {
 // and with the overlay drawn in the game's window the next of those presents is copied for the
 // shell, as the menu's background (Launcher::Overlay)
 void MenuOpened(void*, bool opened) {
-    LOG_INFO(Frontend, "Launcher: quick menu {}", opened ? "opened" : "closed");
+    if (opened) {
+        LOG_INFO(Frontend, "Launcher: quick menu opened");
+    }
     auto* controllers = Common::Singleton<Input::GameControllers>::Instance();
     if (opened) {
         // The pad is the menu's before the game pauses, and the game's again after it resumes
@@ -89,6 +92,11 @@ void MenuOpened(void*, bool opened) {
             DebugState.ResumeGuestThreads();
         }
         controllers->HoldForLauncher(false);
+    }
+    // Logged after the resume: a guest thread paused inside the logger holds its lock, so
+    // logging while the guest is paused could wait for good
+    if (!opened) {
+        LOG_INFO(Frontend, "Launcher: quick menu closed");
     }
     lc_paused(g_session, DebugState.IsGuestThreadsPaused());
 }

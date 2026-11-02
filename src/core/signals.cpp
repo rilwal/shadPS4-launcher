@@ -30,6 +30,8 @@ namespace Core {
 #ifndef _WIN32
 namespace {
 std::atomic_bool g_guest_sleep{false};
+// This thread is in the SIGSLEEP handler's sleep (signal handlers may nest)
+thread_local bool t_sleeping = false;
 static_assert(std::atomic_bool::is_always_lock_free, "read in a signal handler");
 } // namespace
 
@@ -311,10 +313,22 @@ void SignalHandler(int sig, siginfo_t* info, void* raw_context) {
         UNREACHABLE_MSG("Unhandled signal {} at code address {}", sig, fmt::ptr(code_address));
     }
     case SIGSLEEP: {
-        // A wake that came before the pause was taken, or a nested wake (below): nothing to do
-        if (!g_guest_sleep.load(std::memory_order_acquire)) {
+        // Already asleep further up this thread's stack: a wake ended that level's sigsuspend by
+        // running this handler again, and that level's loop decides whether to sleep on
+        if (t_sleeping) {
             break;
         }
+        // Asleep while the guest is paused (the launcher's menu, the pause key) or while the
+        // guest has suspended this thread (posix_pthread_suspend_user_context_np)
+        const auto should_sleep = [thread] {
+            return g_guest_sleep.load(std::memory_order_acquire) ||
+                   (thread && thread->suspend_requested.load(std::memory_order_acquire));
+        };
+        // A wake that came before the sleep was taken: nothing to do
+        if (!should_sleep()) {
+            break;
+        }
+        t_sleeping = true;
         if (thread) {
             thread->suspended_context = context.uc_mcontext;
             thread->is_suspended_in_signal = true;
@@ -325,12 +339,13 @@ void SignalHandler(int sig, siginfo_t* info, void* raw_context) {
         sigset_t wait_mask;
         pthread_sigmask(SIG_SETMASK, nullptr, &wait_mask);
         sigdelset(&wait_mask, SIGSLEEP);
-        while (g_guest_sleep.load(std::memory_order_acquire)) {
+        while (should_sleep()) {
             sigsuspend(&wait_mask);
         }
         if (thread) {
             thread->is_suspended_in_signal = false;
         }
+        t_sleeping = false;
         break;
     }
     case SIGUSR1:
@@ -350,7 +365,7 @@ SignalDispatch::SignalDispatch() {
     ASSERT_MSG(handle = AddVectoredExceptionHandler(0, SignalHandler),
                "Failed to register exception handler.");
 #else
-    struct sigaction action {};
+    struct sigaction action{};
     action.sa_sigaction = SignalHandler;
     action.sa_flags = SA_SIGINFO | SA_ONSTACK;
     sigemptyset(&action.sa_mask);
@@ -374,7 +389,7 @@ void SignalDispatch::RemoveHandlers() {
         std::quick_exit(1);
     }
 #else
-    struct sigaction action {};
+    struct sigaction action{};
     action.sa_handler = SIG_DFL;
     action.sa_flags = 0;
     sigemptyset(&action.sa_mask);

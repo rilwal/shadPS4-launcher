@@ -22,7 +22,8 @@ using IllegalInstructionHandler = bool (*)(void* context);
 void SignalHandler(int sig, siginfo_t* info, void* raw_context);
 
 /// Whether threads sent SIGSLEEP stay asleep: set to true before sending it to pause them, and to
-/// false before sending it again to wake them. With the state in a flag rather than in how many
+/// false before sending it again to wake them. (A thread the guest suspended also sleeps, while its
+/// Pthread::suspend_requested is set.) With the state in a flag rather than in how many
 /// signals arrived, a wake sent before a thread took the pause (two signals pending merge into
 /// one) can't leave the thread asleep for good.
 void SetGuestSleep(bool sleep);
