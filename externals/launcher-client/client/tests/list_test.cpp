@@ -56,8 +56,8 @@ static void reads_the_shells_list() {
 
 	CHECK(l.blur_count == 2);
 	if (l.blur_count == 2) {
-		CHECK(l.blurs[0].source == LC_LIST_SOURCE_LIVE && l.blurs[0].levels == 3);
-		CHECK(l.blurs[1].source == LC_LIST_SOURCE_IMAGE && l.blurs[1].levels == 2 && l.blurs[1].image == 7);
+		CHECK(l.blurs[0].source == LC_LIST_SOURCE_LIVE && l.blurs[0].levels[0] == 3 && l.blurs[0].levels[1] == 1);
+		CHECK(l.blurs[1].source == LC_LIST_SOURCE_IMAGE && l.blurs[1].levels[0] == 2 && l.blurs[1].levels[1] == 0 && l.blurs[1].image == 7);
 	}
 
 	CHECK(l.pass_count == 2 && l.draw_count == 3);
@@ -164,6 +164,7 @@ static void refuses_lists_that_point_outside() {
 	    {"an empty screen", 16, 0},
 	    {"a blur's levels", blurs + 4, 0xFFFFFFFF},
 	    {"a blur's levels", blurs + 4, 11},
+	    {"a blur's second levels", blurs + 4, 11u << 16},
 	    {"a level bigger than the one before", levels + 16, 4},
 	    {"more levels than a chain has", images + 20, 3},
 	    {"a BC7 level of part blocks", levels + 32 + 0, 2},

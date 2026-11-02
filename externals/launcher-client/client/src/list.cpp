@@ -139,7 +139,7 @@ extern "C" bool lc_list_read(const void* bytes, size_t size, lc_list* list) {
 
 	for (uint32_t i = 0; i < l.blur_count; i++) {
 		const auto& r = l.blurs[i];
-		if ((r.source != LC_LIST_SOURCE_LIVE && r.source != LC_LIST_SOURCE_IMAGE) || r.levels > MAX_BLUR) {
+		if ((r.source != LC_LIST_SOURCE_LIVE && r.source != LC_LIST_SOURCE_IMAGE) || r.levels[0] > MAX_BLUR || r.levels[1] > MAX_BLUR) {
 			return false;
 		}
 	}

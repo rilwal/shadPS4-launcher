@@ -24,7 +24,7 @@ extern "C" {
 
 /* The layout version this library reads: the shell's LIST_VERSION. A list of another version
    (a shell from another build) isn't read. */
-#define LC_LIST_VERSION 1u
+#define LC_LIST_VERSION 2u
 
 /* Bytes in one instance, as the shader's vertex layout reads them. */
 #define LC_LIST_INSTANCE_BYTES 128u
@@ -55,11 +55,13 @@ typedef struct lc_list_source {
 	uint64_t image; /* With LC_LIST_SOURCE_IMAGE */
 } lc_list_source;
 
-/* A picture to blur `levels` half-size levels down and back up to a quarter of its size, before
-   the passes. The live frame blurs every time; an image's blur can be kept until it changes. */
+/* A picture to blur at each of two strengths, before the passes: glass shows the strength its
+   instance picks. Each is `levels` half-size levels down and back up to a quarter of the
+   picture's size, or 0 for one no glass uses; both share the way down. The live frame blurs every
+   time; an image's blur can be kept until it changes. */
 typedef struct lc_list_blur {
 	uint32_t source; /* LC_LIST_SOURCE_LIVE or LC_LIST_SOURCE_IMAGE */
-	uint32_t levels;
+	uint16_t levels[2];
 	uint64_t image;
 } lc_list_blur;
 

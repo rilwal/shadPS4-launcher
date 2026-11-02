@@ -57,22 +57,25 @@ struct Image {
 	VkImageLayout  layout      = VK_IMAGE_LAYOUT_UNDEFINED;
 };
 
-// A picture blurred for glass (blur.wgsl): half-size levels down from it, then back up to `keep`
+// A picture blurred for glass (blur.wgsl) at each of two strengths: half-size levels down from
+// it, then back up, per strength, to a quarter of its size (crates/render's Blur::blur_image)
 struct Chain {
 	struct Step {
 		bool            down;
 		uint32_t        target;
 		VkDescriptorSet set;
 	};
-	uint32_t           levels = 0;
+	static constexpr uint32_t NONE = ~0u;
+	uint32_t           levels[2] {};
 	VkImageView        source = VK_NULL_HANDLE;
-	std::vector<Image> targets;
+	std::vector<Image> targets; // The levels down, then each strength's own result
 	Buffer             params;
 	VkDescriptorPool   pool = VK_NULL_HANDLE;
 	std::vector<Step>  steps;
-	uint32_t           keep = 0;
+	uint32_t           results[2] {NONE, NONE};
 
-	VkImageView result() const { return targets[keep].view; }
+	// The picture blurred at strength `n`, if that strength was made
+	VkImageView result(int n) const { return results[n] == NONE ? VK_NULL_HANDLE : targets[results[n]].view; }
 };
 
 // A picture lists draw by key, the glyph atlas, or one of the player's stand-ins
@@ -326,7 +329,7 @@ struct ListPlayer::State {
 	VkImageView      globals_atlas = VK_NULL_HANDLE;
 	VkDescriptorPool bg_pool      = VK_NULL_HANDLE;
 	VkDescriptorSet  bg_set       = VK_NULL_HANDLE;
-	VkImageView      bg_views[4] {};
+	VkImageView      bg_views[6] {};
 
 	void say(lc_log_level level, const std::string& line) const {
 		if (log) {
@@ -680,7 +683,7 @@ struct ListPlayer::State {
 	}
 
 	// Set 2: the background's two pictures, their blurs, and its uniform
-	VkDescriptorSet bg_for(const VkImageView (&views)[4]) {
+	VkDescriptorSet bg_for(const VkImageView (&views)[6]) {
 		if (bg_set != VK_NULL_HANDLE && std::equal(std::begin(views), std::end(views), std::begin(bg_views))) {
 			return bg_set;
 		}
@@ -688,20 +691,20 @@ struct ListPlayer::State {
 			later([this, p = bg_pool]() { vk.DestroyDescriptorPool(info.device, p, nullptr); });
 			bg_pool = VK_NULL_HANDLE;
 		}
-		bg_set = allocate(bg_layout, {{VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, 4}, {VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 1}}, bg_pool);
+		bg_set = allocate(bg_layout, {{VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, 6}, {VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 1}}, bg_pool);
 		if (bg_set == VK_NULL_HANDLE) {
 			return VK_NULL_HANDLE;
 		}
 		std::copy(std::begin(views), std::end(views), std::begin(bg_views));
-		VkDescriptorImageInfo images[4];
-		VkWriteDescriptorSet  writes[5];
-		for (uint32_t i = 0; i < 4; i++) {
+		VkDescriptorImageInfo images[6];
+		VkWriteDescriptorSet  writes[7];
+		for (uint32_t i = 0; i < 6; i++) {
 			images[i] = sampled(views[i]);
 			writes[i] = image_write(bg_set, i, &images[i], VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE);
 		}
 		const VkDescriptorBufferInfo ubo {bg_ubo.buffer, 0, BG_BYTES};
-		writes[4] = buffer_write(bg_set, 4, &ubo);
-		vk.UpdateDescriptorSets(info.device, 5, writes, 0, nullptr);
+		writes[6] = buffer_write(bg_set, 6, &ubo);
+		vk.UpdateDescriptorSets(info.device, 7, writes, 0, nullptr);
 		return bg_set;
 	}
 
@@ -729,7 +732,7 @@ struct ListPlayer::State {
 		constexpr auto TEX  = VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE;
 		constexpr auto SAMP = VK_DESCRIPTOR_TYPE_SAMPLER;
 		if (!layout({{UBO, BOTH}, {TEX, FS}, {SAMP, FS}, {TEX, FS}, {SAMP, FS}}, globals_layout) || !layout({{TEX, FS}}, image_layout) ||
-		    !layout({{TEX, FS}, {TEX, FS}, {TEX, FS}, {TEX, FS}, {UBO, FS}}, bg_layout) || !layout({{TEX, FS}, {SAMP, FS}, {UBO, FS}}, blur_layout)) {
+		    !layout({{TEX, FS}, {TEX, FS}, {TEX, FS}, {TEX, FS}, {TEX, FS}, {TEX, FS}, {UBO, FS}}, bg_layout) || !layout({{TEX, FS}, {SAMP, FS}, {UBO, FS}}, blur_layout)) {
 			return false;
 		}
 		const VkDescriptorSetLayout sets[] = {globals_layout, image_layout, bg_layout};
@@ -805,7 +808,7 @@ struct ListPlayer::State {
 		    {0, 0, VK_FORMAT_R32G32B32A32_SFLOAT, 0},   {1, 0, VK_FORMAT_R32G32B32A32_SFLOAT, 16}, {2, 0, VK_FORMAT_R32G32B32A32_SFLOAT, 32},
 		    {3, 0, VK_FORMAT_R32G32B32A32_SFLOAT, 48},  {4, 0, VK_FORMAT_R32G32B32A32_SFLOAT, 64}, {5, 0, VK_FORMAT_R32G32B32A32_SFLOAT, 80},
 		    {9, 0, VK_FORMAT_R32G32B32A32_SFLOAT, 96},  {6, 0, VK_FORMAT_R32_SFLOAT, 112},         {7, 0, VK_FORMAT_R32_SFLOAT, 116},
-		    {8, 0, VK_FORMAT_R32_UINT, 120},
+		    {8, 0, VK_FORMAT_R32_UINT, 120},           {10, 0, VK_FORMAT_R32_UINT, 124},
 		};
 		VkPipelineVertexInputStateCreateInfo vertex_input {VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO};
 		if (instances) {
@@ -1118,46 +1121,69 @@ struct ListPlayer::State {
 		staged.clear();
 	}
 
-	// A blur of `source` (`w` x `h`) `levels` down, made unless one is kept for it
-	bool chain_for(std::unique_ptr<Chain>& c, VkImageView source, uint32_t w, uint32_t h, uint32_t levels, bool& made) {
+	// A blur of `source` (`w` x `h`) at each strength's `levels` (0: not made), made unless one is
+	// kept for it. Down the most levels once, then, weakest first, back up from each strength's
+	// level into an image of its own; one or two levels down is the result as it is. The levels on
+	// the way up are shared, so the weaker strength goes up before the stronger one writes over
+	// them. Step for step crates/render's Blur::blur_image, so the two draw the same.
+	bool chain_for(std::unique_ptr<Chain>& c, VkImageView source, uint32_t w, uint32_t h, const uint16_t (&levels)[2], bool& made) {
 		made = false;
-		if (c && c->levels == levels && c->source == source) {
+		if (c && c->levels[0] == levels[0] && c->levels[1] == levels[1] && c->source == source) {
 			return true;
 		}
 		retire(c);
-		auto chain    = std::make_unique<Chain>();
-		chain->levels = levels;
-		chain->source = source;
+		auto chain       = std::make_unique<Chain>();
+		chain->levels[0] = levels[0];
+		chain->levels[1] = levels[1];
+		chain->source    = source;
 		const uint32_t                             source_w = w;
 		const uint32_t                             source_h = h;
 		std::vector<std::pair<uint32_t, uint32_t>> sizes;
-		for (uint32_t i = 0; i < std::max(levels, 1u); i++) {
+		const uint32_t                             most = std::max<uint32_t>({levels[0], levels[1], 1u});
+		for (uint32_t i = 0; i < most; i++) {
 			w = std::max(w / 2, 1u);
 			h = std::max(h / 2, 1u);
 			sizes.emplace_back(w, h);
 		}
-		chain->targets.resize(sizes.size());
-		for (size_t i = 0; i < sizes.size(); i++) {
-			if (!make_image(chain->targets[i], BLUR_FORMAT, sizes[i].first, sizes[i].second, 1,
-			                VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT, VK_FORMAT_UNDEFINED, blur_pass)) {
-				free_chain(*chain);
-				return false;
-			}
-		}
-		// Down from the picture through every level, then up to `keep` (crates/render's Blur)
-		chain->keep = sizes.size() >= 2 ? 1 : 0;
 		struct From {
 			VkImageView view;
 			uint32_t    w, h;
 		};
-		std::vector<std::pair<From, Chain::Step>> steps;
+		// Targets by index: the levels down, then each strength's own; their images are made below
+		std::vector<std::pair<uint32_t, uint32_t>> target_sizes = sizes;
+		std::vector<std::pair<uint32_t, Chain::Step>> steps; // The source's target (NONE: the picture), the step
 		for (uint32_t i = 0; i < sizes.size(); i++) {
-			const From from = i == 0 ? From {source, source_w, source_h} : From {chain->targets[i - 1].view, sizes[i - 1].first, sizes[i - 1].second};
-			steps.push_back({from, {true, i, VK_NULL_HANDLE}});
+			steps.push_back({i == 0 ? Chain::NONE : i - 1, {true, i, VK_NULL_HANDLE}});
 		}
-		for (int64_t i = static_cast<int64_t>(sizes.size()) - 2; i >= static_cast<int64_t>(chain->keep); i--) {
-			const auto n = static_cast<uint32_t>(i);
-			steps.push_back({{chain->targets[n + 1].view, sizes[n + 1].first, sizes[n + 1].second}, {false, n, VK_NULL_HANDLE}});
+		const int order[2] = {levels[0] <= levels[1] ? 0 : 1, levels[0] <= levels[1] ? 1 : 0};
+		for (const int n: order) {
+			const uint32_t l = levels[n];
+			const int      m = 1 - n;
+			if (l == 0) {
+				continue;
+			}
+			if (levels[m] == l && chain->results[m] != Chain::NONE) {
+				chain->results[n] = chain->results[m];
+				continue;
+			}
+			if (l <= 2) {
+				chain->results[n] = l - 1;
+				continue;
+			}
+			const auto own = static_cast<uint32_t>(target_sizes.size());
+			target_sizes.push_back(sizes[1]);
+			for (uint32_t i = l - 2; i >= 1; i--) {
+				steps.push_back({i + 1, {false, i == 1 ? own : i, VK_NULL_HANDLE}});
+			}
+			chain->results[n] = own;
+		}
+		chain->targets.resize(target_sizes.size());
+		for (size_t i = 0; i < target_sizes.size(); i++) {
+			if (!make_image(chain->targets[i], BLUR_FORMAT, target_sizes[i].first, target_sizes[i].second, 1,
+			                VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT, VK_FORMAT_UNDEFINED, blur_pass)) {
+				free_chain(*chain);
+				return false;
+			}
 		}
 		const auto count = static_cast<uint32_t>(steps.size());
 		if (!make_buffer(chain->params, PARAMS_STRIDE * count, VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT, true)) {
@@ -1171,7 +1197,9 @@ struct ListPlayer::State {
 			return false;
 		}
 		for (uint32_t i = 0; i < count; i++) {
-			const From& from = steps[i].first;
+			const uint32_t f    = steps[i].first;
+			const From     from = f == Chain::NONE ? From {source, source_w, source_h}
+			                                       : From {chain->targets[f].view, target_sizes[f].first, target_sizes[f].second};
 			// One source texel in uv, and the upsample's spread
 			const float params[4] = {1.0f / static_cast<float>(from.w), 1.0f / static_cast<float>(from.h), 1.0f, 0.0f};
 			std::memcpy(chain->params.mapped + PARAMS_STRIDE * i, params, sizeof(params));
@@ -1287,29 +1315,34 @@ struct ListPlayer::State {
 		return true;
 	}
 
+	// Picture `n`'s blur at each strength there is, into the background's views
+	static void blurred_views(const Chain* c, int n, VkImageView (&views)[6]) {
+		for (int s = 0; c && s < 2; s++) {
+			if (const VkImageView v = c->result(s); v != VK_NULL_HANDLE) {
+				views[2 + 2 * s + n] = v;
+			}
+		}
+	}
+
 	// What the background's pictures and blurs show (crates/render's update_background)
-	void background_views(VkImageView (&views)[4]) const {
+	void background_views(VkImageView (&views)[6]) const {
 		const VkImageView none = placeholder.image.view;
 		std::fill(std::begin(views), std::end(views), none);
 		for (int n = 0; n < 2; n++) {
 			if (sources[n].kind == LC_LIST_SOURCE_LIVE && live.image != VK_NULL_HANDLE) {
 				views[n] = live.view;
-				if (live_blur) {
-					views[2 + n] = live_blur->result();
-				}
+				blurred_views(live_blur.get(), n, views);
 			} else if (sources[n].kind == LC_LIST_SOURCE_IMAGE) {
 				if (auto it = images.find(sources[n].image); it != images.end()) {
 					views[n] = it->second->image.view;
-					if (it->second->blur) {
-						views[2 + n] = it->second->blur->result();
-					}
+					blurred_views(it->second->blur.get(), n, views);
 				}
 			}
 		}
 	}
 
 	bool draw_canvas(VkCommandBuffer command) {
-		VkImageView views[4];
+		VkImageView views[6];
 		background_views(views);
 		const VkDescriptorSet set0 = globals_for(atlas ? atlas->image.view : no_glyphs.image.view);
 		const VkDescriptorSet set2 = bg_for(views);
