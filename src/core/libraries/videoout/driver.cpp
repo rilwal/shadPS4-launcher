@@ -287,6 +287,9 @@ void VideoOutDriver::DrawLastFrame() {
     const auto frame = presenter->PrepareLastFrame();
     if (frame != nullptr) {
         presenter->Present(frame, true);
+    } else if (Launcher::Overlay::WantsPresents()) {
+        // No frame yet (paused while booting): the launcher's menu still needs presents
+        DrawBlankFrame();
     }
 }
 
