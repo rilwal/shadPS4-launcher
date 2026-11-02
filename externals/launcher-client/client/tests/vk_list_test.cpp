@@ -222,6 +222,7 @@ void run(Gpu& gpu) {
 	uint64_t   serial    = 0;
 	bool       drew      = false;
 	bool       captured  = false;
+	bool       no_frame  = false; // Captures pass VK_NULL_HANDLE, as for a frame that can't be copied
 	const auto present   = [&](bool new_frame = true, bool copies = true) {
         serial++;
         lc_vk_frame frame {};
@@ -236,7 +237,7 @@ void run(Gpu& gpu) {
         gpu.barrier(target.image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, VK_ACCESS_TRANSFER_WRITE_BIT,
                     VK_ACCESS_TRANSFER_READ_BIT);
         if (frame.capture && copies) {
-            lc_vk_capture(vk, gpu.command, target.image, VK_FORMAT_R8G8B8A8_UNORM, {W, H});
+            lc_vk_capture(vk, gpu.command, no_frame ? VK_NULL_HANDLE : target.image, VK_FORMAT_R8G8B8A8_UNORM, {W, H});
             captured = true;
         }
         // Nothing under the menu, so what's read back is what the helper drew
@@ -373,6 +374,18 @@ void run(Gpu& gpu) {
 		const auto [worst, off] = difference(got, want.data(), W * H);
 		CHECK(worst > 48 && off * 10 > W * H); // Its glass is the green frame, not the one before
 	}
+
+	// A frame the emulator can't copy (VK_NULL_HANDLE): the menu isn't drawn in the game, and the
+	// shell comes to the front for it
+	no_frame = true;
+	captured = false;
+	drew     = false;
+	present(true);
+	CHECK(captured && !drew);
+	drew = false;
+	present(true);
+	present(true);
+	CHECK(!drew);
 
 	gpu.DeviceWaitIdle(gpu.device);
 	lc_vk_destroy(vk);

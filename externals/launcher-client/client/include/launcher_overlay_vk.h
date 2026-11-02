@@ -88,7 +88,9 @@ typedef struct lc_vk_frame {
 void lc_vk_begin(lc_vk *vk, uint64_t completed, VkExtent2D window, bool new_frame, lc_vk_frame *frame);
 
 /* Copies `source` (TRANSFER_SRC_OPTIMAL, of `format`, `extent` big) for the shell, converting it
-   to BGRA8. The source stays in its layout. Does nothing unless the frame asked for a capture. */
+   to BGRA8, or, drawing lists, for the menu's glass. The source stays in its layout. Does nothing
+   unless the frame asked for a capture. VK_NULL_HANDLE says the frame can't be copied: the shell
+   comes to the front for the menu instead. */
 void lc_vk_capture(lc_vk *vk, VkCommandBuffer command, VkImage source, VkFormat format, VkExtent2D extent);
 
 /* The buffer to draw over this present (made readable by the fragment shader), or VK_NULL_HANDLE

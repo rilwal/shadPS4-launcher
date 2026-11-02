@@ -1539,8 +1539,15 @@ bool ListPlayer::wants_frame() const {
 }
 
 bool ListPlayer::capture(VkCommandBuffer command, VkImage source, VkFormat format, VkExtent2D extent) {
-	if (!wants_frame() || source == VK_NULL_HANDLE || extent.width == 0 || extent.height == 0) {
+	if (!wants_frame()) {
 		return true;
+	}
+	if (source == VK_NULL_HANDLE || extent.width == 0 || extent.height == 0) {
+		// The emulator can't give its frame (an HDR one, say): the glass can't be drawn, so the
+		// menu goes back to the shell, as a capture it can't make does
+		s->say(LC_LOG_ERROR, "the emulator has no frame to copy for the menu's glass");
+		s->showing = false;
+		return false;
 	}
 	// Held as the shell's pictures are, sRGB-encoded, read through a UNORM view: an image whose
 	// values are linear is blitted into an sRGB one, which encodes them

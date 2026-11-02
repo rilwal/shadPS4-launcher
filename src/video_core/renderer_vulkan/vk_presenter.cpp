@@ -875,6 +875,7 @@ void Presenter::Present(Frame* frame, bool is_reusing_frame, bool is_game_frame)
         if (!swapchain.AcquireNextImage()) {
             // User resizes the window too fast and GPU can't keep up. Skip this frame.
             LOG_WARNING(Render_Vulkan, "Skipping frame!");
+            launcher_missed_frame = launcher_missed_frame || !is_reusing_frame;
             free_frame();
             return;
         }
@@ -900,8 +901,14 @@ void Presenter::Present(Frame* frame, bool is_reusing_frame, bool is_game_frame)
         scheduler.GetWorkSemaphore()->Refresh();
         return scheduler.GetWorkSemaphore()->KnownGpuTick();
     };
+    // A blank frame (paused while booting) is drawn every vblank but is new only the first time;
+    // a frame skipped before the menu saw it makes the next one new
+    const bool launcher_new_frame =
+        launcher_missed_frame || (!is_reusing_frame && (is_game_frame || !launcher_last_blank));
+    launcher_last_blank = !is_game_frame && !is_reusing_frame;
+    launcher_missed_frame = false;
     const bool launcher_capture = Launcher::Overlay::Begin(gpu_tick(), swapchain.GetExtent(),
-                                                           !is_reusing_frame, [&](u64 tick) {
+                                                           launcher_new_frame, [&](u64 tick) {
                                                                scheduler.Wait(tick);
                                                                return gpu_tick();
                                                            });
@@ -1001,7 +1008,7 @@ void Presenter::Present(Frame* frame, bool is_reusing_frame, bool is_game_frame)
                                                 vk::AccessFlagBits::eShaderRead,
                                                 vk::AccessFlagBits::eTransferRead));
             // An HDR frame holds PQ values, which the menu's glass would read as sRGB: no copy,
-            // so its glass shows no game behind it
+            // so the launcher's own window shows the menu (the menu isn't drawn over HDR anyway)
             Launcher::Overlay::Capture(cmdbuf, swapchain.GetHDR() ? VK_NULL_HANDLE : frame->image,
                                        static_cast<VkFormat>(swapchain.GetSurfaceFormat().format),
                                        {frame->width, frame->height});
