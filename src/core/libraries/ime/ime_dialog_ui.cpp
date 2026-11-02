@@ -481,7 +481,7 @@ ImeDialogUi::ImeDialogUi(ImeDialogUi&& other) noexcept
       gamepad_input_capture_active(other.gamepad_input_capture_active),
       launcher_osk(std::exchange(other.launcher_osk, 0)),
       launcher_osk_generation(std::exchange(other.launcher_osk_generation, ~0ull)),
-      launcher_osk_seq(other.launcher_osk_seq),
+      launcher_osk_seq(other.launcher_osk_seq), launcher_osk_sent_seq(other.launcher_osk_sent_seq),
       launcher_osk_text(std::move(other.launcher_osk_text)),
       launcher_osk_cursor(other.launcher_osk_cursor) {
 
@@ -601,6 +601,7 @@ ImeDialogUi& ImeDialogUi::operator=(ImeDialogUi&& other) {
     launcher_osk = std::exchange(other.launcher_osk, 0);
     launcher_osk_generation = std::exchange(other.launcher_osk_generation, ~0ull);
     launcher_osk_seq = other.launcher_osk_seq;
+    launcher_osk_sent_seq = other.launcher_osk_sent_seq;
     launcher_osk_text = std::move(other.launcher_osk_text);
     launcher_osk_cursor = other.launcher_osk_cursor;
     other.state = nullptr;
@@ -741,6 +742,7 @@ bool ImeDialogUi::LauncherKeyboard() {
         if (Launcher::Osk::Available()) {
             launcher_osk = OpenLauncherKeyboard();
             launcher_osk_seq = 0;
+            launcher_osk_sent_seq = 0;
             launcher_osk_text = state->current_text.to_view();
             launcher_osk_cursor = Launcher::Osk::CharactersAtUtf16(
                 launcher_osk_text, static_cast<u32>(state->caret_index));
@@ -786,13 +788,16 @@ bool ImeDialogUi::LauncherKeyboard() {
         launcher_osk_seq = event.seq;
     }
     // What the launcher's keyboard shows: the text as the dialog has it, after its rules, sent
-    // whenever it changes (an edit, or the game's filter after one)
+    // whenever it changes (an edit, or the game's filter after one), and after every edit, which
+    // the launcher waits to hear back about even when it changed nothing
     const std::string_view now = state->current_text.to_view();
     const u32 cursor =
         Launcher::Osk::CharactersAtUtf16(now, static_cast<u32>(state->caret_index));
-    if (now != launcher_osk_text || cursor != launcher_osk_cursor) {
+    if (now != launcher_osk_text || cursor != launcher_osk_cursor ||
+        launcher_osk_seq != launcher_osk_sent_seq) {
         launcher_osk_text = now;
         launcher_osk_cursor = cursor;
+        launcher_osk_sent_seq = launcher_osk_seq;
         Launcher::Osk::Text(launcher_osk, launcher_osk_seq, now, cursor);
     }
     return true;
