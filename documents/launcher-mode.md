@@ -64,6 +64,29 @@ nothing changes and shadPS4 runs as before.
 
 In launcher mode shadPS4's own trophy pop-ups are off, since the launcher shows them.
 
+## The quick menu
+
+On Linux the launcher's quick menu is drawn in the game's own window (the launcher's composited
+overlay, `src/launcher/overlay.cpp`, through the client library's Vulkan helper):
+
+- The game session and the plugin say they draw the menu (`composited_overlay`), so launcherd adds
+  no overlay of its own. In launcher mode shadPS4 enables the device extensions the helper needs
+  for sharing images with the launcher (dma-bufs), when the GPU has them.
+- The shell draws the menu into buffers it shares with shadPS4, and the presenter draws the newest
+  one over every frame it presents, after shadPS4's own overlays.
+- When the menu opens, shadPS4 pauses the game's threads (as its own pause key does) and reports
+  `paused`. The present thread keeps showing the frame it paused on, and the first of those
+  presents copies that frame, without shadPS4's own overlays, for the menu's background. While
+  nothing else presents (loading), shadPS4 keeps presenting for as long as the menu needs it.
+- The pad is the menu's while it's open: the game reads the state it had when the menu opened and
+  no new samples. Buttons still held when the menu closes stay hidden from the game until they're
+  released, so the press that closed the menu doesn't reach it.
+- Closing the menu resumes the game, unless the player had paused it already.
+
+If the GPU can't share images with the launcher, shadPS4 logs why, and the launcher's own window
+comes to the front for the menu, as for any game. Elsewhere (macOS, Windows) that's how the menu
+shows for now.
+
 Trophy ids are the trophy ids as text, prefixed with the service label for any trophy set past
 the first (`"1:12"`), as the Kyty fork does. Only the default user's trophies are reported.
 
@@ -85,8 +108,7 @@ All of them are read while the game boots for now.
 
 ## Not done yet
 
-- The quick menu in the game window (composited overlay), with pausing and a capture for its
-  background.
+- The quick menu in the game's window on macOS and Windows.
 - Settings that change while the game runs.
 - The launcher's on-screen keyboard for the game's text input.
 - The console language is global only, since the plugin needs it for trophy lists. Trophy lists
