@@ -690,7 +690,8 @@ void Emulator::Run(std::filesystem::path file, std::vector<std::string> args,
     // Initialize kernel and library facilities.
     Libraries::InitHLELibs(&linker->GetHLESymbols());
 
-    // Load the module with the linker.
+    // Load the module with the linker. CPU patching it can take seconds.
+    Launcher::Session::Booting("Preparing the game's code");
     if (linker->LoadModule(guest_eboot_path) == -1) {
         LOG_CRITICAL(Loader, "Failed to load game's eboot.bin: {}", guest_eboot_path);
         Launcher::Session::Failed("shadPS4 can't load the game's executable.",
@@ -723,6 +724,7 @@ void Emulator::Run(std::filesystem::path file, std::vector<std::string> args,
         });
     }
 
+    Launcher::Session::Booting("Starting the game");
     linker->Execute(args);
 
     window->InitTimers();

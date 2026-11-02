@@ -38,6 +38,8 @@ namespace {
 
 // launcherd sends configure right after the welcome; this is only for a launcher that never does
 constexpr u32 CONFIGURE_WAIT_MS = 5000;
+// What Booting says, until the first frame
+constexpr const char* BOOT_ACTIVITY = "boot";
 
 lc_session* g_session = nullptr;
 // The launcher's values, by key: configure's, the plugin's own, and the live changes since
@@ -300,10 +302,18 @@ void ApplySettings() {
     EmulatorSettings.SetTrophyPopupDisabled(true, true);
 }
 
+void Booting(const char* what) {
+    if (g_session == nullptr) {
+        return;
+    }
+    lc_activity(g_session, BOOT_ACTIVITY, what, -1.0f);
+}
+
 void FirstFrame() {
     if (g_session == nullptr || g_ready.test_and_set()) {
         return;
     }
+    lc_activity_done(g_session, BOOT_ACTIVITY);
     lc_ready(g_session, 0, NativeWindow());
 }
 

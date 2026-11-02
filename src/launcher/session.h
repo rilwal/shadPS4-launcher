@@ -25,6 +25,9 @@ void Connect(std::vector<std::string> settings);
 // shadPS4's own trophy toasts are turned off, as the launcher shows them.
 void ApplySettings();
 
+// What shadPS4 is doing while the game boots, for the launcher's launch screen.
+void Booting(const char* what);
+
 // The game's first frame is on screen.
 void FirstFrame();
 

@@ -3,6 +3,7 @@
 
 #include "common/serdes.h"
 #include "core/emulator_settings.h"
+#include "launcher/session.h"
 #include "shader_recompiler/frontend/fetch_shader.h"
 #include "shader_recompiler/info.h"
 #include "video_core/cache_storage.h"
@@ -337,6 +338,7 @@ void PipelineCache::WarmUp() {
         return;
     }
 
+    Launcher::Session::Booting("Compiling cached shaders");
     u32 num_pipelines{};
     u32 num_total_pipelines{};
 
@@ -369,6 +371,7 @@ void PipelineCache::WarmUp() {
         });
 
     LOG_INFO(Render, "Preloaded {} pipelines", num_pipelines);
+    Launcher::Session::Booting("Starting the game");
     if (num_total_pipelines > num_pipelines) {
         LOG_WARNING(Render, "{} stale pipelines were found. Consider re-generating the cache",
                     num_total_pipelines - num_pipelines);

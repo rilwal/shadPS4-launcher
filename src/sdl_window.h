@@ -3,6 +3,7 @@
 
 #pragma once
 
+#include <atomic>
 #include <span>
 #include <string>
 
@@ -46,6 +47,8 @@ struct WindowSystemInfo {
 
 class WindowSDL {
     int keyboard_grab = 0;
+    std::atomic<bool> hidden{false};
+    std::atomic_flag show_asked;
 
 public:
     explicit WindowSDL(s32 width, s32 height, Input::GameControllers* controllers,
@@ -79,6 +82,14 @@ public:
 
     void RequestKeyboard();
     void ReleaseKeyboard();
+
+    // A game the launcher started opens its window hidden, so the launcher's own screen stays in
+    // front while the game boots, and shows it for its first frame. Show asks the main thread,
+    // from any thread; the window is hidden until it has been shown there.
+    [[nodiscard]] bool IsHidden() const {
+        return hidden.load(std::memory_order_acquire);
+    }
+    void Show();
 
 private:
     // The window's size or fullscreen setting (LAUNCHER_WINDOW_*), after it changed while the

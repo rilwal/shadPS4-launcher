@@ -863,6 +863,17 @@ void Presenter::Present(Frame* frame, bool is_reusing_frame, bool is_game_frame)
         }
     };
 
+    // Hidden while the launcher shows the game booting. The game's first frame shows it; frames
+    // until it is up are dropped, as presenting to a window not yet shown can wait forever
+    // (Wayland's FIFO) or break the protocol (a buffer before the first configure)
+    if (window.IsHidden()) {
+        if (!is_reusing_frame && is_game_frame) {
+            window.Show();
+        }
+        free_frame();
+        return;
+    }
+
     // Recreate the swapchain if the window was resized, or its settings changed.
     const bool settings_changed = recreate_swapchain.exchange(false);
     if (settings_changed || window.GetWidth() != swapchain.GetWidth() ||
