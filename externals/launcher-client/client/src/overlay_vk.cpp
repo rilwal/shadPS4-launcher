@@ -1002,12 +1002,21 @@ lc_vk* lc_vk_create(lc_overlay* overlay, const lc_vk_info* info, char* error, si
 	VkPhysicalDeviceProperties2                     props {VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2};
 	props.pNext = &host_props;
 	vk->vk.GetPhysicalDeviceProperties2(info->physical_device, &props);
-	// Metal takes host memory in whole pages (newBufferWithBytesNoCopy), whatever the driver says
-	vk->host_alignment = std::max<VkDeviceSize>(host_props.minImportedHostPointerAlignment, static_cast<VkDeviceSize>(::getpagesize()));
+	// Metal takes host memory in whole pages (newBufferWithBytesNoCopy), whatever the driver says.
+	// Apple silicon's kernel pages are 16 KiB even where getpagesize() says 4 KiB (x86_64 under
+	// Rosetta), and IOSurfaces are allocated in them, so imports are 16 KiB-aligned and long. Some
+	// drivers (KosmicKrisp) don't check what Metal makes of the import: a misaligned one becomes a
+	// buffer at GPU address 0 with no error.
+	constexpr VkDeviceSize apple_page = 16384;
+	vk->host_alignment = std::max({host_props.minImportedHostPointerAlignment, static_cast<VkDeviceSize>(::getpagesize()), apple_page});
 	if (host_props.minImportedHostPointerAlignment == 0) {
 		vk->host_alignment = 0;
 	}
-	if (props.properties.vendorID != 0x106B || !vk->unified_memory()) {
+	// Intel and AMD GPUs (Intel Macs) can't read the shell's IOSurfaces without locking them. Apple
+	// silicon's GPU is the only other one on a Mac; drivers differ in the vendor ID they give it, so
+	// that's left to the memory check.
+	const uint32_t vendor = props.properties.vendorID;
+	if (vendor == 0x8086 || vendor == 0x1002 || !vk->unified_memory()) {
 		return fail(vk, "the launcher's IOSurfaces can only be shared without locking them on Apple silicon (unified memory)");
 	}
 	const bool can_import = vk->host_alignment != 0 && vk->can_share(0, VK_EXTERNAL_MEMORY_FEATURE_IMPORTABLE_BIT);

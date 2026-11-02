@@ -87,6 +87,9 @@ composited overlay, `src/launcher/overlay.cpp`, through the client library's Vul
 
 If the GPU can't share images with the launcher, shadPS4 logs why, and the launcher's own window
 comes to the front for the menu, as for any game. On Windows that's how the menu shows for now.
+On macOS the fallback is the launcher's panel over the game window: shadPS4 tells launcherd it
+draws the menu itself, so launcherd never puts its opt-in Metal hook into shadPS4 games, even when
+the menu can't be drawn in the game's own window.
 
 Trophy ids are the trophy ids as text, prefixed with the service label for any trophy set past
 the first (`"1:12"`), as the Kyty fork does. Only the default user's trophies are reported.
