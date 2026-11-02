@@ -97,11 +97,13 @@ bool Available() {
 
 u32 Open(const lc_osk_params& params) {
     lc_session* session = Session();
+    // Held across the open, so the launcher becoming unable to draw keyboards (OnAvailable, which
+    // closes this one in the library) can't land before g_open is set and leave it set
+    std::scoped_lock lock(g_mutex);
     if (session == nullptr || !g_available.load()) {
         return 0;
     }
     const u32 osk = lc_osk_open(session, &params);
-    std::scoped_lock lock(g_mutex);
     g_open = osk;
     g_events.clear();
     if (osk != 0) {
@@ -192,6 +194,9 @@ bool ApplyEdit(std::string& text, u32& cursor, const Event& edit, u32 max_utf16,
         if (!multiline) {
             std::erase_if(s, [](char32_t c) { return c == U'\n' || c == U'\r'; });
         }
+        // shadPS4's dialog keeps text in 16-bit units (ImWchar), so a character past U+FFFF
+        // becomes U+FFFD there: count it as that here too
+        std::ranges::replace_if(s, [](char32_t c) { return c > 0xFFFF; }, U'\uFFFD');
         return s;
     };
     const std::u32string before = t;

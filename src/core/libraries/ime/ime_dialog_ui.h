@@ -4,6 +4,7 @@
 #pragma once
 
 #include <mutex>
+#include <string>
 #include <vector>
 #include <imgui.h>
 #include "common/cstring.h"
@@ -169,6 +170,10 @@ class ImeDialogUi final : public ImGui::Layer {
     // was last asked for
     u32 launcher_osk = 0;
     u64 launcher_osk_generation = ~0ull;
+    // The launcher's last edit applied, and the text and cursor (in characters) it was last sent
+    u64 launcher_osk_seq = 0;
+    std::string launcher_osk_text;
+    u32 launcher_osk_cursor = 0;
 
 public:
     explicit ImeDialogUi(ImeDialogState* state = nullptr, OrbisImeDialogStatus* status = nullptr,

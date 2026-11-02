@@ -137,8 +137,9 @@ now). `src/launcher/osk.cpp` bridges the client library's keyboard calls to the 
   panel position.
 - The dialog keeps the text. Each of the launcher's edits (insert, backspace, delete, move, replace;
   positions in characters, where the dialog counts UTF-16 units) is applied to it within the length
-  limit, run through the game's text filter, and copied to the game's buffer. The text that results
-  goes back to the launcher with the edit it includes.
+  limit and copied to the game's buffer; the game's text filter runs on the game's thread, as for
+  shadPS4's own keyboard. Whenever the text changes, it goes back to the launcher with the last edit
+  it includes.
 - Done or Back in the launcher's keyboard finishes the dialog as the game's own buttons would (OK,
   or cancelled with the text it started with). The button that did it is hidden from the game
   until it's let go. The game closing the dialog closes the launcher's keyboard (aborted).

@@ -6,7 +6,6 @@
 #include <cstring>
 #include <cwchar>
 #include <limits>
-#include <optional>
 #include <string>
 #include <unordered_map>
 #include <utility>
@@ -481,7 +480,10 @@ ImeDialogUi::ImeDialogUi(ImeDialogUi&& other) noexcept
       kb_alpha_family(other.kb_alpha_family),
       gamepad_input_capture_active(other.gamepad_input_capture_active),
       launcher_osk(std::exchange(other.launcher_osk, 0)),
-      launcher_osk_generation(std::exchange(other.launcher_osk_generation, ~0ull)) {
+      launcher_osk_generation(std::exchange(other.launcher_osk_generation, ~0ull)),
+      launcher_osk_seq(other.launcher_osk_seq),
+      launcher_osk_text(std::move(other.launcher_osk_text)),
+      launcher_osk_cursor(other.launcher_osk_cursor) {
 
     std::scoped_lock lock(draw_mutex, other.draw_mutex);
     other.state = nullptr;
@@ -598,6 +600,9 @@ ImeDialogUi& ImeDialogUi::operator=(ImeDialogUi&& other) {
     gamepad_input_capture_active = other.gamepad_input_capture_active;
     launcher_osk = std::exchange(other.launcher_osk, 0);
     launcher_osk_generation = std::exchange(other.launcher_osk_generation, ~0ull);
+    launcher_osk_seq = other.launcher_osk_seq;
+    launcher_osk_text = std::move(other.launcher_osk_text);
+    launcher_osk_cursor = other.launcher_osk_cursor;
     other.state = nullptr;
     other.status = nullptr;
     other.result = nullptr;
@@ -735,6 +740,10 @@ bool ImeDialogUi::LauncherKeyboard() {
         launcher_osk_generation = Launcher::Osk::Generation();
         if (Launcher::Osk::Available()) {
             launcher_osk = OpenLauncherKeyboard();
+            launcher_osk_seq = 0;
+            launcher_osk_text = state->current_text.to_view();
+            launcher_osk_cursor = Launcher::Osk::CharactersAtUtf16(
+                launcher_osk_text, static_cast<u32>(state->caret_index));
         }
     }
     if (launcher_osk == 0) {
@@ -747,7 +756,6 @@ bool ImeDialogUi::LauncherKeyboard() {
         return false;
     }
 
-    std::optional<u64> edited;
     for (const auto& event : Launcher::Osk::Take(launcher_osk)) {
         if (event.kind == Launcher::Osk::Event::Kind::Finish) {
             const u32 osk = std::exchange(launcher_osk, 0);
@@ -768,23 +776,24 @@ bool ImeDialogUi::LauncherKeyboard() {
                                      state->is_multi_line)) {
             state->current_text.FromString(text);
             state->caret_index = static_cast<int>(Launcher::Osk::Utf16AtCharacter(text, cursor));
+            // The game's filter runs on the game's thread (sceImeDialogGetStatus), not here
             state->input_changed = true;
-            // The game's filter may change it; it ends up in the game's buffer either way
-            if (state->text_filter == nullptr || !state->CallTextFilter()) {
-                state->CopyTextToOrbisBuffer(false);
-            }
+            state->CopyTextToOrbisBuffer(false);
             state->caret_byte_index =
                 Utf8ByteIndexFromUtf16Index(state->current_text.begin(), state->caret_index);
             state->caret_dirty = true;
         }
-        edited = event.seq;
+        launcher_osk_seq = event.seq;
     }
-    // What the launcher's keyboard shows: the text as the dialog has it, after its rules
-    if (edited) {
-        const std::string_view now = state->current_text.to_view();
-        Launcher::Osk::Text(
-            launcher_osk, *edited, now,
-            Launcher::Osk::CharactersAtUtf16(now, static_cast<u32>(state->caret_index)));
+    // What the launcher's keyboard shows: the text as the dialog has it, after its rules, sent
+    // whenever it changes (an edit, or the game's filter after one)
+    const std::string_view now = state->current_text.to_view();
+    const u32 cursor =
+        Launcher::Osk::CharactersAtUtf16(now, static_cast<u32>(state->caret_index));
+    if (now != launcher_osk_text || cursor != launcher_osk_cursor) {
+        launcher_osk_text = now;
+        launcher_osk_cursor = cursor;
+        Launcher::Osk::Text(launcher_osk, launcher_osk_seq, now, cursor);
     }
     return true;
 }

@@ -293,6 +293,8 @@ void GameControllers::HoldForLauncher(bool hold) {
 void GameController::HideHeldButtons() {
     std::lock_guard lock{m_state_mutex};
     m_masked |= m_state.buttonsState;
+    // Presses queued while the game wasn't reading (the dialog had the pads) are the launcher's
+    m_states_queue.Clear();
 }
 
 void GameControllers::HideHeldButtons() {
