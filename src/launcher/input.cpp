@@ -1,6 +1,7 @@
 // SPDX-FileCopyrightText: Copyright 2026 shadPS4 Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+#include <bitset>
 #include <string>
 #include <SDL3/SDL_events.h>
 #include <SDL3/SDL_keycode.h>
@@ -13,6 +14,11 @@ namespace Launcher::Input {
 
 namespace {
 
+// Keys pressed while the launcher had them. Once it lets them go, their repeats still aren't the
+// game's until they're released: Escape held to close the menu mustn't then reach the game.
+// Main thread only.
+std::bitset<SDL_SCANCODE_COUNT> g_held;
+
 lc_overlay* Get() {
     const auto session = lc_get();
     return session != nullptr ? lc_overlay_get(session) : nullptr;
@@ -20,7 +26,32 @@ lc_overlay* Get() {
 
 // The W3C KeyboardEvent.key name of a key, or "" for one the launcher has no use for (a modifier
 // on its own, say: modifiers go with the other keys)
-std::string KeyName(SDL_Keycode key) {
+std::string KeyName(SDL_Keycode key, SDL_Keymod mod) {
+    // With Num Lock off, the keypad moves (with it on, its digits come as text)
+    if ((mod & SDL_KMOD_NUM) == 0) {
+        switch (key) {
+        case SDLK_KP_8:
+            return "ArrowUp";
+        case SDLK_KP_2:
+            return "ArrowDown";
+        case SDLK_KP_4:
+            return "ArrowLeft";
+        case SDLK_KP_6:
+            return "ArrowRight";
+        case SDLK_KP_7:
+            return "Home";
+        case SDLK_KP_1:
+            return "End";
+        case SDLK_KP_9:
+            return "PageUp";
+        case SDLK_KP_3:
+            return "PageDown";
+        case SDLK_KP_PERIOD:
+            return "Delete";
+        default:
+            break;
+        }
+    }
     switch (key) {
     case SDLK_RETURN:
     case SDLK_KP_ENTER:
@@ -109,7 +140,18 @@ bool Wanted() {
 
 bool Forward(SDL_Window* window, const SDL_Event& event) {
     lc_overlay* overlay = Get();
-    if (overlay == nullptr || !lc_overlay_wants_input(overlay)) {
+    const bool wanted = overlay != nullptr && lc_overlay_wants_input(overlay);
+    const bool key = event.type == SDL_EVENT_KEY_DOWN || event.type == SDL_EVENT_KEY_UP;
+    if (key && event.key.scancode < SDL_SCANCODE_COUNT) {
+        if (!event.key.down) {
+            g_held.reset(event.key.scancode);
+        } else if (wanted) {
+            g_held.set(event.key.scancode);
+        } else if (event.key.repeat && g_held.test(event.key.scancode)) {
+            return true;
+        }
+    }
+    if (!wanted) {
         return false;
     }
     lc_input input{};
@@ -120,7 +162,7 @@ bool Forward(SDL_Window* window, const SDL_Event& event) {
         if (event.key.key == SDLK_F11) {
             return false;
         }
-        const std::string name = KeyName(event.key.key);
+        const std::string name = KeyName(event.key.key, event.key.mod);
         if (!name.empty()) {
             input.kind = LC_INPUT_KEY;
             input.key = name.c_str();

@@ -16,7 +16,8 @@ namespace Launcher::Input {
 
 // On the main thread, for each event before the game sees it: passes it on if the launcher has
 // the keys and mouse, and returns true if the game isn't to see it. Key and button releases still
-// reach the game, so a key held as the menu opened is let go.
+// reach the game, so a key held as the menu opened is let go; the repeats of a key pressed while
+// the launcher had it don't, even once it hasn't (until the key is released).
 bool Forward(SDL_Window* window, const SDL_Event& event);
 
 } // namespace Launcher::Input

@@ -9,6 +9,7 @@
 #include <optional>
 #include <utility>
 #include <SDL3/SDL_events.h>
+#include <SDL3/SDL_hints.h>
 #include <SDL3/SDL_properties.h>
 #include <SDL3/SDL_video.h>
 #include <launcher_client.h>
@@ -174,6 +175,10 @@ void Connect(std::vector<std::string> settings) {
         return;
     }
     lc_booting(g_session);
+    // The launcher's menu and keyboard take text input from the window (launcher/input.h), which
+    // would otherwise show the system's on-screen keyboard over them: Steam's on a Steam Deck, or
+    // any time no keyboard is attached. SDL_ENABLE_SCREEN_KEYBOARD in the environment still wins.
+    SDL_SetHint(SDL_HINT_ENABLE_SCREEN_KEYBOARD, "0");
 
     const lc_kv* values = nullptr;
     size_t count = 0;
