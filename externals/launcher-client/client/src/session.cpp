@@ -442,7 +442,7 @@ void lc_session::dispatch(const std::string& frame) {
 		}
 	} else if (msg.type == "overlay_visible") {
 		if (overlay != nullptr) {
-			overlay_on_visible(overlay, msg.visible);
+			overlay_on_visible(overlay, msg.visible, msg.input);
 		}
 	} else if (msg.type == "osk_available") {
 		osk_set_available(msg.available);

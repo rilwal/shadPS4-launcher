@@ -627,6 +627,9 @@ HostMessage parse_host(const std::string& frame) {
 	if (const Value* v = obj.find("visible"); v != nullptr && v->is_bool()) {
 		msg.visible = v->as_bool();
 	}
+	if (const Value* v = obj.find("input"); v != nullptr && v->is_bool()) {
+		msg.input = v->as_bool();
+	}
 	if (const Value* v = obj.find("available"); v != nullptr && v->is_bool()) {
 		msg.available = v->as_bool();
 	}

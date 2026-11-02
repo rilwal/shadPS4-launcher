@@ -83,6 +83,7 @@ struct HostMessage {
 	bool                  lists  = false; // The buffers are draw-list slots
 	// overlay_visible
 	bool visible = false;
+	bool input   = false; // The game's keys and mouse are the shell's while it shows
 	// osk_available, osk_edit, osk_finish
 	bool        available = false;
 	uint32_t    osk       = 0;

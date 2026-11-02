@@ -71,6 +71,7 @@ struct lc_overlay {
 	std::thread               sender;
 
 	std::atomic<bool>     visible {false};
+	std::atomic<bool>     input {false}; // Shown, and the game's keys and mouse are the shell's
 	std::atomic<uint32_t> presents_owed {0};
 
 	// The present thread's own
@@ -253,7 +254,8 @@ void overlay_on_surfaces(lc_overlay* overlay, const protocol::HostMessage& msg) 
 	overlay->presents_owed = PRESENTS_AFTER_CHANGE;
 }
 
-void overlay_on_visible(lc_overlay* overlay, bool visible) {
+void overlay_on_visible(lc_overlay* overlay, bool visible, bool input) {
+	overlay->input = visible && input;
 	if (overlay->visible.exchange(visible) != visible) {
 		overlay->presents_owed = PRESENTS_AFTER_CHANGE;
 	}
@@ -646,11 +648,11 @@ void lc_overlay_capture(lc_overlay* overlay, const lc_capture* capture, uint64_t
 }
 
 bool lc_overlay_wants_input(lc_overlay* overlay) {
-	return overlay != nullptr && overlay->visible;
+	return overlay != nullptr && overlay->input;
 }
 
 void lc_overlay_input(lc_overlay* overlay, const lc_input* input) {
-	if (overlay == nullptr || input == nullptr || !overlay->visible) {
+	if (overlay == nullptr || input == nullptr || !overlay->input) {
 		return;
 	}
 	auto msg = lc::protocol::overlay_input(*input);

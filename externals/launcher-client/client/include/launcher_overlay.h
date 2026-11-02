@@ -170,8 +170,9 @@ typedef struct lc_input {
 } lc_input;
 
 /* Whether keys and the mouse in the game's window are the shell's now: its menu or one of its
-   keyboards is shown in the game's frames. While it is, pass them on with lc_overlay_input and
-   don't act on them in the game. Any thread. */
+   keyboards is shown in the game's frames (not just its notices, which leave them to the game).
+   While it is, pass them on with lc_overlay_input and don't act on them in the game. Any
+   thread. */
 bool lc_overlay_wants_input(lc_overlay *overlay);
 
 /* Passes one on to the shell; dropped unless lc_overlay_wants_input. Any thread. */

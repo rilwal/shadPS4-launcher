@@ -140,7 +140,7 @@ namespace lc {
 lc_overlay* overlay_create(lc_session& session, bool lists);
 void        overlay_destroy(lc_overlay* overlay);
 void        overlay_on_surfaces(lc_overlay* overlay, const protocol::HostMessage& msg);
-void        overlay_on_visible(lc_overlay* overlay, bool visible);
+void        overlay_on_visible(lc_overlay* overlay, bool visible, bool input);
 void        overlay_on_menu(lc_overlay* overlay, bool opened);
 lc_session* overlay_session(lc_overlay* overlay);
 // Whether it draws the menu from draw lists (LC_CAP_DRAW_LISTS), not the shell's buffers

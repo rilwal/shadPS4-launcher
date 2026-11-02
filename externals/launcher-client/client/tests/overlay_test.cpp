@@ -136,8 +136,14 @@ void overlay() {
 	CHECK(!lc_overlay_wants_input(overlay));
 	lc_overlay_input(overlay, &key);
 
-	// Shown: nothing to draw until the shell publishes
-	launcher.send(R"({"type":"overlay_visible","visible":true})");
+	// Shown with only notices: the keys stay the game's
+	launcher.send(R"({"type":"overlay_visible","visible":true,"input":false})");
+	std::this_thread::sleep_for(std::chrono::milliseconds(100));
+	CHECK(!lc_overlay_wants_input(overlay));
+	lc_overlay_input(overlay, &key);
+
+	// Shown with the menu: nothing to draw until the shell publishes
+	launcher.send(R"({"type":"overlay_visible","visible":true,"input":true})");
 	std::this_thread::sleep_for(std::chrono::milliseconds(100));
 	// and the keys and mouse are the shell's
 	CHECK(lc_overlay_wants_input(overlay));
