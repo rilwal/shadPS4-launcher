@@ -27,7 +27,9 @@ lc_overlay* Get() {
 // The W3C KeyboardEvent.key name of a key, or "" for one the launcher has no use for (a modifier
 // on its own, say: modifiers go with the other keys)
 std::string KeyName(SDL_Keycode key, SDL_Keymod mod) {
-    // With Num Lock off, the keypad moves (with it on, its digits come as text)
+    // With Num Lock off, the keypad moves (with it on, its digits come as text). Not on macOS,
+    // where the keypad always types and SDL never sets SDL_KMOD_NUM.
+#ifndef __APPLE__
     if ((mod & SDL_KMOD_NUM) == 0) {
         switch (key) {
         case SDLK_KP_8:
@@ -52,6 +54,9 @@ std::string KeyName(SDL_Keycode key, SDL_Keymod mod) {
             break;
         }
     }
+#else
+    (void)mod;
+#endif
     switch (key) {
     case SDLK_RETURN:
     case SDLK_KP_ENTER:
