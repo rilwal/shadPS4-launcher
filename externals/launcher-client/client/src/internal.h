@@ -136,12 +136,20 @@ namespace lc {
 
 // The composited overlay (overlay.cpp). The session hands it the overlay messages on its reader
 // thread; the present thread calls the lc_overlay_* functions.
-lc_overlay* overlay_create(lc_session& session);
+// `lists`: the session draws the menu from draw lists (LC_CAP_DRAW_LISTS)
+lc_overlay* overlay_create(lc_session& session, bool lists);
 void        overlay_destroy(lc_overlay* overlay);
 void        overlay_on_surfaces(lc_overlay* overlay, const protocol::HostMessage& msg);
 void        overlay_on_visible(lc_overlay* overlay, bool visible);
 void        overlay_on_menu(lc_overlay* overlay, bool opened);
 lc_session* overlay_session(lc_overlay* overlay);
+// Whether it draws the menu from draw lists (LC_CAP_DRAW_LISTS), not the shell's buffers
+bool overlay_draws_lists(lc_overlay* overlay);
+// The emulator can't draw the lists it's handed: the shell comes to the front instead
+void overlay_lists_failed(lc_overlay* overlay);
+// The GPU time the game's drawing of the menu took, in milliseconds, for the shell's frame timings:
+// written into the header (transport::HeaderMap). On the presenting thread.
+void overlay_gpu_times(lc_overlay* overlay, float render, float glass, float draw, float composite);
 // Stops its thread and lets the service go, before the session closes its connection.
 void overlay_stop(lc_overlay* overlay);
 

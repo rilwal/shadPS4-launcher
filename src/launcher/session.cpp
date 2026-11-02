@@ -232,10 +232,11 @@ void Connect(std::vector<std::string> settings) {
     lc_connect_info info{};
     info.name = name.c_str();
 #ifdef LAUNCHER_CLIENT_VULKAN
-    // The presenter draws the launcher's quick menu into the game's frames (launcher/overlay.h)
-    // and the launcher's keyboard in place of the IME dialog's own (launcher/osk.h)
+    // The presenter draws the launcher's quick menu into the game's frames, from the shell's draw
+    // lists (launcher/overlay.h), and the launcher's keyboard in place of the IME dialog's own
+    // (launcher/osk.h)
     if (lc_overlay_supported()) {
-        info.capabilities |= LC_CAP_COMPOSITED_OVERLAY | LC_CAP_OSK;
+        info.capabilities |= LC_CAP_COMPOSITED_OVERLAY | LC_CAP_DRAW_LISTS | LC_CAP_OSK;
     }
 #endif
     std::array<char, 512> error{};

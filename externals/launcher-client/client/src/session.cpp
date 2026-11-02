@@ -256,7 +256,7 @@ bool lc_session::connect(const lc_connect_info& info, std::string& error) {
 	}
 
 	if (!runner && (capabilities & LC_CAP_COMPOSITED_OVERLAY) != 0) {
-		overlay = overlay_create(*this);
+		overlay = overlay_create(*this, (capabilities & LC_CAP_DRAW_LISTS) != 0);
 	}
 	log(LC_LOG_INFO, "connected to %s at %s", welcome.server.c_str(), endpoint.c_str());
 	return true;

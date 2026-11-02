@@ -6,6 +6,11 @@
 #include "fake_shell_macos.h"
 #include "launcher_overlay.h"
 
+#include <cstring>
+#include <fstream>
+#include <iterator>
+#include <vector>
+
 namespace {
 
 // Presents (drawing nothing) until `done` or a second passes
@@ -134,10 +139,59 @@ void no_service() {
 	lc_close(s);
 }
 
+// The shell's example list (data/list.ldl) with `serial`
+std::vector<uint8_t> example_list(uint64_t serial) {
+	std::ifstream        file(LC_TEST_DATA_DIR "/list.ldl", std::ios::binary);
+	std::vector<uint8_t> bytes((std::istreambuf_iterator<char>(file)), std::istreambuf_iterator<char>());
+	if (bytes.size() >= 48) {
+		std::memcpy(bytes.data() + 40, &serial, 8);
+	}
+	return bytes;
+}
+
+// Draw lists in IOSurface slots: no capture, and the newest of two lists, read under the slot's lock
+void draw_lists() {
+	FakeShell    shell(true);
+	FakeLauncher launcher;
+	lc_callbacks cb {};
+	cb.log = log_line;
+	lc_connect_info info {};
+	info.capabilities = LC_CAP_COMPOSITED_OVERLAY | LC_CAP_DRAW_LISTS;
+	lc_session* s       = lc_connect(&info, &cb, nullptr, 0);
+	lc_overlay* overlay = lc_overlay_get(s);
+	CHECK(overlay != nullptr);
+	if (overlay == nullptr) {
+		lc_close(s);
+		return;
+	}
+	launcher.send(R"({"type":"overlay_opened"})");
+	lc_frame frame {};
+	CHECK(!present_until(overlay, 0, frame, [&]() { return frame.capture; }));
+
+	launcher.send(shell.offer());
+	launcher.send(R"({"type":"overlay_visible","visible":true})");
+	CHECK(present_until(overlay, 0, frame, [&]() { return frame.generation == 1 && lc_overlay_wants_presents(overlay); }));
+	CHECK(frame.buffer_count == 0 && frame.list == nullptr && shell.gets == 1);
+
+	shell.write(0, example_list(7));
+	CHECK(shell.publish(0) == 1);
+	shell.write(1, example_list(8));
+	CHECK(shell.publish(1) == 0);
+	lc_overlay_begin(overlay, 0, &frame);
+	CHECK(frame.list != nullptr && frame.list_fresh);
+	CHECK(frame.list && frame.list->serial == 8 && frame.list->width == 320 && frame.list->instance_count == 3);
+	CHECK(shell.word() == 2);
+	lc_overlay_end(overlay, 1, true);
+	lc_overlay_begin(overlay, 1, &frame);
+	CHECK(frame.list && frame.list->serial == 8 && !frame.list_fresh);
+	lc_close(s);
+}
+
 } // namespace
 
 int main() {
 	overlay();
 	no_service();
+	draw_lists();
 	return finish("overlay_macos");
 }

@@ -39,6 +39,7 @@ Message hello(const std::string& token, int api, uint32_t capabilities, const st
 	    {LC_CAP_ACHIEVEMENTS, "achievements"},
 	    {LC_CAP_SETTINGS, "settings"},
 	    {LC_CAP_OSK, "osk"},
+	    {LC_CAP_DRAW_LISTS, "draw_lists"},
 	};
 	for (const auto& [flag, cap]: names) {
 		if ((capabilities & flag) != 0) {
@@ -619,6 +620,9 @@ HostMessage parse_host(const std::string& frame) {
 				msg.args.push_back(arg.as_string());
 			}
 		}
+	}
+	if (const Value* v = obj.find("lists"); v != nullptr && v->is_bool()) {
+		msg.lists = v->as_bool();
 	}
 	if (const Value* v = obj.find("visible"); v != nullptr && v->is_bool()) {
 		msg.visible = v->as_bool();

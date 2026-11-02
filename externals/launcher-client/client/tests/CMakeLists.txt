@@ -1,6 +1,6 @@
 set(LC_EXAMPLES_DIR "${CMAKE_CURRENT_SOURCE_DIR}/../../docs/plugin-api/examples")
 
-set(tests protocol)
+set(tests protocol list)
 if(UNIX)
     list(APPEND tests session runner)
 endif()
@@ -15,8 +15,9 @@ endif()
 if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
     list(APPEND tests overlay)
     if(TARGET launcher_client AND LAUNCHER_CLIENT_VULKAN_INCLUDE)
-        # Needs a GPU that can share linear dma-bufs; skips itself elsewhere
-        list(APPEND tests vk)
+        # vk needs a GPU that can share linear dma-bufs, and skips itself elsewhere; vk_list draws
+        # draw lists on any device with BC textures (lavapipe)
+        list(APPEND tests vk vk_list)
     endif()
 endif()
 
@@ -25,12 +26,17 @@ foreach(name ${tests})
     target_link_libraries(${name}_test PRIVATE launcher_client)
     target_include_directories(${name}_test PRIVATE ../src)
     target_compile_features(${name}_test PRIVATE cxx_std_17)
-    target_compile_definitions(${name}_test PRIVATE LC_EXAMPLES_DIR="${LC_EXAMPLES_DIR}")
+    target_compile_definitions(${name}_test PRIVATE LC_EXAMPLES_DIR="${LC_EXAMPLES_DIR}"
+                               LC_TEST_DATA_DIR="${CMAKE_CURRENT_SOURCE_DIR}/data")
     add_test(NAME ${name} COMMAND ${name}_test)
+    set_tests_properties(${name} PROPERTIES SKIP_RETURN_CODE 77)
 endforeach()
 
 if(TARGET overlay_macos_test)
     target_link_libraries(overlay_macos_test PRIVATE "-framework CoreFoundation" "-framework IOSurface")
+endif()
+if(TARGET vk_list_test)
+    target_link_libraries(vk_list_test PRIVATE ${CMAKE_DL_LIBS})
 endif()
 if(TARGET vk_test)
     target_link_libraries(vk_test PRIVATE ${CMAKE_DL_LIBS})

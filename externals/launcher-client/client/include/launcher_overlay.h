@@ -18,6 +18,11 @@
  * The lc_overlay_* calls below are for the present thread (one thread, or calls serialised by the
  * caller), apart from lc_overlay_get.
  *
+ * With LC_CAP_DRAW_LISTS the shell sends draw lists instead (launcher_list.h): the menu as the
+ * shell's renderer would draw it, which the emulator draws itself over its live frame, so there's
+ * no capture and nothing to import. The same header trades three slots of shared memory, and the
+ * library copies each list out of its slot, checks it, and hands it over (lc_frame.list).
+ *
  * Linux shares dma-bufs (and the header as a memfd); macOS, IOSurfaces. Elsewhere, and on a
  * platform whose backend isn't in yet, lc_overlay_get returns NULL and the shell's own window
  * comes to the front instead, as for any game.
@@ -26,6 +31,7 @@
 #define LAUNCHER_OVERLAY_H
 
 #include "launcher_client.h"
+#include "launcher_list.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -74,6 +80,16 @@ typedef struct lc_frame {
 
 	/* Copy this present's frame for the shell, then lc_overlay_capture (or cancel with NULL). */
 	bool capture;
+
+	/* With LC_CAP_DRAW_LISTS, in place of all the above but `generation`: the menu to draw over
+	   this present (launcher_list.h), or NULL for none. It stays valid until the next
+	   lc_overlay_begin. `list_fresh` says it's new this present: apply its glyph updates and image
+	   ops then, even if it isn't drawn, since each list carries only what changed since the one
+	   before. A change can come again (applying it again in order changes nothing), and
+	   lc_overlay_begin called again in the same present hands the same list over, still fresh.
+	   A new `generation` starts over: drop the glyph atlas and every image first. */
+	const lc_list *list;
+	bool           list_fresh;
 } lc_frame;
 
 /* Starts a present. `completed` is the newest serial the GPU has finished. It can be called again

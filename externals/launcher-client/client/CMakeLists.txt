@@ -10,6 +10,7 @@ option(LAUNCHER_CLIENT_TESTS "Build the tests" ${PROJECT_IS_TOP_LEVEL})
 
 add_library(launcher_client STATIC
     src/json.cpp
+    src/list.cpp
     src/protocol.cpp
     src/session.cpp
     src/runner.cpp
@@ -44,10 +45,10 @@ if(LAUNCHER_CLIENT_VULKAN)
         endif()
     endif()
     if(LAUNCHER_CLIENT_VULKAN_INCLUDE)
-        target_sources(launcher_client PRIVATE src/overlay_vk.cpp)
+        target_sources(launcher_client PRIVATE src/overlay_vk.cpp src/list_vk.cpp)
         if(NOT MSVC)
             # Vulkan structs are written {sType} and filled in after
-            set_source_files_properties(src/overlay_vk.cpp PROPERTIES COMPILE_OPTIONS -Wno-missing-field-initializers)
+            set_source_files_properties(src/overlay_vk.cpp src/list_vk.cpp PROPERTIES COMPILE_OPTIONS -Wno-missing-field-initializers)
         endif()
         target_include_directories(launcher_client PUBLIC ${LAUNCHER_CLIENT_VULKAN_INCLUDE})
         target_compile_definitions(launcher_client PUBLIC LAUNCHER_CLIENT_VULKAN=1)

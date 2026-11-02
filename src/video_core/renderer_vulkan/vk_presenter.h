@@ -122,6 +122,10 @@ private:
     Frontend::WindowSDL& window;
     // Whether the launcher's menu or keyboard had the window's keys at the last present
     bool launcher_input{};
+    // The launcher's quick menu: the last present showed a blank frame, or a frame was skipped
+    // before the menu saw it, so the next frame of the game is new to the menu's glass
+    bool launcher_last_blank{};
+    bool launcher_missed_frame{};
     Instance instance;
     HostPasses::FsrPass fsr_pass;
     HostPasses::FsrPass::Settings fsr_settings{};

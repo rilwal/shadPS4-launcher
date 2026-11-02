@@ -875,6 +875,7 @@ void Presenter::Present(Frame* frame, bool is_reusing_frame, bool is_game_frame)
         if (!swapchain.AcquireNextImage()) {
             // User resizes the window too fast and GPU can't keep up. Skip this frame.
             LOG_WARNING(Render_Vulkan, "Skipping frame!");
+            launcher_missed_frame = launcher_missed_frame || !is_reusing_frame;
             free_frame();
             return;
         }
@@ -900,11 +901,17 @@ void Presenter::Present(Frame* frame, bool is_reusing_frame, bool is_game_frame)
         scheduler.GetWorkSemaphore()->Refresh();
         return scheduler.GetWorkSemaphore()->KnownGpuTick();
     };
-    const bool launcher_capture =
-        Launcher::Overlay::Begin(gpu_tick(), swapchain.GetExtent(), [&](u64 tick) {
-            scheduler.Wait(tick);
-            return gpu_tick();
-        });
+    // A blank frame (paused while booting) is drawn every vblank but is new only the first time;
+    // a frame skipped before the menu saw it makes the next one new
+    const bool launcher_new_frame =
+        launcher_missed_frame || (!is_reusing_frame && (is_game_frame || !launcher_last_blank));
+    launcher_last_blank = !is_game_frame && !is_reusing_frame;
+    launcher_missed_frame = false;
+    const bool launcher_capture = Launcher::Overlay::Begin(gpu_tick(), swapchain.GetExtent(),
+                                                           launcher_new_frame, [&](u64 tick) {
+                                                               scheduler.Wait(tick);
+                                                               return gpu_tick();
+                                                           });
     // While it has the window's keys, SDL makes text of them for it
     if (const bool wanted = Launcher::Input::Wanted(); wanted != launcher_input) {
         launcher_input = wanted;
@@ -973,7 +980,7 @@ void Presenter::Present(Frame* frame, bool is_reusing_frame, bool is_game_frame)
                                {}, {}, {}, pre_barriers);
 
         if (launcher_capture) {
-            // The game's frame, without shadPS4's own overlays, for the menu's background
+            // The game's frame, without shadPS4's own overlays, for the menu's glass
             const auto frame_layout = [&](vk::ImageLayout from, vk::ImageLayout to,
                                           vk::AccessFlags src, vk::AccessFlags dst) {
                 return vk::ImageMemoryBarrier{
@@ -1000,8 +1007,8 @@ void Presenter::Present(Frame* frame, bool is_reusing_frame, bool is_game_frame)
                                                 vk::ImageLayout::eTransferSrcOptimal,
                                                 vk::AccessFlagBits::eShaderRead,
                                                 vk::AccessFlagBits::eTransferRead));
-            // An HDR frame holds PQ values, which the launcher would read as sRGB: no capture,
-            // so the launcher's own window shows the menu
+            // An HDR frame holds PQ values, which the menu's glass would read as sRGB: no copy,
+            // so the launcher's own window shows the menu (the menu isn't drawn over HDR anyway)
             Launcher::Overlay::Capture(cmdbuf, swapchain.GetHDR() ? VK_NULL_HANDLE : frame->image,
                                        static_cast<VkFormat>(swapchain.GetSurfaceFormat().format),
                                        {frame->width, frame->height});

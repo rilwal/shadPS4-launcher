@@ -116,7 +116,7 @@ bool Service::connected() const {
 
 // A dma-buf doesn't say its size or format: the emulator's import does
 std::optional<Surfaces> Service::fetch(const std::vector<uint32_t>& buffer_ids, uint32_t header_id, uint32_t /*width*/,
-                                       uint32_t /*height*/, std::string& error) {
+                                       uint32_t /*height*/, bool /*lists*/, std::string& error) {
 	const size_t count = buffer_ids.size() + (header_id != 0 ? 1 : 0);
 	if (m_socket < 0 || count == 0 || count > MAX_FDS) {
 		error = m_socket < 0 ? "no service" : "wrong number of surfaces";
@@ -277,6 +277,42 @@ std::atomic<uint32_t>* HeaderMap::lock() {
 }
 
 void HeaderMap::unlock() {}
+
+bool SlotMap::map(const lc_surface& surface) {
+	unmap();
+	struct stat st {};
+	if (surface.fd < 0 || ::fstat(surface.fd, &st) != 0 || st.st_size <= 0) {
+		return false;
+	}
+	// As for the header: a slot that could shrink would make a read past its end a SIGBUS
+	const int seals = ::fcntl(surface.fd, F_GET_SEALS);
+	if (seals < 0 || (seals & F_SEAL_SHRINK) == 0) {
+		return false;
+	}
+	const auto size = static_cast<size_t>(st.st_size);
+	void*      addr = ::mmap(nullptr, size, PROT_READ, MAP_SHARED, surface.fd, 0);
+	if (addr == MAP_FAILED) {
+		return false;
+	}
+	m_bytes = static_cast<const uint8_t*>(addr);
+	m_size  = size;
+	return true;
+}
+
+void SlotMap::unmap() {
+	if (m_bytes != nullptr) {
+		::munmap(const_cast<uint8_t*>(m_bytes), m_size);
+		m_bytes = nullptr;
+		m_size  = 0;
+	}
+}
+
+const uint8_t* SlotMap::lock(size_t& size) {
+	size = m_size;
+	return m_bytes;
+}
+
+void SlotMap::unlock() {}
 
 } // namespace lc::transport
 

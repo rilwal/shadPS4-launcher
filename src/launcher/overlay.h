@@ -10,10 +10,11 @@
 #include "video_core/renderer_vulkan/vk_common.h"
 
 // The game launcher's quick menu drawn into the game's own frames (launcher_overlay_vk.h): the
-// shell draws the menu into buffers it shares with shadPS4, and the presenter draws the newest one
-// over each frame it presents. When the menu opens, the frame the game paused on is copied for the
-// shell, as the menu's background. Linux and macOS for now; elsewhere, and outside launcher mode,
-// every call here does nothing and the shell's own window comes to the front for the menu.
+// shell sends the menu as draw lists, which the presenter draws over each frame it presents with
+// the shell's own shaders. The menu's glass blurs a copy of the game's frame, made again only when
+// the game shows a new one, so a paused game is copied and blurred once. Linux and macOS for now;
+// elsewhere, and outside launcher mode, every call here does nothing and the shell's own window
+// comes to the front for the menu.
 //
 // All but DeviceExtensions and WantsPresents are for the present thread. Serials are the present
 // scheduler's ticks.
@@ -35,11 +36,13 @@ void Create(const DeviceInfo& info);
 // Once the device is idle
 void Destroy();
 
-// Starts a present into an image `window` big. `wait` waits for a serial to finish on the GPU and
-// returns the newest finished one. True if this present's frame is to be copied with Capture.
-bool Begin(u64 completed, VkExtent2D window, const std::function<u64(u64)>& wait);
+// Starts a present into an image `window` big. `new_frame`: the game's frame isn't the one
+// presented last (false when the last frame is drawn again, as while paused). `wait` waits for a
+// serial to finish on the GPU and returns the newest finished one. True if this present's frame is
+// to be copied with Capture.
+bool Begin(u64 completed, VkExtent2D window, bool new_frame, const std::function<u64(u64)>& wait);
 
-// Copies `image` (TRANSFER_SRC_OPTIMAL) for the shell
+// Copies `image` (TRANSFER_SRC_OPTIMAL) for the menu's glass
 void Capture(VkCommandBuffer command, VkImage image, VkFormat format, VkExtent2D extent);
 
 // Draws the menu over `target` (COLOR_ATTACHMENT_OPTIMAL, written by an earlier pass), outside any

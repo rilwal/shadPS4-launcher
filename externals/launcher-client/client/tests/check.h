@@ -22,6 +22,9 @@ inline int g_failures = 0;
 		g_failures++;                                      \
 	} while (0)
 
+// What a test returns when it can't run here, which ctest reports as skipped (SKIP_RETURN_CODE)
+inline constexpr int SKIPPED = 77;
+
 inline int finish(const char* name) {
 	if (g_failures == 0) {
 		std::printf("%s: ok\n", name);
