@@ -158,6 +158,7 @@ WindowSDL::WindowSDL(s32 width_, s32 height_, Input::GameControllers* controller
     SDL_SyncWindow(window);
     // The window geometry is only final once the fullscreen transition has settled; refresh
     // the cached size so the first swapchain and the splashscreen use the real drawable size.
+    // A hidden window settles when it's shown (Show).
     SDL_GetWindowSizeInPixels(window, &width, &height);
 
     SDL_InitSubSystem(SDL_INIT_GAMEPAD);
@@ -375,15 +376,23 @@ void WindowSDL::Show() {
     if (!IsHidden() || show_asked.test_and_set()) {
         return;
     }
-    SDL_RunOnMainThread(
+    const bool asked = SDL_RunOnMainThread(
         [](void* userdata) {
             auto* const self = static_cast<WindowSDL*>(userdata);
             SDL_ShowWindow(self->window);
             SDL_RaiseWindow(self->window);
-            // Wayland: SDL has had the shell's first configure, so frames can be presented
+            // Fullscreen (pending while hidden) and the output's scale are known once it's up,
+            // so the first frames go out at its real size. Wayland: SDL has had the shell's
+            // first configure, so frames can be presented.
+            SDL_SyncWindow(self->window);
+            self->OnResize();
             self->hidden.store(false, std::memory_order_release);
         },
         this, false);
+    if (!asked) {
+        LOG_ERROR(Frontend, "Can't show the window yet: {}", SDL_GetError());
+        show_asked.clear();
+    }
 }
 
 void WindowSDL::ReleaseKeyboard() {

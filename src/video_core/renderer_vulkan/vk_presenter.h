@@ -107,6 +107,10 @@ public:
     void Present(Frame* frame, bool is_reusing_frame = false, bool is_game_frame = true);
     Frame* PrepareLastFrame();
 
+    // The game's first frame came while the window was hidden and was dropped: it's presented
+    // again (DrawLastFrame) once the window is up, as the game may not flip again for a while.
+    [[nodiscard]] bool FirstPresentOwed() const;
+
 private:
     Frame* GetRenderFrame();
 
@@ -126,6 +130,7 @@ private:
     // before the menu saw it, so the next frame of the game is new to the menu's glass
     bool launcher_last_blank{};
     bool launcher_missed_frame{};
+    std::atomic<bool> first_present_owed{};
     Instance instance;
     HostPasses::FsrPass fsr_pass;
     HostPasses::FsrPass::Settings fsr_settings{};
