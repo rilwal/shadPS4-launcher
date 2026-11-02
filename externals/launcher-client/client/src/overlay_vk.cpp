@@ -209,6 +209,7 @@ struct Image {
 	VkBuffer        host        = VK_NULL_HANDLE; // The IOSurface's memory
 	VkDeviceMemory  host_memory = VK_NULL_HANDLE;
 	void*           surface     = nullptr; // The IOSurfaceRef, retained while its memory is in use
+	bool            loaded      = false;   // A shell's buffer copied into `image` since it was written
 
 	bool exists() const { return image != VK_NULL_HANDLE || host != VK_NULL_HANDLE; }
 
@@ -304,6 +305,29 @@ struct lc_vk {
 		va_end(args);
 	}
 
+	// For host memory: one the CPU sees too, so no driver has to override a private type
+	uint32_t pick_host_memory_type(uint32_t bits) const {
+		const VkMemoryPropertyFlags want = VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT;
+		for (uint32_t i = 0; i < memory_props.memoryTypeCount; i++) {
+			if ((bits & (1u << i)) != 0 && (memory_props.memoryTypes[i].propertyFlags & want) == want) {
+				return i;
+			}
+		}
+		return pick_memory_type(bits);
+	}
+
+	// Whether the GPU and CPU share memory (Apple silicon), which unlocked IOSurface memory needs:
+	// a discrete GPU can keep an IOSurface in VRAM until it's locked
+	bool unified_memory() const {
+		const VkMemoryPropertyFlags want = VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT | VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT;
+		for (uint32_t i = 0; i < memory_props.memoryTypeCount; i++) {
+			if ((memory_props.memoryTypes[i].propertyFlags & want) == want) {
+				return true;
+			}
+		}
+		return false;
+	}
+
 	uint32_t pick_memory_type(uint32_t bits) const {
 		for (uint32_t i = 0; i < memory_props.memoryTypeCount; i++) {
 			if ((bits & (1u << i)) != 0 && (memory_props.memoryTypes[i].propertyFlags & VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT) != 0) {
@@ -339,15 +363,15 @@ struct lc_vk {
 		return vk.GetPhysicalDeviceImageFormatProperties2(info.physical_device, &format_info, &props) == VK_SUCCESS &&
 		       (external_props.externalMemoryProperties.externalMemoryFeatures & feature) != 0;
 #elif defined(LC_VK_HOST_SURFACES)
+		// Host memory is only ever imported, so that's the one feature that matters
 		(void)usage;
+		(void)feature;
 		VkPhysicalDeviceExternalBufferInfo buffer_info {VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_EXTERNAL_BUFFER_INFO};
 		buffer_info.usage      = VK_BUFFER_USAGE_TRANSFER_SRC_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT;
 		buffer_info.handleType = VK_EXTERNAL_MEMORY_HANDLE_TYPE_HOST_ALLOCATION_BIT_EXT;
 		VkExternalBufferProperties props {VK_STRUCTURE_TYPE_EXTERNAL_BUFFER_PROPERTIES};
 		vk.GetPhysicalDeviceExternalBufferProperties(info.physical_device, &buffer_info, &props);
-		// Host memory is only ever imported
-		return (props.externalMemoryProperties.externalMemoryFeatures & VK_EXTERNAL_MEMORY_FEATURE_IMPORTABLE_BIT) != 0 &&
-		       (feature == VK_EXTERNAL_MEMORY_FEATURE_IMPORTABLE_BIT || feature == VK_EXTERNAL_MEMORY_FEATURE_EXPORTABLE_BIT);
+		return (props.externalMemoryProperties.externalMemoryFeatures & VK_EXTERNAL_MEMORY_FEATURE_IMPORTABLE_BIT) != 0;
 #else
 		(void)usage;
 		(void)feature;
@@ -355,9 +379,10 @@ struct lc_vk {
 #endif
 	}
 
-	// Imports `size` bytes of host memory at `pointer` (an IOSurface's) as a buffer. Both have to
-	// be multiples of minImportedHostPointerAlignment; an IOSurface's memory is whole pages.
-	bool import_host(Image& img, void* pointer, VkDeviceSize size, VkBufferUsageFlags usage, uint32_t id) {
+	// Imports `size` bytes of host memory at `pointer` (an IOSurface's, `mapped` bytes of it) as a
+	// buffer. Both have to be multiples of minImportedHostPointerAlignment; an IOSurface's memory
+	// is whole pages.
+	bool import_host(Image& img, void* pointer, VkDeviceSize size, VkDeviceSize mapped, VkBufferUsageFlags usage, uint32_t id) {
 		const VkDevice device = info.device;
 		if (pointer == nullptr || host_alignment == 0 || reinterpret_cast<uintptr_t>(pointer) % host_alignment != 0) {
 			log(LC_LOG_ERROR, "overlay: IOSurface %u's memory isn't aligned for importing (%p, alignment %llu)", id, pointer,
@@ -365,6 +390,11 @@ struct lc_vk {
 			return false;
 		}
 		size = round_up(size, host_alignment);
+		if (size > round_up(mapped, host_alignment)) {
+			log(LC_LOG_ERROR, "overlay: IOSurface %u is smaller (%llu bytes) than its rows need (%llu)", id,
+			    static_cast<unsigned long long>(mapped), static_cast<unsigned long long>(size));
+			return false;
+		}
 
 		VkExternalMemoryBufferCreateInfo external {VK_STRUCTURE_TYPE_EXTERNAL_MEMORY_BUFFER_CREATE_INFO};
 		external.handleTypes = VK_EXTERNAL_MEMORY_HANDLE_TYPE_HOST_ALLOCATION_BIT_EXT;
@@ -380,6 +410,11 @@ struct lc_vk {
 		}
 		VkMemoryRequirements req {};
 		vk.GetBufferMemoryRequirements(device, img.host, &req);
+		if (req.size > size) {
+			log(LC_LOG_ERROR, "overlay: a buffer of IOSurface %u's memory needs more (%llu bytes) than it has", id,
+			    static_cast<unsigned long long>(req.size));
+			return false;
+		}
 		VkMemoryHostPointerPropertiesEXT pointer_props {VK_STRUCTURE_TYPE_MEMORY_HOST_POINTER_PROPERTIES_EXT};
 		if (vk.GetMemoryHostPointerPropertiesEXT(device, VK_EXTERNAL_MEMORY_HANDLE_TYPE_HOST_ALLOCATION_BIT_EXT, pointer, &pointer_props) !=
 		    VK_SUCCESS) {
@@ -397,7 +432,7 @@ struct lc_vk {
 		VkMemoryAllocateInfo alloc {VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO};
 		alloc.pNext           = &import_info;
 		alloc.allocationSize  = size;
-		alloc.memoryTypeIndex = pick_memory_type(types);
+		alloc.memoryTypeIndex = pick_host_memory_type(types);
 		if (const VkResult r = vk.AllocateMemory(device, &alloc, nullptr, &img.host_memory); r != VK_SUCCESS) {
 			img.host_memory = VK_NULL_HANDLE;
 			log(LC_LOG_ERROR, "overlay: importing IOSurface %u's memory failed: VkResult %d", id, r);
@@ -534,7 +569,8 @@ struct lc_vk {
 			return false;
 		}
 		const VkDeviceSize size = static_cast<VkDeviceSize>(img.stride) * height;
-		return import_host(img, IOSurfaceGetBaseAddress(ref), size, VK_BUFFER_USAGE_TRANSFER_SRC_BIT, lc_surface_id(surface)) &&
+		return import_host(img, IOSurfaceGetBaseAddress(ref), size, IOSurfaceGetAllocSize(ref), VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
+		                   lc_surface_id(surface)) &&
 		       create_local(img, width, height);
 #else
 		(void)img;
@@ -725,7 +761,7 @@ struct lc_vk {
 		capture.height  = height;
 		capture.stride  = static_cast<uint32_t>(IOSurfaceGetBytesPerRow(ref));
 		if (!import_host(capture, IOSurfaceGetBaseAddress(ref), static_cast<VkDeviceSize>(capture.stride) * height,
-		                 VK_BUFFER_USAGE_TRANSFER_DST_BIT, IOSurfaceGetID(ref))) {
+		                 IOSurfaceGetAllocSize(ref), VK_BUFFER_USAGE_TRANSFER_DST_BIT, IOSurfaceGetID(ref))) {
 			capture.destroy(vk, info.device);
 			return false;
 		}
@@ -971,6 +1007,9 @@ lc_vk* lc_vk_create(lc_overlay* overlay, const lc_vk_info* info, char* error, si
 	if (host_props.minImportedHostPointerAlignment == 0) {
 		vk->host_alignment = 0;
 	}
+	if (props.properties.vendorID != 0x106B || !vk->unified_memory()) {
+		return fail(vk, "the launcher's IOSurfaces can only be shared without locking them on Apple silicon (unified memory)");
+	}
 	const bool can_import = vk->host_alignment != 0 && vk->can_share(0, VK_EXTERNAL_MEMORY_FEATURE_IMPORTABLE_BIT);
 	vk->log(LC_LOG_INFO, "overlay: IOSurface memory import %s (alignment %llu)", can_import ? "yes" : "no",
 	        static_cast<unsigned long long>(vk->host_alignment));
@@ -1101,8 +1140,11 @@ VkImageView lc_vk_acquire(lc_vk* vk, VkCommandBuffer command) {
 	Image& buffer = vk->current.buffers[static_cast<size_t>(vk->draw)];
 	if (buffer.host != VK_NULL_HANDLE) {
 		// The shell wrote the IOSurface from its own process: its memory, copied into the image the
-		// menu is drawn from. Every present it's drawn, as copying is cheap and the shell doesn't
-		// write a buffer the helper's been told to draw.
+		// menu is drawn from, whenever the shell has written it since
+		if (buffer.loaded && !vk->fresh) {
+			vk->acquired = true;
+			return buffer.view;
+		}
 		const auto& f = vk->vk;
 		memory_barrier(f, command, VK_ACCESS_HOST_WRITE_BIT, VK_ACCESS_TRANSFER_READ_BIT, VK_PIPELINE_STAGE_HOST_BIT,
 		               VK_PIPELINE_STAGE_TRANSFER_BIT);
@@ -1116,6 +1158,7 @@ VkImageView lc_vk_acquire(lc_vk* vk, VkCommandBuffer command) {
 		barrier(f, command, buffer.image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
 		        VK_ACCESS_TRANSFER_WRITE_BIT, VK_ACCESS_SHADER_READ_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT);
 		buffer.layout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+		buffer.loaded = true;
 		vk->acquired  = true;
 		return buffer.view;
 	}
