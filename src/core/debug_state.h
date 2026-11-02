@@ -4,6 +4,7 @@
 #pragma once
 
 #include <atomic>
+#include <condition_variable>
 #include <mutex>
 #include <shared_mutex>
 #include <unordered_map>
@@ -138,6 +139,7 @@ class DebugStateImpl {
     std::queue<std::string> debug_message_popup;
 
     std::mutex guest_threads_mutex{};
+    std::condition_variable guest_threads_resumed{};
     std::vector<ThreadID> guest_threads{};
     std::atomic_bool is_guest_threads_paused = false;
     u64 pause_time{};

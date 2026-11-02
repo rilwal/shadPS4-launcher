@@ -105,6 +105,8 @@ public:
     void PollLightColour();
     bool SetVibration(u8 smallMotor, u8 largeMotor);
     void SetTouchpadState(int touchIndex, bool touchDown, float x, float y);
+    void HoldForLauncher(bool hold);
+    void HideHeldButtons();
 
     float gyro_buf[3] = {0.0f, 0.0f, 0.0f}, accel_buf[3] = {0.0f, 9.81f, 0.0f};
     s32 user_id = Libraries::UserService::ORBIS_USER_SERVICE_USER_ID_INVALID;
@@ -113,6 +115,7 @@ public:
 private:
     // m_state_mutex must be held by the caller.
     void PushStateLocked(u64 timestamp = 0);
+    [[nodiscard]] State VisibleLocked() const;
     void UpdateOrientationLocked(u64 timestamp);
 
     u8 m_next_touch_id{1};
@@ -122,6 +125,13 @@ private:
     std::optional<Colour> override_colour{};
 
     State m_state;
+
+    // The game launcher's quick menu has the pad: the game reads `m_frozen` and no new samples.
+    // Buttons still down when the menu hands the pad back stay hidden (`m_masked`) until they're
+    // released, so the press that closed the menu doesn't reach the game.
+    bool m_launcher_hold{};
+    Libraries::Pad::OrbisPadButtonDataOffset m_masked{};
+    State m_frozen;
 
     std::mutex m_state_mutex;
     RingBufferQueue<State> m_states_queue;
@@ -154,6 +164,11 @@ public:
         controllers[i]->override_colour = {r, g, b};
     }
     void ResetLightbarColors();
+    // While the game launcher's quick menu is open (GameController::HoldForLauncher)
+    void HoldForLauncher(bool hold);
+    // Hides the buttons held now from the game until they're released (a key that closed the
+    // game launcher's keyboard)
+    void HideHeldButtons();
 };
 
 } // namespace Input

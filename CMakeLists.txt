@@ -1295,8 +1295,14 @@ set(EMULATOR src/emulator.cpp
              src/sdl_window.cpp
 )
 
-set(LAUNCHER src/launcher/library.cpp
+set(LAUNCHER src/launcher/input.cpp
+             src/launcher/input.h
+             src/launcher/library.cpp
              src/launcher/library.h
+             src/launcher/osk.cpp
+             src/launcher/osk.h
+             src/launcher/overlay.cpp
+             src/launcher/overlay.h
              src/launcher/plugin.cpp
              src/launcher/plugin.h
              src/launcher/session.cpp

@@ -10,6 +10,7 @@
 #include "core/libraries/videoout/driver.h"
 #include "core/libraries/videoout/videoout_error.h"
 #include "imgui/renderer/imgui_core.h"
+#include "launcher/overlay.h"
 #include "video_core/amdgpu/liverpool.h"
 #include "video_core/renderer_vulkan/vk_presenter.h"
 
@@ -286,6 +287,9 @@ void VideoOutDriver::DrawLastFrame() {
     const auto frame = presenter->PrepareLastFrame();
     if (frame != nullptr) {
         presenter->Present(frame, true);
+    } else if (Launcher::Overlay::WantsPresents()) {
+        // No frame yet (paused while booting): the launcher's menu still needs presents
+        DrawBlankFrame();
     }
 }
 
@@ -372,7 +376,8 @@ void VideoOutDriver::PresentThread(std::stop_token token) {
                 if (timer.GetTotalWait().count() < 0) { // Dont draw too fast
                     if (!main_port.is_open) {
                         DrawBlankFrame();
-                    } else if (ImGui::Core::MustKeepDrawing()) {
+                    } else if (ImGui::Core::MustKeepDrawing() ||
+                               Launcher::Overlay::WantsPresents()) {
                         DrawLastFrame();
                     }
                 }

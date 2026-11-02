@@ -27,6 +27,7 @@
 #include "input/controller.h"
 #include "input/input_handler.h"
 #include "input/input_mouse.h"
+#include "launcher/input.h"
 #include "sdl_window.h"
 #include "video_core/renderdoc.h"
 
@@ -209,6 +210,11 @@ void WindowSDL::WaitEvent() {
         return;
     }
 
+    // The launcher's menu or keyboard, shown in the game's frames, has the keys and mouse
+    if (Launcher::Input::Forward(window, event)) {
+        return;
+    }
+
     if (Libraries::Mouse::PushSDLEvent(event) || Libraries::Keyboard::PushSDLEvent(event)) {
         return;
     }
@@ -218,11 +224,13 @@ void WindowSDL::WaitEvent() {
     }
 
     switch (event.type) {
+    case SDL_EVENT_WINDOW_RESTORED:
+    case SDL_EVENT_WINDOW_LEAVE_FULLSCREEN:
+        ApplyPendingSize();
+        [[fallthrough]];
     case SDL_EVENT_WINDOW_RESIZED:
     case SDL_EVENT_WINDOW_MAXIMIZED:
-    case SDL_EVENT_WINDOW_RESTORED:
     case SDL_EVENT_WINDOW_ENTER_FULLSCREEN:
-    case SDL_EVENT_WINDOW_LEAVE_FULLSCREEN:
         OnResize();
         break;
     case SDL_EVENT_WINDOW_MINIMIZED:
@@ -265,6 +273,9 @@ void WindowSDL::WaitEvent() {
         }
         break;
     }
+    case SDL_EVENT_LAUNCHER_WINDOW:
+        FollowWindowSettings(event.user.code);
+        break;
     case SDL_EVENT_TOGGLE_PAUSE:
         if (DebugState.IsGuestThreadsPaused()) {
             LOG_INFO(Frontend, "Game Resumed");
@@ -346,11 +357,13 @@ void WindowSDL::InitTimers() {
     SDL_AddTimer(33, Input::MousePolling, (void*)controllers[0]);
 }
 
+// Neither waits for the main thread: the presenter calls them for the launcher's menu, and may
+// do so as the game quits, when the main thread has stopped taking events
 void WindowSDL::RequestKeyboard() {
     if (keyboard_grab == 0) {
         SDL_RunOnMainThread(
             [](void* userdata) { SDL_StartTextInput(static_cast<SDL_Window*>(userdata)); }, window,
-            true);
+            false);
     }
     keyboard_grab++;
 }
@@ -361,8 +374,45 @@ void WindowSDL::ReleaseKeyboard() {
     if (keyboard_grab == 0) {
         SDL_RunOnMainThread(
             [](void* userdata) { SDL_StopTextInput(static_cast<SDL_Window*>(userdata)); }, window,
-            true);
+            false);
     }
+}
+
+void WindowSDL::FollowWindowSettings(s32 changed) {
+    if (changed & LAUNCHER_WINDOW_SIZE) {
+        size_pending = true;
+    }
+    // Only when it changed, so a size doesn't undo F11
+    if (changed & LAUNCHER_WINDOW_MODE) {
+        const SDL_DisplayMode* mode = nullptr;
+        if (EmulatorSettings.GetFullScreenMode() == "Fullscreen") {
+            mode = SDL_GetDesktopDisplayMode(SDL_GetDisplayForWindow(window));
+        }
+        SDL_SetWindowFullscreenMode(window, mode);
+        SDL_SetWindowFullscreen(window, EmulatorSettings.IsFullScreen());
+        SDL_SyncWindow(window);
+    }
+    ApplyPendingSize();
+    OnResize();
+}
+
+void WindowSDL::ApplyPendingSize() {
+    if (!size_pending) {
+        return;
+    }
+    const SDL_WindowFlags flags = SDL_GetWindowFlags(window);
+    // When it leaves fullscreen (SDL_EVENT_WINDOW_LEAVE_FULLSCREEN)
+    if (flags & SDL_WINDOW_FULLSCREEN) {
+        return;
+    }
+    // When it's restored (SDL_EVENT_WINDOW_RESTORED)
+    if (flags & SDL_WINDOW_MAXIMIZED) {
+        SDL_RestoreWindow(window);
+        return;
+    }
+    size_pending = false;
+    SDL_SetWindowSize(window, static_cast<int>(EmulatorSettings.GetWindowWidth()),
+                      static_cast<int>(EmulatorSettings.GetWindowHeight()));
 }
 
 void WindowSDL::OnResize() {

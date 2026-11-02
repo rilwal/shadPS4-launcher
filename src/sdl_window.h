@@ -81,6 +81,11 @@ public:
     void ReleaseKeyboard();
 
 private:
+    // The window's size or fullscreen setting (LAUNCHER_WINDOW_*), after it changed while the
+    // game runs
+    void FollowWindowSettings(s32 changed);
+    // The size setting, once the window isn't fullscreen or maximized: SDL ignores sizes set then
+    void ApplyPendingSize();
     void OnResize();
     void OnKeyboardMouseInput(const SDL_Event* event);
     void OnGamepadEvent(const SDL_Event* event);
@@ -93,6 +98,7 @@ private:
     SDL_Window* window{};
     bool is_shown{};
     bool is_open{true};
+    bool size_pending{};
 };
 
 void SetWindowIcon(SDL_Window* window, const std::vector<u8>& png);
