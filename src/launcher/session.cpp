@@ -52,10 +52,14 @@ std::atomic_flag g_achievements_sent;
 std::atomic_bool g_paused_for_menu;
 
 // While the guest is paused, one of its threads may be stopped inside the logger, holding its
-// lock, so the launcher's lines from then wait here until the guest resumes
+// lock, so the launcher's lines from then wait here until the guest resumes. A game thread can
+// hold g_held_mutex too (a trophy unlock logs through the client), so while paused it's only
+// tried, never waited for.
 enum class Level { Info, Warning, Error };
 std::mutex g_held_mutex;
 std::vector<std::pair<Level, std::string>> g_held;
+std::atomic_bool g_has_held;
+size_t g_dropped = 0;
 constexpr size_t HELD_LINES = 256;
 
 void Write(Level level, const std::string& line) {
@@ -74,22 +78,38 @@ void Write(Level level, const std::string& line) {
 
 // Logs the lines held while the guest was paused. After it resumes.
 void WriteHeld() {
+    if (!g_has_held.load()) {
+        return;
+    }
     std::vector<std::pair<Level, std::string>> held;
+    size_t dropped = 0;
     {
         std::scoped_lock lock(g_held_mutex);
         held.swap(g_held);
+        std::swap(dropped, g_dropped);
+        g_has_held = false;
     }
     for (const auto& [level, line] : held) {
         Write(level, line);
+    }
+    if (dropped != 0) {
+        Write(Level::Warning,
+              fmt::format("{} lines from while the game was paused dropped", dropped));
     }
 }
 
 void Say(Level level, std::string line) {
     if (DebugState.IsGuestThreadsPaused()) {
-        std::scoped_lock lock(g_held_mutex);
+        std::unique_lock lock(g_held_mutex, std::try_to_lock);
+        if (!lock) {
+            return;
+        }
         if (g_held.size() < HELD_LINES) {
             g_held.emplace_back(level, std::move(line));
+        } else {
+            g_dropped++;
         }
+        g_has_held = true;
         return;
     }
     WriteHeld();
@@ -138,6 +158,7 @@ void MenuOpened(void*, bool opened) {
     }
     // Logged after the resume (Say holds lines while the guest is paused)
     if (!opened) {
+        WriteHeld();
         Say(Level::Info, "quick menu closed");
     }
     lc_paused(g_session, DebugState.IsGuestThreadsPaused());
