@@ -3,6 +3,7 @@
 
 #pragma once
 
+#include <atomic>
 #include <condition_variable>
 
 #include "core/libraries/videoout/buffer.h"
@@ -52,6 +53,11 @@ class Presenter {
 public:
     Presenter(Frontend::WindowSDL& window, AmdGpu::Liverpool* liverpool);
     ~Presenter();
+
+    // The swapchain is made again on the next present, for a changed present mode. Any thread.
+    void RecreateSwapchain() {
+        recreate_swapchain = true;
+    }
 
     HostPasses::PostProcessingPass::Settings& GetPPSettingsRef() {
         return pp_settings;
@@ -117,6 +123,7 @@ private:
     Instance instance;
     HostPasses::FsrPass fsr_pass;
     HostPasses::FsrPass::Settings fsr_settings{};
+    std::atomic_bool recreate_swapchain{};
     HostPasses::PostProcessingPass::Settings pp_settings{};
     HostPasses::PostProcessingPass pp_pass;
     AmdGpu::Liverpool* liverpool;

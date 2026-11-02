@@ -1,11 +1,13 @@
 // SPDX-FileCopyrightText: Copyright 2026 shadPS4 Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+#include <algorithm>
 #include <array>
 #include <atomic>
 #include <cstdlib>
 #include <mutex>
 #include <optional>
+#include <utility>
 #include <SDL3/SDL_events.h>
 #include <SDL3/SDL_properties.h>
 #include <SDL3/SDL_video.h>
@@ -34,7 +36,11 @@ namespace {
 constexpr u32 CONFIGURE_WAIT_MS = 5000;
 
 lc_session* g_session = nullptr;
+// The launcher's values, by key: configure's, the plugin's own, and the live changes since
+std::mutex g_values_mutex;
 std::vector<std::pair<std::string, std::optional<std::string>>> g_values;
+// ApplySettings has run, so changes take effect as they come
+bool g_applied = false;
 std::atomic_flag g_ready;
 std::atomic_flag g_achievements_sent;
 // The quick menu paused the game, which it resumes when it closes. A game the player had paused
@@ -85,6 +91,35 @@ void MenuOpened(void*, bool opened) {
     lc_paused(g_session, DebugState.IsGuestThreadsPaused());
 }
 
+void SetValue(const std::string& key, std::optional<std::string> value) {
+    const auto it = std::ranges::find_if(g_values, [&](const auto& kv) { return kv.first == key; });
+    if (it != g_values.end()) {
+        it->second = std::move(value);
+    } else {
+        g_values.emplace_back(key, std::move(value));
+    }
+}
+
+// A setting changed in the launcher while the game runs
+void SettingChanged(void*, const char* key, const char* value) {
+    if (key == nullptr) {
+        return;
+    }
+    const std::optional<std::string> v =
+        value != nullptr ? std::optional<std::string>(value) : std::nullopt;
+    std::scoped_lock lock(g_values_mutex);
+    SetValue(key, v);
+    if (!g_applied) {
+        return; // Still booting: ApplySettings applies it with the rest
+    }
+    const auto error = Settings::ApplyLive(key, v);
+    if (!error.empty()) {
+        LOG_WARNING(Frontend, "Launcher: {}", error);
+    } else {
+        LOG_INFO(Frontend, "Launcher: {} = {} (live)", key, v.value_or("(default)"));
+    }
+}
+
 u64 NativeWindow() {
     if (g_window == nullptr || g_window->GetSDLWindow() == nullptr) {
         return 0;
@@ -111,6 +146,7 @@ void Connect(std::vector<std::string> settings) {
     cb.log = Log;
     cb.quit = Quit;
     cb.overlay = MenuOpened;
+    cb.setting = SettingChanged;
 
     const std::string name = std::string("shadPS4 ") + Common::g_version;
     lc_connect_info info{};
@@ -133,9 +169,9 @@ void Connect(std::vector<std::string> settings) {
     size_t count = 0;
     if (lc_wait_configure(g_session, CONFIGURE_WAIT_MS, &values, &count)) {
         for (size_t i = 0; i < count; i++) {
-            g_values.emplace_back(values[i].key, values[i].value != nullptr
-                                                     ? std::optional<std::string>(values[i].value)
-                                                     : std::nullopt);
+            SetValue(values[i].key, values[i].value != nullptr
+                                        ? std::optional<std::string>(values[i].value)
+                                        : std::nullopt);
         }
     } else {
         LOG_WARNING(Frontend, "Launcher: no settings came before boot");
@@ -147,7 +183,7 @@ void Connect(std::vector<std::string> settings) {
             LOG_ERROR(Frontend, "Launcher: {} isn't key=value", setting);
             continue;
         }
-        g_values.emplace_back(setting.substr(0, eq), setting.substr(eq + 1));
+        SetValue(setting.substr(0, eq), setting.substr(eq + 1));
     }
 }
 
@@ -160,8 +196,10 @@ void ApplySettings() {
         return;
     }
     // Again after shadPS4's own settings dialog reloads its config, which says nothing new
-    static std::atomic_flag applied;
-    const bool again = applied.test_and_set();
+    std::scoped_lock lock(g_values_mutex);
+    const bool again = std::exchange(g_applied, true);
+    // What shadPS4's config says, which a setting set back to its default goes back to
+    Settings::CaptureLoaded();
     for (const auto& [key, value] : g_values) {
         const auto error = Settings::Apply(key, value);
         if (!error.empty()) {

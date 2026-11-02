@@ -265,6 +265,9 @@ void WindowSDL::WaitEvent() {
         }
         break;
     }
+    case SDL_EVENT_LAUNCHER_WINDOW:
+        FollowWindowSettings();
+        break;
     case SDL_EVENT_TOGGLE_PAUSE:
         if (DebugState.IsGuestThreadsPaused()) {
             LOG_INFO(Frontend, "Game Resumed");
@@ -363,6 +366,20 @@ void WindowSDL::ReleaseKeyboard() {
             [](void* userdata) { SDL_StopTextInput(static_cast<SDL_Window*>(userdata)); }, window,
             true);
     }
+}
+
+void WindowSDL::FollowWindowSettings() {
+    // Its size when it isn't fullscreen, kept by SDL for leaving fullscreen
+    SDL_SetWindowSize(window, static_cast<int>(EmulatorSettings.GetWindowWidth()),
+                      static_cast<int>(EmulatorSettings.GetWindowHeight()));
+    const SDL_DisplayMode* mode = nullptr;
+    if (EmulatorSettings.GetFullScreenMode() == "Fullscreen") {
+        mode = SDL_GetDesktopDisplayMode(SDL_GetDisplayForWindow(window));
+    }
+    SDL_SetWindowFullscreenMode(window, mode);
+    SDL_SetWindowFullscreen(window, EmulatorSettings.IsFullScreen());
+    SDL_SyncWindow(window);
+    OnResize();
 }
 
 void WindowSDL::OnResize() {

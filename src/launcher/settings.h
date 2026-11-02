@@ -27,14 +27,24 @@ struct Row {
     // The plugin's own setting, passed to the games it starts with SettingFlag, rather than one
     // the launcher sends in configure
     bool runner = false;
+    // It can change while a game runs (ApplyLive)
+    bool live = false;
 };
 
 // Every row, in order, with defaults read from EmulatorSettings.
 [[nodiscard]] std::vector<Row> Rows();
 
+// Remembers what the loaded config says for each setting, which a setting going back to its
+// default (no value) returns to. Once the config for the game is loaded, before Apply.
+void CaptureLoaded();
+
 // Applies a value over the loaded config, as a game-specific value that's never saved. No value
-// leaves the loaded config's own. Returns an error, or an empty string.
+// is the loaded config's own. Returns an error, or an empty string.
 std::string Apply(std::string_view key, const std::optional<std::string>& value);
+
+// Apply, while the game runs: the change takes effect now. A setting that isn't live is still
+// stored, and an error says it waits for the next boot.
+std::string ApplyLive(std::string_view key, const std::optional<std::string>& value);
 
 // What a spawned game gets on its command line for one of the plugin's own settings, as
 // "key=value".

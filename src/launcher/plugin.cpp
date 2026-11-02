@@ -293,6 +293,7 @@ private:
             s.value = row.default_value.c_str();
             s.default_value = row.default_value.c_str();
             s.group = GROUP;
+            s.live = row.live;
             if (row.kind == Settings::Row::Kind::Toggle) {
                 s.kind = LC_SETTING_TOGGLE;
             } else {

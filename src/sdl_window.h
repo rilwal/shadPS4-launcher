@@ -81,6 +81,8 @@ public:
     void ReleaseKeyboard();
 
 private:
+    // The window's size and fullscreen settings, after they changed while the game runs
+    void FollowWindowSettings();
     void OnResize();
     void OnKeyboardMouseInput(const SDL_Event* event);
     void OnGamepadEvent(const SDL_Event* event);

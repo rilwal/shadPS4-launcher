@@ -104,12 +104,29 @@ in the launcher keeps shadPS4's value (and its per-game config).
   `configure` before boot. shadPS4 applies them after loading its config for the game, as
   game-specific values over both its global and per-game config, and never saves them.
 
-All of them are read while the game boots for now.
+Some can change while the game runs: the launcher sends the change (`setting`), and shadPS4
+applies it at once. Going back to the default means going back to what shadPS4's config said when
+the game booted.
+
+| Live | How it takes effect |
+| --- | --- |
+| Window size, display mode | The window follows on the main thread (a `SDL_EVENT_LAUNCHER_WINDOW` event) |
+| Present mode | The swapchain is made again on the next present |
+| FSR, RCAS, sharpening strength | The presenter's upscaling settings |
+| Frame rate | shadPS4's frame rate counter |
+| Volume | The audio output's gain |
+| Hide the cursor, motion controls | Read where they're used |
+| Input in the background | SDL's background joystick hint |
+
+The rest (output resolution, HDR, vblank frequency, the accuracy options, PS4 Pro mode, the
+network, the audio backend, Confirm with Circle, the console language) are read while the game
+boots; their help says they take effect when the game next starts, and the launcher keeps a change
+for the next boot. shadPS4's own in-game settings dialog reloads its config when it closes, after
+which the launcher's values, live changes included, are applied again.
 
 ## Not done yet
 
 - The quick menu in the game's window on macOS and Windows.
-- Settings that change while the game runs.
 - The launcher's on-screen keyboard for the game's text input.
 - The console language is global only, since the plugin needs it for trophy lists. Trophy lists
   aren't sent again when the language changes.
