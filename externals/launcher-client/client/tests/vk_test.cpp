@@ -1,13 +1,22 @@
-// The Vulkan helper on a real GPU: the "shell" exports three linear dma-bufs from the same device
-// and fills the first with a half-transparent red, the helper imports them, captures a blue game
-// frame, and draws the menu over it. The result has to be the premultiplied blend of the two.
-// Skipped where no device can share linear dma-bufs (lavapipe has no DRM format modifiers).
+// The Vulkan helper on a real GPU: the "shell" fills the first of its three buffers with a
+// half-transparent red, the helper imports them, captures a blue game frame, and draws the menu
+// over it. The result has to be the premultiplied blend of the two.
+// Linux: the buffers are linear dma-bufs exported from the same device; skipped where no device
+// can share them (lavapipe has no DRM format modifiers).
+// macOS: the buffers are IOSurfaces, as the shell makes them, and the capture is read back from
+// the IOSurface the shell gets. LC_TEST_VULKAN names the library to load (the Vulkan loader, or a
+// driver such as libMoltenVK.dylib); the loader's VK_DRIVER_FILES picks KosmicKrisp.
 #include "check.h"
 #include "fake_launcher.h"
+#if defined(__APPLE__)
+#include "fake_shell_macos.h"
+#else
 #include "fake_shell.h"
+#endif
 #include "launcher_overlay_vk.h"
 
 #include <cstdlib>
+#include <cstring>
 #include <dlfcn.h>
 #include <string>
 #include <vector>
@@ -73,18 +82,58 @@ struct Gpu {
 	LC_TEST_FNS(LC_TEST_DECLARE)
 #undef LC_TEST_DECLARE
 
-	// The reason to skip, or "" once it has a device that can share dma-bufs
+	// The reason to skip, or "" once it has a device the helper can share buffers with
 	std::string open() {
-		lib = ::dlopen("libvulkan.so.1", RTLD_NOW | RTLD_LOCAL);
+#if defined(__APPLE__)
+		std::vector<std::string> names = {"libvulkan.1.dylib", "libvulkan.dylib", "libMoltenVK.dylib"};
+#else
+		std::vector<std::string> names = {"libvulkan.so.1"};
+#endif
+		if (const char* named = std::getenv("LC_TEST_VULKAN")) {
+			names = {named};
+		}
+		for (const auto& name: names) {
+			lib = lib != nullptr ? lib : ::dlopen(name.c_str(), RTLD_NOW | RTLD_LOCAL);
+		}
 		if (lib == nullptr) {
 			return "no Vulkan loader";
 		}
 		gipa = reinterpret_cast<PFN_vkGetInstanceProcAddr>(::dlsym(lib, "vkGetInstanceProcAddr"));
+		if (gipa == nullptr) {
+			// A driver named straight (a Mesa ICD such as KosmicKrisp) has only the ICD entry point
+			gipa = reinterpret_cast<PFN_vkGetInstanceProcAddr>(::dlsym(lib, "vk_icdGetInstanceProcAddr"));
+			// What the loader would tell it first
+			using Negotiate = VkResult (*)(uint32_t*);
+			if (auto negotiate = reinterpret_cast<Negotiate>(::dlsym(lib, "vk_icdNegotiateLoaderICDInterfaceVersion"))) {
+				uint32_t version = 5;
+				negotiate(&version);
+			}
+		}
+		if (gipa == nullptr) {
+			return "no vkGetInstanceProcAddr";
+		}
 		auto create_instance = reinterpret_cast<PFN_vkCreateInstance>(gipa(VK_NULL_HANDLE, "vkCreateInstance"));
+		auto instance_extensions =
+		    reinterpret_cast<PFN_vkEnumerateInstanceExtensionProperties>(gipa(VK_NULL_HANDLE, "vkEnumerateInstanceExtensionProperties"));
 		VkApplicationInfo app {VK_STRUCTURE_TYPE_APPLICATION_INFO};
 		app.apiVersion = VK_API_VERSION_1_3;
 		VkInstanceCreateInfo ici {VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO};
 		ici.pApplicationInfo = &app;
+		// The Vulkan loader lists MoltenVK and KosmicKrisp only to an instance that asks for them
+		const char* portability = "VK_KHR_portability_enumeration";
+		if (instance_extensions != nullptr) {
+			uint32_t n = 0;
+			instance_extensions(nullptr, &n, nullptr);
+			std::vector<VkExtensionProperties> have(n);
+			instance_extensions(nullptr, &n, have.data());
+			for (const auto& e: have) {
+				if (std::string(e.extensionName) == portability) {
+					ici.flags                   = 0x00000001; // VK_INSTANCE_CREATE_ENUMERATE_PORTABILITY_BIT_KHR
+					ici.enabledExtensionCount   = 1;
+					ici.ppEnabledExtensionNames = &portability;
+				}
+			}
+		}
 		if (create_instance == nullptr || create_instance(&ici, nullptr, &instance) != VK_SUCCESS) {
 			return "no Vulkan instance";
 		}
@@ -92,9 +141,10 @@ struct Gpu {
 		LC_TEST_FNS(LC_TEST_LOAD)
 #undef LC_TEST_LOAD
 
-		uint32_t extension_count = 0;
-		const char* const* wanted = lc_vk_device_extensions(&extension_count);
-		uint32_t count = 0;
+		uint32_t                 extension_count = 0;
+		const char* const*       wanted          = lc_vk_device_extensions(&extension_count);
+		std::vector<const char*> enable(wanted, wanted + extension_count);
+		uint32_t                 count = 0;
 		EnumeratePhysicalDevices(instance, &count, nullptr);
 		std::vector<VkPhysicalDevice> devices(count);
 		EnumeratePhysicalDevices(instance, &count, devices.data());
@@ -113,6 +163,12 @@ struct Gpu {
 			}
 			if (all) {
 				physical = candidate;
+				for (const auto& e: have) {
+					// A portability driver's device has to be made with this when it has it
+					if (std::string(e.extensionName) == "VK_KHR_portability_subset") {
+						enable.push_back("VK_KHR_portability_subset");
+					}
+				}
 				break;
 			}
 		}
@@ -121,7 +177,7 @@ struct Gpu {
 		}
 		VkPhysicalDeviceProperties props {};
 		GetPhysicalDeviceProperties(physical, &props);
-		std::printf("vk: using %s\n", props.deviceName);
+		std::printf("vk: using %s (vendor 0x%04x, driver 0x%x)\n", props.deviceName, props.vendorID, props.driverVersion);
 		GetPhysicalDeviceMemoryProperties(physical, &memory);
 
 		uint32_t families = 0;
@@ -142,8 +198,8 @@ struct Gpu {
 		VkDeviceCreateInfo dci {VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO};
 		dci.queueCreateInfoCount    = 1;
 		dci.pQueueCreateInfos       = &qci;
-		dci.enabledExtensionCount   = extension_count;
-		dci.ppEnabledExtensionNames = wanted;
+		dci.enabledExtensionCount   = static_cast<uint32_t>(enable.size());
+		dci.ppEnabledExtensionNames = enable.data();
 		if (CreateDevice(physical, &dci, nullptr, &device) != VK_SUCCESS) {
 			return "creating the device failed";
 		}
@@ -221,6 +277,7 @@ struct Owned {
 	VkDeviceMemory memory = VK_NULL_HANDLE;
 };
 
+#if !defined(__APPLE__)
 // A linear BGRA8 dma-buf as the shell makes one, cleared to `color`
 Owned shell_buffer(Gpu& gpu, VkClearColorValue color, int& fd, uint32_t& stride) {
 	Owned                                     out;
@@ -274,17 +331,43 @@ Owned shell_buffer(Gpu& gpu, VkClearColorValue color, int& fd, uint32_t& stride)
 	gpu.GetMemoryFdKHR(gpu.device, &get, &fd);
 	return out;
 }
+#else
+// Fills an IOSurface with one BGRA colour, as the shell's renderer would
+void fill(IOSurfaceRef surface, const uint8_t (&bgra)[4]) {
+	IOSurfaceLock(surface, 0, nullptr);
+	auto*        base = static_cast<uint8_t*>(IOSurfaceGetBaseAddress(surface));
+	const size_t row  = IOSurfaceGetBytesPerRow(surface);
+	for (size_t y = 0; y < IOSurfaceGetHeight(surface); y++) {
+		for (size_t x = 0; x < IOSurfaceGetWidth(surface); x++) {
+			std::memcpy(base + y * row + x * 4, bgra, 4);
+		}
+	}
+	IOSurfaceUnlock(surface, 0, nullptr);
+}
+#endif
 
 void run(Gpu& gpu) {
-	// The shell's buffers: 0 is premultiplied red at half alpha, the others clear
-	std::vector<int>   fds(3, -1);
+	// The shell's buffers: 0 is premultiplied red at half alpha, 1 green at half alpha, 2 clear
 	std::vector<Owned> owned;
-	uint32_t           stride = 0;
+#if defined(__APPLE__)
+	FakeShell shell;
+	fill(shell.buffer(0), {0, 0, 128, 128});
+	fill(shell.buffer(1), {0, 128, 0, 128});
+	fill(shell.buffer(2), {0, 0, 0, 0});
+	const std::string offer = shell.offer(SIZE);
+#else
+	std::vector<int> fds(3, -1);
+	uint32_t         stride = 0;
 	for (int i = 0; i < 3; i++) {
-		const VkClearColorValue color = i == 0 ? VkClearColorValue {{0.5f, 0.0f, 0.0f, 0.5f}} : VkClearColorValue {{0, 0, 0, 0}};
+		const VkClearColorValue color = i == 0   ? VkClearColorValue {{0.5f, 0.0f, 0.0f, 0.5f}}
+		                                : i == 1 ? VkClearColorValue {{0.0f, 0.5f, 0.0f, 0.5f}}
+		                                         : VkClearColorValue {{0, 0, 0, 0}};
 		owned.push_back(shell_buffer(gpu, color, fds[static_cast<size_t>(i)], stride));
 	}
-	FakeShell    shell(fds, stride);
+	FakeShell         shell(fds, stride);
+	const std::string offer = R"({"type":"overlay_surface","buffers":[11,12,13],"header":10,"service":")" + shell.name() +
+	                          R"(","width":64,"height":64})";
+#endif
 	FakeLauncher launcher;
 
 	lc_callbacks cb {};
@@ -386,15 +469,23 @@ void run(Gpu& gpu) {
 
 	// The menu opens over the game
 	launcher.send(R"({"type":"overlay_opened"})");
-	launcher.send(R"({"type":"overlay_surface","buffers":[11,12,13],"header":10,"service":")" + shell.name() +
-	              R"(","width":64,"height":64})");
+	launcher.send(offer);
 	launcher.send(R"({"type":"overlay_visible","visible":true})");
 	shell.publish(0);
 	std::this_thread::sleep_for(std::chrono::milliseconds(200));
 
+	void* mapped = nullptr;
+	gpu.MapMemory(gpu.device, readback_memory, 0, VK_WHOLE_SIZE, 0, &mapped);
+	const auto* px   = static_cast<const uint8_t*>(mapped) + (SIZE / 2 * SIZE + SIZE / 2) * 4;
+	const auto  near = [](int got, int want) { return got >= want - 3 && got <= want + 3; };
+	const auto  is   = [&](int b, int g, int r, int a) { return near(px[0], b) && near(px[1], g) && near(px[2], r) && near(px[3], a); };
+
 	bool     drew      = false;
 	uint64_t completed = 0;
-	for (uint64_t serial = 1; serial <= 20; serial++) {
+	uint64_t serial    = 0;
+	// One present of the game's frame with the menu over it, read back into `px`
+	const auto present = [&]() {
+		serial++;
 		lc_vk_frame frame {};
 		lc_vk_begin(vk, completed, {SIZE, SIZE}, &frame);
 		gpu.begin();
@@ -426,6 +517,9 @@ void run(Gpu& gpu) {
 		gpu.submit();
 		lc_vk_end(vk, serial);
 		completed = serial;
+	};
+	for (int i = 0; i < 20; i++) {
+		present();
 		if (drew && launcher.count("capture_surface") != 0) {
 			break;
 		}
@@ -433,17 +527,54 @@ void run(Gpu& gpu) {
 	}
 	CHECK(drew);
 	CHECK(launcher.wait_for("view").has_value());
+#if defined(__APPLE__)
+	CHECK(shell.wait_capture().has_value());
+	// The capture is the game's frame as it was before the menu went over it: blue
+	if (IOSurfaceRef capture = shell.capture_surface()) {
+		IOSurfaceLock(capture, kIOSurfaceLockReadOnly, nullptr);
+		const auto* base = static_cast<const uint8_t*>(IOSurfaceGetBaseAddress(capture));
+		const auto* cp   = base + IOSurfaceGetBytesPerRow(capture) * (SIZE / 2) + (SIZE / 2) * 4;
+		const int bgra[4] = {cp[0], cp[1], cp[2], cp[3]};
+		IOSurfaceUnlock(capture, kIOSurfaceLockReadOnly, nullptr);
+		if (!(bgra[0] == 255 && bgra[1] == 0 && bgra[2] == 0 && bgra[3] == 255)) {
+			FAIL("captured pixel is BGRA %d %d %d %d, not 255 0 0 255", bgra[0], bgra[1], bgra[2], bgra[3]);
+		}
+	}
+#else
 	CHECK(shell.wait_capture().has_value() && shell.capture_had_fd());
+#endif
 	CHECK(launcher.wait_for("capture_surface").has_value());
 
 	// menu + (1 - menu.a) * game = (0.5, 0, 0, 0.5) + 0.5 * (0, 0, 1, 1), as BGRA bytes
-	void* mapped = nullptr;
-	gpu.MapMemory(gpu.device, readback_memory, 0, VK_WHOLE_SIZE, 0, &mapped);
-	const auto* px   = static_cast<const uint8_t*>(mapped) + (SIZE / 2 * SIZE + SIZE / 2) * 4;
-	const auto  near = [](int got, int want) { return got >= want - 3 && got <= want + 3; };
-	if (!(near(px[0], 128) && near(px[1], 0) && near(px[2], 128) && near(px[3], 255))) {
+	if (!is(128, 0, 128, 255)) {
 		FAIL("drawn pixel is BGRA %d %d %d %d, not about 128 0 128 255", px[0], px[1], px[2], px[3]);
 	}
+
+	// The menu changes: the shell publishes buffer 1, and the next presents draw it, not the
+	// copy of buffer 0 (on macOS, a buffer is copied again whenever the shell publishes it)
+	shell.publish(1);
+	for (int i = 0; i < 20 && !is(128, 128, 0, 255); i++) {
+		std::this_thread::sleep_for(std::chrono::milliseconds(20));
+		present();
+	}
+	// (0, 0.5, 0, 0.5) + 0.5 * (0, 0, 1, 1)
+	if (!is(128, 128, 0, 255)) {
+		FAIL("after the menu changed, drawn pixel is BGRA %d %d %d %d, not about 128 128 0 255", px[0], px[1], px[2], px[3]);
+	}
+#if defined(__APPLE__)
+	// The shell draws into buffer 0 again, which the helper copied before and has handed back, and
+	// publishes it: the helper has to copy it again, not draw its old red copy (128 0 128 255)
+	fill(shell.buffer(0), {128, 0, 0, 128});
+	shell.publish(0);
+	for (int i = 0; i < 20 && !is(255, 0, 0, 255); i++) {
+		std::this_thread::sleep_for(std::chrono::milliseconds(20));
+		present();
+	}
+	// (0.5, 0, 0, 0.5) as BGRA + 0.5 * (0, 0, 1, 1) = blue
+	if (!is(255, 0, 0, 255)) {
+		FAIL("after buffer 0 was redrawn, drawn pixel is BGRA %d %d %d %d, not about 255 0 0 255", px[0], px[1], px[2], px[3]);
+	}
+#endif
 
 	gpu.DeviceWaitIdle(gpu.device);
 	lc_vk_destroy(vk);
