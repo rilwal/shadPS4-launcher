@@ -66,12 +66,14 @@ In launcher mode shadPS4's own trophy pop-ups are off, since the launcher shows 
 
 ## The quick menu
 
-On Linux the launcher's quick menu is drawn in the game's own window (the launcher's composited
-overlay, `src/launcher/overlay.cpp`, through the client library's Vulkan helper):
+On Linux and macOS the launcher's quick menu is drawn in the game's own window (the launcher's
+composited overlay, `src/launcher/overlay.cpp`, through the client library's Vulkan helper):
 
 - The game session and the plugin say they draw the menu (`composited_overlay`), so launcherd adds
   no overlay of its own. In launcher mode shadPS4 enables the device extensions the helper needs
-  for sharing images with the launcher (dma-bufs), when the GPU has them.
+  for sharing images with the launcher, when the GPU has them: dma-bufs on Linux; on macOS the
+  launcher's IOSurfaces, whose memory KosmicKrisp imports as host memory
+  (`VK_EXT_external_memory_host`) for the helper to copy the menu from.
 - The shell draws the menu into buffers it shares with shadPS4, and the presenter draws the newest
   one over every frame it presents, after shadPS4's own overlays.
 - When the menu opens, shadPS4 pauses the game's threads (as its own pause key does) and reports
@@ -84,8 +86,10 @@ overlay, `src/launcher/overlay.cpp`, through the client library's Vulkan helper)
 - Closing the menu resumes the game, unless the player had paused it already.
 
 If the GPU can't share images with the launcher, shadPS4 logs why, and the launcher's own window
-comes to the front for the menu, as for any game. Elsewhere (macOS, Windows) that's how the menu
-shows for now.
+comes to the front for the menu, as for any game. On Windows that's how the menu shows for now.
+On macOS the fallback is the launcher's panel over the game window: shadPS4 tells launcherd it
+draws the menu itself, so launcherd never puts its opt-in Metal hook into shadPS4 games, even when
+the menu can't be drawn in the game's own window.
 
 Trophy ids are the trophy ids as text, prefixed with the service label for any trophy set past
 the first (`"1:12"`), as the Kyty fork does. Only the default user's trophies are reported.
@@ -125,10 +129,34 @@ boots; their help says they take effect when the game next starts, and the launc
 for the next boot. shadPS4's own in-game settings dialog reloads its config when it closes, after
 which the launcher's values, live changes included, are applied again.
 
+## The on-screen keyboard
+
+When a game asks for text (`sceImeDialogInit`), the launcher draws its own keyboard into the game's
+window instead of shadPS4's, wherever it can draw the quick menu there (`LC_CAP_OSK`, Linux and
+macOS). `src/launcher/osk.cpp` bridges the client library's keyboard calls to the IME dialog
+(`ImeDialogUi::LauncherKeyboard` in `src/core/libraries/ime/ime_dialog_ui.cpp`):
+
+- The dialog asks for a keyboard the first time it draws, with the game's title, placeholder, text,
+  caret, length limit, kind (text, Latin, URL, email, number), multiline, password, Enter label and
+  panel position.
+- The dialog keeps the text. Each of the launcher's edits (insert, backspace, delete, move, replace;
+  positions in characters, where the dialog counts UTF-16 units) is applied to it within the length
+  limit and copied to the game's buffer; the game's text filter runs on the game's thread, as for
+  shadPS4's own keyboard. Whenever the text changes, it goes back to the launcher with the last edit
+  it includes.
+- Done or Back in the launcher's keyboard finishes the dialog as the game's own buttons would (OK,
+  or cancelled with the text it started with). The button that did it is hidden from the game
+  until it's let go. The game closing the dialog closes the launcher's keyboard (aborted).
+- While the launcher can't draw keyboards, or stops being able to, shadPS4's own keyboard is
+  drawn, with the text as it is.
+
+The game doesn't read the pads while the dialog is open, either way.
+
 ## Not done yet
 
-- The quick menu in the game's window on macOS and Windows.
-- The launcher's on-screen keyboard for the game's text input.
+- The quick menu and keyboard in the game's window on Windows.
+- The launcher's keyboard for `sceIme` (the keyboard games draw themselves, without the dialog),
+  and typing on a real keyboard while the launcher's keyboard is up.
 - The console language is global only, since the plugin needs it for trophy lists. Trophy lists
   aren't sent again when the language changes.
 - A game that restarts itself (`sceSystemServiceLoadExec`) starts a new process, which connects

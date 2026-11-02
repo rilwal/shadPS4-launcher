@@ -16,6 +16,7 @@
 
 #include "common/assert.h"
 #include "common/logging/log.h"
+#include "common/singleton.h"
 #include "core/debug_state.h"
 #include "core/libraries/error_codes.h"
 #include "core/libraries/ime/ime_dialog.h"
@@ -27,6 +28,8 @@
 #include "core/tls.h"
 #include "imgui/imgui_std.h"
 #include "imgui/renderer/imgui_core.h"
+#include "input/controller.h"
+#include "launcher/osk.h"
 
 using namespace ImGui;
 
@@ -103,6 +106,7 @@ ImeDialogState::ImeDialogState(const OrbisImeDialogParam* param,
     fixed_position = True(param->option & OrbisImeOption::FIXED_POSITION);
     use_over2k = True(param->option & OrbisImeOption::USE_OVER_2K_COORDINATES);
     is_numeric = param->type == OrbisImeType::Number;
+    is_password = True(param->option & OrbisImeOption::PASSWORD);
     type = param->type;
     supported_languages = param->supported_languages;
     enter_label = param->enter_label;
@@ -197,7 +201,8 @@ ImeDialogState::ImeDialogState(ImeDialogState&& other) noexcept
       panel_req_height(other.panel_req_height), ext_option(other.ext_option),
       disable_device(other.disable_device), panel_priority(other.panel_priority),
       style_config(other.style_config), user_id(other.user_id), is_multi_line(other.is_multi_line),
-      is_numeric(other.is_numeric), fixed_position(other.fixed_position), type(other.type),
+      is_numeric(other.is_numeric), is_password(other.is_password),
+      fixed_position(other.fixed_position), type(other.type),
       supported_languages(other.supported_languages), enter_label(other.enter_label),
       text_filter(other.text_filter), keyboard_filter(other.keyboard_filter),
       max_text_length(other.max_text_length), text_buffer(other.text_buffer),
@@ -225,6 +230,7 @@ ImeDialogState& ImeDialogState::operator=(ImeDialogState&& other) {
         user_id = other.user_id;
         is_multi_line = other.is_multi_line;
         is_numeric = other.is_numeric;
+        is_password = other.is_password;
         fixed_position = other.fixed_position;
         type = other.type;
         supported_languages = other.supported_languages;
@@ -472,7 +478,12 @@ ImeDialogUi::ImeDialogUi(ImeDialogUi&& other) noexcept
       last_nav_layout_selection(other.last_nav_layout_selection),
       nav_layout_selection_initialized(other.nav_layout_selection_initialized),
       kb_alpha_family(other.kb_alpha_family),
-      gamepad_input_capture_active(other.gamepad_input_capture_active) {
+      gamepad_input_capture_active(other.gamepad_input_capture_active),
+      launcher_osk(std::exchange(other.launcher_osk, 0)),
+      launcher_osk_generation(std::exchange(other.launcher_osk_generation, ~0ull)),
+      launcher_osk_seq(other.launcher_osk_seq), launcher_osk_sent_seq(other.launcher_osk_sent_seq),
+      launcher_osk_text(std::move(other.launcher_osk_text)),
+      launcher_osk_cursor(other.launcher_osk_cursor) {
 
     std::scoped_lock lock(draw_mutex, other.draw_mutex);
     other.state = nullptr;
@@ -587,6 +598,12 @@ ImeDialogUi& ImeDialogUi::operator=(ImeDialogUi&& other) {
     nav_layout_selection_initialized = other.nav_layout_selection_initialized;
     kb_alpha_family = other.kb_alpha_family;
     gamepad_input_capture_active = other.gamepad_input_capture_active;
+    launcher_osk = std::exchange(other.launcher_osk, 0);
+    launcher_osk_generation = std::exchange(other.launcher_osk_generation, ~0ull);
+    launcher_osk_seq = other.launcher_osk_seq;
+    launcher_osk_sent_seq = other.launcher_osk_sent_seq;
+    launcher_osk_text = std::move(other.launcher_osk_text);
+    launcher_osk_cursor = other.launcher_osk_cursor;
     other.state = nullptr;
     other.status = nullptr;
     other.result = nullptr;
@@ -635,6 +652,8 @@ ImeDialogUi& ImeDialogUi::operator=(ImeDialogUi&& other) {
 }
 
 void ImeDialogUi::Free() {
+    // The game closed the dialog
+    Launcher::Osk::Close(std::exchange(launcher_osk, 0), LC_OSK_ABORTED);
     RemoveLayer(this);
     if (gamepad_input_capture_active) {
         ImGui::Core::ReleaseGamepadInputCapture();
@@ -654,6 +673,136 @@ void ImeDialogUi::FinishDialog(OrbisImeDialogEndStatus endstatus, bool restore_o
     Free();
 }
 
+u32 ImeDialogUi::OpenLauncherKeyboard() {
+    const std::string text{state->current_text.to_view()};
+    lc_osk_params params{};
+    if (state->is_numeric) {
+        params.kind = LC_OSK_NUMBER;
+    } else {
+        switch (state->type) {
+        case OrbisImeType::BasicLatin:
+            params.kind = LC_OSK_LATIN;
+            break;
+        case OrbisImeType::Url:
+            params.kind = LC_OSK_URL;
+            break;
+        case OrbisImeType::Mail:
+            params.kind = LC_OSK_EMAIL;
+            break;
+        default:
+            params.kind = LC_OSK_TEXT;
+            break;
+        }
+    }
+    params.title = state->title.empty() ? nullptr : state->title.data();
+    params.placeholder = state->placeholder.empty() ? nullptr : state->placeholder.data();
+    params.text = text.c_str();
+    params.cursor = Launcher::Osk::CharactersAtUtf16(text, static_cast<u32>(state->caret_index));
+    params.max_length = state->max_text_length;
+    params.multiline = state->is_multi_line;
+    params.password = state->is_password;
+    switch (state->enter_label) {
+    case OrbisImeEnterLabel::Send:
+        params.enter = LC_OSK_ENTER_SEND;
+        break;
+    case OrbisImeEnterLabel::Search:
+        params.enter = LC_OSK_ENTER_SEARCH;
+        break;
+    case OrbisImeEnterLabel::Go:
+        params.enter = LC_OSK_ENTER_GO;
+        break;
+    default:
+        params.enter = LC_OSK_ENTER_DEFAULT;
+        break;
+    }
+    if (state->panel_layout_valid) {
+        const auto& layout = state->panel_layout;
+        const float base_w = state->use_over2k ? 3840.0f : 1920.0f;
+        const float base_h = state->use_over2k ? 2160.0f : 1080.0f;
+        params.has_anchor = true;
+        params.x = std::clamp(layout.posx / base_w, 0.0f, 1.0f);
+        params.y = std::clamp(layout.posy / base_h, 0.0f, 1.0f);
+        params.align_x = layout.horizontal_alignment == OrbisImeHorizontalAlignment::Center
+                             ? LC_OSK_ALIGN_CENTER
+                         : layout.horizontal_alignment == OrbisImeHorizontalAlignment::Right
+                             ? LC_OSK_ALIGN_END
+                             : LC_OSK_ALIGN_START;
+        params.align_y =
+            layout.vertical_alignment == OrbisImeVerticalAlignment::Center   ? LC_OSK_ALIGN_CENTER
+            : layout.vertical_alignment == OrbisImeVerticalAlignment::Bottom ? LC_OSK_ALIGN_END
+                                                                             : LC_OSK_ALIGN_START;
+    }
+    return Launcher::Osk::Open(params);
+}
+
+bool ImeDialogUi::LauncherKeyboard() {
+    // Once each time the launcher starts being able to draw keyboards
+    if (launcher_osk == 0 && launcher_osk_generation != Launcher::Osk::Generation()) {
+        launcher_osk_generation = Launcher::Osk::Generation();
+        if (Launcher::Osk::Available()) {
+            launcher_osk = OpenLauncherKeyboard();
+            launcher_osk_seq = 0;
+            launcher_osk_sent_seq = 0;
+            launcher_osk_text = state->current_text.to_view();
+            launcher_osk_cursor = Launcher::Osk::CharactersAtUtf16(
+                launcher_osk_text, static_cast<u32>(state->caret_index));
+        }
+    }
+    if (launcher_osk == 0) {
+        return false;
+    }
+    if (!Launcher::Osk::Owns(launcher_osk)) {
+        // The launcher can't draw it any more: shadPS4's own, with the text as it is
+        launcher_osk = 0;
+        state->caret_dirty = true;
+        return false;
+    }
+
+    for (const auto& event : Launcher::Osk::Take(launcher_osk)) {
+        if (event.kind == Launcher::Osk::Event::Kind::Finish) {
+            const u32 osk = std::exchange(launcher_osk, 0);
+            // The button that finished it is still down: not a press for the game
+            Common::Singleton<Input::GameControllers>::Instance()->HideHeldButtons();
+            if (event.accepted) {
+                FinishDialog(OrbisImeDialogEndStatus::Ok, false, "Launcher keyboard accepted");
+            } else {
+                FinishDialog(OrbisImeDialogEndStatus::UserCanceled, true,
+                             "Launcher keyboard cancelled");
+            }
+            Launcher::Osk::Close(osk, event.accepted ? LC_OSK_ACCEPTED : LC_OSK_CANCELLED);
+            return true;
+        }
+        std::string text{state->current_text.to_view()};
+        u32 cursor = Launcher::Osk::CharactersAtUtf16(text, static_cast<u32>(state->caret_index));
+        if (Launcher::Osk::ApplyEdit(text, cursor, event, state->max_text_length,
+                                     state->is_multi_line)) {
+            state->current_text.FromString(text);
+            state->caret_index = static_cast<int>(Launcher::Osk::Utf16AtCharacter(text, cursor));
+            // The game's filter runs on the game's thread (sceImeDialogGetStatus), not here
+            state->input_changed = true;
+            state->CopyTextToOrbisBuffer(false);
+            state->caret_byte_index =
+                Utf8ByteIndexFromUtf16Index(state->current_text.begin(), state->caret_index);
+            state->caret_dirty = true;
+        }
+        launcher_osk_seq = event.seq;
+    }
+    // What the launcher's keyboard shows: the text as the dialog has it, after its rules, sent
+    // whenever it changes (an edit, or the game's filter after one), and after every edit, which
+    // the launcher waits to hear back about even when it changed nothing
+    const std::string_view now = state->current_text.to_view();
+    const u32 cursor =
+        Launcher::Osk::CharactersAtUtf16(now, static_cast<u32>(state->caret_index));
+    if (now != launcher_osk_text || cursor != launcher_osk_cursor ||
+        launcher_osk_seq != launcher_osk_sent_seq) {
+        launcher_osk_text = now;
+        launcher_osk_cursor = cursor;
+        launcher_osk_sent_seq = launcher_osk_seq;
+        Launcher::Osk::Text(launcher_osk, launcher_osk_seq, now, cursor);
+    }
+    return true;
+}
+
 void ImeDialogUi::Draw() {
     std::unique_lock<std::mutex> lock{draw_mutex};
 
@@ -663,6 +812,10 @@ void ImeDialogUi::Draw() {
 
     if (!status || *status != OrbisImeDialogStatus::Running) {
         Free();
+        return;
+    }
+
+    if (LauncherKeyboard()) {
         return;
     }
 

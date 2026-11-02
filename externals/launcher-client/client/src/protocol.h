@@ -5,6 +5,7 @@
 #define LAUNCHER_CLIENT_PROTOCOL_H
 
 #include "launcher_client.h"
+#include "launcher_overlay.h"
 #include "launcher_runner.h"
 
 #include <cstdint>
@@ -44,6 +45,8 @@ Message capture_surface(uint32_t id, uint32_t width, uint32_t height);
 Message osk_open(uint32_t osk, const lc_osk_params& params);
 Message osk_text(uint32_t osk, uint64_t seq, const char* text, uint32_t cursor);
 Message osk_closed(uint32_t osk, lc_osk_result result);
+// Empty type if there's nothing to send (an unknown kind, or a key with no name)
+Message overlay_input(const lc_input& input);
 
 // Plugin runner to launcher
 Message library(const lc_game* games, size_t count, const char* const* warnings, size_t warning_count);

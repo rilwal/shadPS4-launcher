@@ -12,8 +12,8 @@
 // The game launcher's quick menu drawn into the game's own frames (launcher_overlay_vk.h): the
 // shell draws the menu into buffers it shares with shadPS4, and the presenter draws the newest one
 // over each frame it presents. When the menu opens, the frame the game paused on is copied for the
-// shell, as the menu's background. Linux only for now; elsewhere, and outside launcher mode, every
-// call here does nothing and the shell's own window comes to the front for the menu.
+// shell, as the menu's background. Linux and macOS for now; elsewhere, and outside launcher mode,
+// every call here does nothing and the shell's own window comes to the front for the menu.
 //
 // All but DeviceExtensions and WantsPresents are for the present thread. Serials are the present
 // scheduler's ticks.

@@ -22,8 +22,9 @@
  *   ...end the pass, submit with `serial`
  *   lc_vk_end(vk, serial);
  *
- * Linux only for now (dma-bufs). On macOS (IOSurfaces through MoltenVK) lc_vk_create returns NULL
- * until that backend is in.
+ * Linux shares dma-bufs as images. macOS shares IOSurfaces, whose memory is imported as host memory
+ * (VK_EXT_external_memory_host, which MoltenVK and KosmicKrisp both have) and copied into an image
+ * of the helper's own while the menu is drawn. Elsewhere lc_vk_create returns NULL.
  */
 #ifndef LAUNCHER_OVERLAY_VK_H
 #define LAUNCHER_OVERLAY_VK_H
@@ -51,7 +52,8 @@ typedef struct lc_vk_info {
 
 /* The device extensions the helper needs, to enable when creating the device. They assume a
    Vulkan 1.2 device; on an older one, also enable what VK_EXT_image_drm_format_modifier requires
-   (VK_KHR_image_format_list and the rest). */
+   (VK_KHR_image_format_list and the rest). On macOS: VK_KHR_external_memory and
+   VK_EXT_external_memory_host. */
 const char *const *lc_vk_device_extensions(uint32_t *count);
 
 /* NULL if this device can't share images with the launcher, with the reason in `error`. Then the

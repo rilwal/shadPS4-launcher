@@ -366,6 +366,66 @@ Message osk_closed(uint32_t osk, lc_osk_result result) {
 	return make("osk_closed", std::move(obj));
 }
 
+// 0 to 1 as ten-thousandths
+static uint32_t ten_thousandths(float f) {
+	if (!(f > 0.0f)) {
+		return 0;
+	}
+	return f >= 1.0f ? 10000u : static_cast<uint32_t>(f * 10000.0f + 0.5f);
+}
+
+// Hundredths, rounded, and clamped to what the launcher reads
+static int64_t hundredths(float f) {
+	const float h = f * 100.0f;
+	if (!(h > -2.0e9f && h < 2.0e9f)) {
+		return 0;
+	}
+	return static_cast<int64_t>(h < 0.0f ? h - 0.5f : h + 0.5f);
+}
+
+Message overlay_input(const lc_input& in) {
+	Value input = Value::object();
+	switch (in.kind) {
+		case LC_INPUT_KEY:
+			if (in.key == nullptr || in.key[0] == '\0') {
+				return {};
+			}
+			input.set("kind", "key");
+			input.set("key", in.key);
+			input.set("down", in.down);
+			input.set("repeat", in.repeat);
+			input.set("mods", in.mods & (LC_MOD_SHIFT | LC_MOD_CTRL | LC_MOD_ALT | LC_MOD_SUPER));
+			break;
+		case LC_INPUT_TEXT:
+			if (in.text == nullptr || in.text[0] == '\0') {
+				return {};
+			}
+			input.set("kind", "text");
+			input.set("text", str(in.text));
+			break;
+		case LC_INPUT_POINTER:
+			input.set("kind", "pointer");
+			input.set("x", ten_thousandths(in.x));
+			input.set("y", ten_thousandths(in.y));
+			break;
+		case LC_INPUT_BUTTON:
+			input.set("kind", "button");
+			input.set("button", std::min<uint32_t>(in.button, 255));
+			input.set("down", in.down);
+			break;
+		case LC_INPUT_WHEEL:
+			input.set("kind", "wheel");
+			input.set("x", hundredths(in.x));
+			input.set("y", hundredths(in.y));
+			input.set("pixels", in.pixels);
+			break;
+		default: return {};
+	}
+	Value obj = typed("overlay_input");
+	obj.set("input", std::move(input));
+	return make("overlay_input", std::move(obj));
+}
+
 static Value game(const lc_game& g) {
 	Value art = Value::object();
 	art.set("cover", text_or_null(g.art.cover));

@@ -64,6 +64,9 @@ public:
 			mach_port_mod_refs(mach_task_self(), m_port, MACH_PORT_RIGHT_RECEIVE, -1);
 		}
 		CFRelease(m_header);
+		if (m_capture_surface != nullptr) {
+			CFRelease(m_capture_surface);
+		}
 		for (auto* buffer: m_buffers) {
 			CFRelease(buffer);
 		}
@@ -101,6 +104,12 @@ public:
 		std::unique_lock lock(m_mutex);
 		m_cv.wait_for(lock, std::chrono::seconds(2), [this]() { return m_capture.has_value(); });
 		return m_capture;
+	}
+
+	// The capture itself, once LOVc came (the shell's reference)
+	IOSurfaceRef capture_surface() {
+		std::lock_guard lock(m_mutex);
+		return m_capture_surface;
 	}
 
 	std::atomic<int> gets {0};
@@ -161,7 +170,10 @@ private:
 				if (IOSurfaceRef capture = IOSurfaceLookupFromMachPort(r.msg.ports[0].name)) {
 					std::lock_guard lock(m_mutex);
 					m_capture = IOSurfaceGetID(capture);
-					CFRelease(capture);
+					if (m_capture_surface != nullptr) {
+						CFRelease(m_capture_surface);
+					}
+					m_capture_surface = capture;
 					m_cv.notify_all();
 				}
 			}
@@ -180,6 +192,7 @@ private:
 	std::mutex              m_mutex;
 	std::condition_variable m_cv;
 	std::optional<uint32_t> m_capture;
+	IOSurfaceRef            m_capture_surface = nullptr;
 };
 
 #endif // LAUNCHER_CLIENT_TESTS_FAKE_SHELL_MACOS_H

@@ -1,6 +1,7 @@
 // SPDX-FileCopyrightText: Copyright 2024-2026 shadPS4 Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+#include <atomic>
 #include <fmt/format.h>
 #include "common/arch.h"
 #include "common/assert.h"
@@ -25,6 +26,19 @@ static constexpr DWORD MS_VC_EXCEPTION = 0x406D1388;
 #endif
 
 namespace Core {
+
+#ifndef _WIN32
+namespace {
+std::atomic_bool g_guest_sleep{false};
+// This thread is in the SIGSLEEP handler's sleep (signal handlers may nest)
+thread_local bool t_sleeping = false;
+static_assert(std::atomic_bool::is_always_lock_free, "read in a signal handler");
+} // namespace
+
+void SetGuestSleep(bool sleep) {
+    g_guest_sleep.store(sleep, std::memory_order_release);
+}
+#endif
 
 #if defined(_WIN32)
 
@@ -299,18 +313,39 @@ void SignalHandler(int sig, siginfo_t* info, void* raw_context) {
         UNREACHABLE_MSG("Unhandled signal {} at code address {}", sig, fmt::ptr(code_address));
     }
     case SIGSLEEP: {
+        // Already asleep further up this thread's stack: a wake ended that level's sigsuspend by
+        // running this handler again, and that level's loop decides whether to sleep on
+        if (t_sleeping) {
+            break;
+        }
+        // Asleep while the guest is paused (the launcher's menu, the pause key) or while the
+        // guest has suspended this thread (posix_pthread_suspend_user_context_np)
+        const auto should_sleep = [thread] {
+            return g_guest_sleep.load(std::memory_order_acquire) ||
+                   (thread && thread->suspend_requested.load(std::memory_order_acquire));
+        };
+        // A wake that came before the sleep was taken: nothing to do
+        if (!should_sleep()) {
+            break;
+        }
+        t_sleeping = true;
         if (thread) {
             thread->suspended_context = context.uc_mcontext;
             thread->is_suspended_in_signal = true;
         }
-        // Sleep thread until signal is received again
-        sigset_t sigset;
-        sigemptyset(&sigset);
-        sigaddset(&sigset, SIGSLEEP);
-        sigwait(&sigset, &sig);
+        // Sleep until woken while no longer meant to sleep. SIGSLEEP is blocked in here, and
+        // sigsuspend unblocks it and waits in one step, so a wake sent after the check is
+        // pending and ends the wait (running this handler nested, which returns at once).
+        sigset_t wait_mask;
+        pthread_sigmask(SIG_SETMASK, nullptr, &wait_mask);
+        sigdelset(&wait_mask, SIGSLEEP);
+        while (should_sleep()) {
+            sigsuspend(&wait_mask);
+        }
         if (thread) {
             thread->is_suspended_in_signal = false;
         }
+        t_sleeping = false;
         break;
     }
     case SIGUSR1:
