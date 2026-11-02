@@ -53,7 +53,7 @@ void overlay() {
 	}
 
 	// The menu opens: the next present copies its frame, which the library retains
-	launcher.send(R"({"type":"overlay_opened"})");
+	launcher.send(R"({"type":"overlay","pause":true,"input":true})");
 	lc_frame frame {};
 	CHECK(present_until(overlay, 0, frame, [&]() { return frame.capture; }));
 	IOSurfaceRef copied = make_surface(64, 64);
@@ -87,9 +87,8 @@ void overlay() {
 	const auto named = launcher.wait_for("capture_surface");
 	CHECK(named && named->find("id")->as_uint() == copied_id);
 
-	// Shown: the shell publishes buffer 0, taking 1 from the word; the game takes 0 and gives back 2
-	launcher.send(R"({"type":"overlay_visible","visible":true})");
-	std::this_thread::sleep_for(std::chrono::milliseconds(100));
+	// Nothing until the shell publishes buffer 0, taking 1 from the word; the game takes 0 and gives
+	// back 2
 	lc_overlay_begin(overlay, 5, &frame);
 	CHECK(frame.draw == -1);
 	lc_overlay_end(overlay, 6, false);
@@ -164,12 +163,11 @@ void draw_lists() {
 		lc_close(s);
 		return;
 	}
-	launcher.send(R"({"type":"overlay_opened"})");
+	launcher.send(R"({"type":"overlay","pause":true,"input":true})");
 	lc_frame frame {};
 	CHECK(!present_until(overlay, 0, frame, [&]() { return frame.capture; }));
 
 	launcher.send(shell.offer());
-	launcher.send(R"({"type":"overlay_visible","visible":true})");
 	CHECK(present_until(overlay, 0, frame, [&]() { return frame.generation == 1 && lc_overlay_wants_presents(overlay); }));
 	CHECK(frame.buffer_count == 0 && frame.list == nullptr && shell.gets == 1);
 

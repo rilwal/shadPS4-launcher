@@ -36,10 +36,10 @@ lc_callbacks callbacks(Seen& seen) {
 		s->quit++;
 		s->cv.notify_all();
 	};
-	cb.overlay = [](void* user, bool opened) {
+	cb.pause = [](void* user, bool pause) {
 		auto*           s = static_cast<Seen*>(user);
 		std::lock_guard lock(s->mutex);
-		s->overlay.push_back(opened);
+		s->overlay.push_back(pause);
 		s->cv.notify_all();
 	};
 	cb.invoke = [](void* user, const char* key, const char* value) {
@@ -152,9 +152,12 @@ void session() {
 	launcher.send(R"({"type":"invoke","key":"save","value":null,"game":null})");
 	launcher.send(R"({"type":"invoke","key":"slot","value":{"Text":"2"}})");
 	launcher.send(R"({"type":"setting","key":"perf-overlay","value":{"Bool":true}})");
-	launcher.send(R"({"type":"overlay_opened"})");
+	launcher.send(R"({"type":"overlay","pause":true,"input":false})");
 	launcher.send(R"({"type":"something_newer","x":1})");
-	launcher.send(R"({"type":"overlay_closed"})");
+	// Only a change of pause reaches the game
+	launcher.send(R"({"type":"overlay","pause":true,"input":true})");
+	launcher.send(R"({"type":"overlay","pause":false,"input":true})");
+	launcher.send(R"({"type":"overlay","pause":false,"input":false})");
 	launcher.send(R"({"type":"quit"})");
 	CHECK(seen.wait([&]() { return seen.quit.load() == 1; }));
 	{

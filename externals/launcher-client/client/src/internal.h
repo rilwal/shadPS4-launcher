@@ -68,6 +68,7 @@ struct lc_session {
 	lc_callbacks                 callbacks {};
 	lc_runner_callbacks          runner {}; // A plugin runner's (launcher_runner.h)
 	lc_overlay*                  overlay = nullptr;
+	bool                         paused_for_menu = false; // The last overlay message's pause, on the reader thread
 
 	// From accepted
 	std::mutex  accepted_mutex;
@@ -140,8 +141,9 @@ namespace lc {
 lc_overlay* overlay_create(lc_session& session, bool lists);
 void        overlay_destroy(lc_overlay* overlay);
 void        overlay_on_surfaces(lc_overlay* overlay, const protocol::HostMessage& msg);
-void        overlay_on_visible(lc_overlay* overlay, bool visible, bool input);
-void        overlay_on_menu(lc_overlay* overlay, bool opened);
+// The quick menu opened or closed (only when that changes)
+void        overlay_on_pause(lc_overlay* overlay, bool pause);
+void        overlay_on_input(lc_overlay* overlay, bool input);
 lc_session* overlay_session(lc_overlay* overlay);
 // Whether it draws the menu from draw lists (LC_CAP_DRAW_LISTS), not the shell's buffers
 bool overlay_draws_lists(lc_overlay* overlay);

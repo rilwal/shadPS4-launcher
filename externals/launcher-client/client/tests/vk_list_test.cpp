@@ -213,10 +213,12 @@ void run(Gpu& gpu) {
 	Owned       readback = host_buffer(gpu, W * H * 4, VK_BUFFER_USAGE_TRANSFER_DST_BIT);
 	const auto* got      = static_cast<const uint8_t*>(readback.mapped);
 
-	launcher.send(R"({"type":"overlay_opened"})");
-	launcher.send(R"({"type":"overlay_surface","buffers":[11,12,13],"header":10,"service":")" + shell.name() +
-	              R"(","width":320,"height":200,"lists":true})");
-	launcher.send(R"({"type":"overlay_visible","visible":true})");
+	const auto offer = [&](FakeShell& to) {
+		launcher.send(R"({"type":"overlay_surface","buffers":[11,12,13],"header":10,"service":")" + to.name() +
+		              R"(","width":320,"height":200,"lists":true})");
+	};
+	launcher.send(R"({"type":"overlay","pause":true,"input":true})");
+	offer(shell);
 
 	uint64_t   completed = 0;
 	uint64_t   serial    = 0;
@@ -335,17 +337,25 @@ void run(Gpu& gpu) {
 		std::printf("vk_list: a new frame: worst channel %d apart, %zu pixels more than 4 apart\n", worst, off);
 		CHECK(worst > 48 && off * 10 > W * H);
 	}
-	// Reopened, the menu copies the frame it opens over even if the game says it's the same one
+	// Closed, the slots go and nothing is drawn; reopened in new slots, the menu copies the frame
+	// it opens over even if the game says it's the same one
+	const auto close = [&]() {
+		launcher.send(R"({"type":"overlay_surface","buffers":[],"width":0,"height":0})");
+		for (int i = 0; i < 50 && drew; i++) {
+			std::this_thread::sleep_for(std::chrono::milliseconds(10));
+			drew = false;
+			present(false);
+		}
+	};
 	captured = false;
-	launcher.send(R"({"type":"overlay_visible","visible":false})");
-	for (int i = 0; i < 50 && drew; i++) {
-		std::this_thread::sleep_for(std::chrono::milliseconds(10));
-		drew = false;
-		present(false);
-	}
+	close();
 	CHECK(!drew);
 	paint(false);
-	launcher.send(R"({"type":"overlay_visible","visible":true})");
+	Slots     reopened;
+	FakeShell reopened_shell(reopened.give());
+	offer(reopened_shell);
+	reopened.write(0, scene, 1);
+	reopened_shell.publish(0);
 	for (int i = 0; i < 50 && !drew; i++) {
 		std::this_thread::sleep_for(std::chrono::milliseconds(10));
 		present(false);
@@ -354,14 +364,13 @@ void run(Gpu& gpu) {
 	check_drawn("the menu, reopened");
 
 	// A copy asked for and not made (the emulator skipped it) is asked for again, until one is
-	launcher.send(R"({"type":"overlay_visible","visible":false})");
-	for (int i = 0; i < 50 && drew; i++) {
-		std::this_thread::sleep_for(std::chrono::milliseconds(10));
-		drew = false;
-		present(false);
-	}
+	close();
 	paint(true);
-	launcher.send(R"({"type":"overlay_visible","visible":true})");
+	Slots     again;
+	FakeShell again_shell(again.give());
+	offer(again_shell);
+	again.write(0, scene, 1);
+	again_shell.publish(0);
 	for (int i = 0; i < 50 && !drew; i++) {
 		std::this_thread::sleep_for(std::chrono::milliseconds(10));
 		present(false, false);

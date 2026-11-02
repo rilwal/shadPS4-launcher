@@ -4,6 +4,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <utility>
 
 #ifdef _WIN32
 #include <windows.h>
@@ -428,21 +429,21 @@ void lc_session::dispatch(const std::string& frame) {
 		if (cb.quit != nullptr) {
 			cb.quit(cb.user);
 		}
-	} else if (msg.type == "overlay_opened" || msg.type == "overlay_closed") {
-		const bool opened = msg.type == "overlay_opened";
+	} else if (msg.type == "overlay") {
 		if (overlay != nullptr) {
-			overlay_on_menu(overlay, opened);
+			overlay_on_input(overlay, msg.input);
 		}
-		if (cb.overlay != nullptr) {
-			cb.overlay(cb.user, opened);
+		if (std::exchange(paused_for_menu, msg.pause) != msg.pause) {
+			if (overlay != nullptr) {
+				overlay_on_pause(overlay, msg.pause);
+			}
+			if (cb.pause != nullptr) {
+				cb.pause(cb.user, msg.pause);
+			}
 		}
 	} else if (msg.type == "overlay_surface") {
 		if (overlay != nullptr) {
 			overlay_on_surfaces(overlay, msg);
-		}
-	} else if (msg.type == "overlay_visible") {
-		if (overlay != nullptr) {
-			overlay_on_visible(overlay, msg.visible, msg.input);
 		}
 	} else if (msg.type == "osk_available") {
 		osk_set_available(msg.available);

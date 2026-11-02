@@ -344,8 +344,8 @@ static void read() {
 		lists.set("lists", true);
 		CHECK(protocol::parse_host(lists.dump()).lists);
 	}
-	if (const auto msg = host("overlay_visible")) {
-		CHECK(msg->visible);
+	if (const auto msg = host("overlay")) {
+		CHECK(msg->pause && msg->input);
 	}
 	if (const auto msg = host("launch")) {
 		CHECK(msg->launch == 3 && msg->game == 7 && msg->external_id == "620");
@@ -375,7 +375,7 @@ static void read() {
 	CHECK(replace.edit_ok && replace.edit_op == LC_OSK_REPLACE && replace.edit_text == "\u65e5\u672c" && replace.edit_cursor == 2);
 	CHECK(!edit(R"({"op":"select_all"})").edit_ok);
 	CHECK(!edit(R"({"op":"move","by":"x"})").edit_ok);
-	for (const char* type: {"quit", "overlay_opened", "overlay_closed", "scan"}) {
+	for (const char* type: {"quit", "scan"}) {
 		if (const auto msg = host(type)) {
 			CHECK(msg->type == type);
 		}

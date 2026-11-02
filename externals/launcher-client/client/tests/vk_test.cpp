@@ -220,9 +220,8 @@ void run(Gpu& gpu) {
 	gpu.BindBufferMemory(gpu.device, readback, readback_memory, 0);
 
 	// The menu opens over the game
-	launcher.send(R"({"type":"overlay_opened"})");
+	launcher.send(R"({"type":"overlay","pause":true,"input":true})");
 	launcher.send(offer);
-	launcher.send(R"({"type":"overlay_visible","visible":true})");
 	shell.publish(0);
 	std::this_thread::sleep_for(std::chrono::milliseconds(200));
 

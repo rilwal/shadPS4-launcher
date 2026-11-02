@@ -6,7 +6,11 @@
  * them with the game through a small shared header. When the menu opens, the game copies the frame
  * it paused on into a surface of its own and hands it back, as the menu's background.
  *
- * The library does the protocol: it takes overlay_surface and overlay_visible off the session,
+ * The game draws whatever the shell has drawn into the surfaces, over every frame: the menu, a
+ * keyboard, notices. Nothing before the shell's first frame, nor once the surfaces are taken away.
+ * Pausing (lc_callbacks.pause) and passing input on (lc_overlay_wants_input) are separate.
+ *
+ * The library does the protocol: it takes overlay_surface and overlay off the session,
  * fetches the surfaces from the shell's service, runs the header's buffer trade, sends view, and
  * hands the capture over once the shell's surfaces are in use. The emulator only imports the
  * surfaces into its renderer, draws the buffer it's told to, and copies a frame when asked.

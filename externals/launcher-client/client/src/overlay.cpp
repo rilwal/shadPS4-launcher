@@ -70,8 +70,8 @@ struct lc_overlay {
 	bool                      capture_in_flight = false; // Asked for and not yet sent or dropped
 	std::thread               sender;
 
-	std::atomic<bool>     visible {false};
-	std::atomic<bool>     input {false}; // Shown, and the game's keys and mouse are the shell's
+	std::atomic<bool>     surfaces {false}; // There's a set to draw from, or one coming (set under `mutex`)
+	std::atomic<bool>     input {false}; // The game's keys and mouse are the shell's
 	std::atomic<uint32_t> presents_owed {0};
 
 	// The present thread's own
@@ -107,6 +107,9 @@ struct lc_overlay {
 		vlog(session.callbacks, level, format, args);
 		va_end(args);
 	}
+
+	// With `mutex` held: whether there's an overlay to draw, or one coming, for wants_presents
+	void update_surfaces() { surfaces = pending.has_value() || (!broken && !current.buffers.empty()); }
 
 	// With `mutex` held: forget any capture, as the menu opens or closes or the surfaces go
 	void drop_capture() {
@@ -247,6 +250,7 @@ void overlay_on_surfaces(lc_overlay* overlay, const protocol::HostMessage& msg) 
 			overlay->drop_capture();
 		}
 		overlay->pending      = std::move(set);
+		overlay->surfaces     = true;
 		overlay->pending_serial++;
 		overlay->ready        = false;
 		overlay->drop_service = false;
@@ -254,20 +258,17 @@ void overlay_on_surfaces(lc_overlay* overlay, const protocol::HostMessage& msg) 
 	overlay->presents_owed = PRESENTS_AFTER_CHANGE;
 }
 
-void overlay_on_visible(lc_overlay* overlay, bool visible, bool input) {
-	overlay->input = visible && input;
-	if (overlay->visible.exchange(visible) != visible) {
-		overlay->presents_owed = PRESENTS_AFTER_CHANGE;
-	}
+void overlay_on_input(lc_overlay* overlay, bool input) {
+	overlay->input = input;
 }
 
-void overlay_on_menu(lc_overlay* overlay, bool opened) {
+void overlay_on_pause(lc_overlay* overlay, bool pause) {
 	std::lock_guard lock(overlay->mutex);
 	overlay->drop_capture();
 	overlay->menu++;
 	// The next present copies the frame it paused on for the shell; one drawing lists draws the
 	// menu over its live frame, so the shell needs none
-	overlay->capture_requested = opened && !overlay->draws_lists;
+	overlay->capture_requested = pause && !overlay->draws_lists;
 }
 
 // Maps the current set's draw-list slots. Under the mutex, on the present thread.
@@ -294,6 +295,7 @@ void lists_failed(lc_overlay& o) {
 		std::lock_guard lock(o.mutex);
 		o.drop_capture();
 		o.drop_service = !o.pending;
+		o.update_surfaces();
 	}
 	o.cv.notify_all();
 }
@@ -367,7 +369,7 @@ bool read_list(lc_overlay& o) {
 // over the list the game holds. Each list is taken whole, and read before another is taken, so
 // the emulator sees every list's changes once, in order.
 void begin_lists(lc_overlay& o, bool again, lc_frame* frame) {
-	if (!again && o.visible && !o.broken && o.header.mapped()) {
+	if (!again && !o.broken && o.header.mapped()) {
 		o.list_fresh = false;
 		if (!o.list_unread) {
 			if (auto* words = o.header.lock(); words != nullptr) {
@@ -394,18 +396,18 @@ void begin_lists(lc_overlay& o, bool again, lc_frame* frame) {
 			o.list_fresh  = o.has_list;
 		}
 	}
-	if (o.visible && !o.broken && o.has_list) {
+	if (!o.broken && o.has_list) {
 		frame->list       = &o.list;
 		frame->list_fresh = o.list_fresh;
 	}
 }
 
-// Whether to take the pending set now. While the menu shows, its last frame stays up until the
+// Whether to take the pending set now. While the overlay shows, its last frame stays up until the
 // shell has drawn into the new set, so a resize (new surfaces at each size) doesn't blank it; but
 // not for long, nor when there's nothing to keep showing. Under the mutex, on the present thread.
 bool pending_drawn(lc_overlay& o, bool again) {
 	const SurfaceSet& next = *o.pending;
-	if (!o.visible || !o.has_content || o.broken || o.current.buffers.empty() || next.buffers.empty() ||
+	if (!o.has_content || o.broken || o.current.buffers.empty() || next.buffers.empty() ||
 	    next.header == nullptr) {
 		return true;
 	}
@@ -516,6 +518,7 @@ void lc_overlay_begin(lc_overlay* overlay, uint64_t completed, lc_frame* frame) 
 				o.capture_menu      = o.menu;
 			}
 		}
+		o.update_surfaces();
 	}
 	if (wake) {
 		o.cv.notify_all();
@@ -535,7 +538,7 @@ void lc_overlay_begin(lc_overlay* overlay, uint64_t completed, lc_frame* frame) 
 	const auto count = frame->buffer_count;
 	if (o.current.lists) {
 		begin_lists(o, again, frame);
-	} else if (o.visible && count != 0) {
+	} else if (count != 0) {
 		if (!o.header.mapped()) {
 			// Without a header the shell may redraw the one buffer at any time
 			frame->draw  = 0;
@@ -597,6 +600,7 @@ void lc_overlay_surfaces_ready(lc_overlay* overlay, uint32_t generation, bool ok
 			// the service may be busy), so the shell comes to the front
 			o.drop_capture();
 			o.drop_service = !o.pending;
+			o.update_surfaces();
 		}
 	}
 	o.cv.notify_all();
@@ -665,7 +669,7 @@ bool lc_overlay_wants_presents(lc_overlay* overlay) {
 	if (overlay == nullptr) {
 		return false;
 	}
-	if (overlay->visible || overlay->presents_owed != 0) {
+	if (overlay->surfaces || overlay->presents_owed != 0) {
 		return true;
 	}
 	std::lock_guard lock(overlay->mutex);
