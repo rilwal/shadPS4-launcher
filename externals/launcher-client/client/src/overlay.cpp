@@ -12,6 +12,9 @@ namespace {
 // Presents still needed after a change, so the screen catches up even with no game frames
 // (hiding the overlay, say)
 constexpr uint32_t PRESENTS_AFTER_CHANGE = 3;
+// How many presents the last frame of the old surfaces stays up waiting for the shell's first in new
+// ones (a resize), before the new ones are taken anyway
+constexpr uint32_t PENDING_WAIT_PRESENTS = 120;
 
 struct SurfaceSet {
 	std::vector<std::unique_ptr<lc_surface>> buffers;
@@ -49,6 +52,7 @@ struct lc_overlay {
 	std::mutex                mutex;
 	std::condition_variable   cv; // For the sender
 	std::optional<SurfaceSet> pending;
+	uint32_t                  pending_serial = 0; // Counts the sets that came to be `pending`
 	std::unique_ptr<Capture>  waiting; // Copied, until the GPU finishes it
 	std::unique_ptr<Capture>  ready_capture; // Finished, until it's sent
 	bool                      ready        = false; // The current set is imported and nothing newer came
@@ -68,6 +72,10 @@ struct lc_overlay {
 	SurfaceSet                     current;
 	std::vector<const lc_surface*> current_ptrs;
 	transport::HeaderMap           header;
+	// The pending set's header, to see when the shell has drawn into it, and which set that is
+	transport::HeaderMap pending_header;
+	uint32_t             pending_header_serial = 0;
+	uint32_t             pending_waited        = 0;
 	uint32_t                       generation   = 0;
 	uint32_t                       mine         = 2; // The buffer the game owns: buffer 2, empty
 	bool                           has_content  = false; // The game has had a buffer from the shell
@@ -220,6 +228,7 @@ void overlay_on_surfaces(lc_overlay* overlay, const protocol::HostMessage& msg) 
 			overlay->drop_capture();
 		}
 		overlay->pending      = std::move(set);
+		overlay->pending_serial++;
 		overlay->ready        = false;
 		overlay->drop_service = false;
 	}
@@ -238,6 +247,36 @@ void overlay_on_menu(lc_overlay* overlay, bool opened) {
 	overlay->menu++;
 	// The next present copies the frame it paused on for the shell
 	overlay->capture_requested = opened;
+}
+
+// Whether to take the pending set now. While the menu shows, its last frame stays up until the
+// shell has drawn into the new set, so a resize (new surfaces at each size) doesn't blank it; but
+// not for long, nor when there's nothing to keep showing. Under the mutex, on the present thread.
+bool pending_drawn(lc_overlay& o, bool again) {
+	const SurfaceSet& next = *o.pending;
+	if (!o.visible || !o.has_content || o.broken || o.current.buffers.empty() || next.buffers.empty() ||
+	    next.header == nullptr) {
+		return true;
+	}
+	if (o.pending_header_serial != o.pending_serial) {
+		o.pending_header.unmap();
+		o.pending_header_serial = o.pending_serial;
+		o.pending_waited        = 0;
+	}
+	if (!again && ++o.pending_waited > PENDING_WAIT_PRESENTS) {
+		return true;
+	}
+	if (!o.pending_header.mapped() && !o.pending_header.map(*next.header)) {
+		return true;
+	}
+	auto* words = o.pending_header.lock();
+	if (words == nullptr) {
+		return false;
+	}
+	const bool drawn = words[0].load(std::memory_order_acquire) == transport::HeaderMap::MAGIC &&
+	                   (words[1].load(std::memory_order_acquire) & transport::HeaderMap::NEWER) != 0;
+	o.pending_header.unlock();
+	return drawn;
 }
 
 } // namespace lc
@@ -277,7 +316,10 @@ void lc_overlay_begin(lc_overlay* overlay, uint64_t completed, lc_frame* frame) 
 	bool wake = false;
 	{
 		std::lock_guard lock(o.mutex);
-		if (o.pending) {
+		if (o.pending && !pending_drawn(o, again)) {
+			// The menu keeps its last frame (stretched to the window) until there's one in the new set
+		} else if (o.pending) {
+			o.pending_header.unmap();
 			// The old set's surfaces close here; the emulator's imports hold their own
 			o.current = std::move(*o.pending);
 			o.pending.reset();
