@@ -5,6 +5,7 @@
 #include "common/assert.h"
 #include "core/signals.h"
 #include "emulator.h"
+#include "launcher/session.h"
 
 #if defined(ARCH_X86_64)
 #define Crash() __asm__ __volatile__("int $3")
@@ -15,6 +16,8 @@
 #endif
 
 void assert_fail_impl() {
+    Launcher::Session::Failed("shadPS4 stopped on an internal error; its log has the details.",
+                              "fatal_error");
     Core::Signals::Instance()->RemoveHandlers();
     Common::Singleton<Core::Emulator>::Instance()->Shutdown();
     Crash();
@@ -27,5 +30,6 @@ void assert_fail_impl() {
 
 void assert_fail_debug_msg(const char* msg) {
     LOG_CRITICAL(Debug, "Assertion Failed!\n{}", msg);
+    Launcher::Session::Failed(msg, "fatal_error");
     assert_fail_impl();
 }

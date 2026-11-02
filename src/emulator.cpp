@@ -47,6 +47,7 @@
 #include "core/memory.h"
 #include "core/user_settings.h"
 #include "emulator.h"
+#include "launcher/session.h"
 #include "video_core/cache_storage.h"
 #include "video_core/renderdoc.h"
 
@@ -113,6 +114,7 @@ void Emulator::Shutdown() {
         // need to give SDL time to do this before the runtime exits
         std::this_thread::sleep_for(std::chrono::milliseconds{10});
     }
+    Launcher::Session::Close();
     exit_done = true;
 }
 
@@ -444,6 +446,7 @@ void Emulator::Run(std::filesystem::path file, std::vector<std::string> args,
     }
 
     EmulatorSettings.Load(id);
+    Launcher::Session::ApplySettings();
     // Switch to configured log
     Common::Log::Switch((!id.empty() && EmulatorSettings.IsLogSeparate()) ? id + ".log"
                                                                           : "shad_log.txt",
@@ -690,6 +693,8 @@ void Emulator::Run(std::filesystem::path file, std::vector<std::string> args,
     // Load the module with the linker.
     if (linker->LoadModule(guest_eboot_path) == -1) {
         LOG_CRITICAL(Loader, "Failed to load game's eboot.bin: {}", guest_eboot_path);
+        Launcher::Session::Failed("shadPS4 can't load the game's executable.",
+                                  "invalid_file_or_folder");
         std::quick_exit(0);
     }
 

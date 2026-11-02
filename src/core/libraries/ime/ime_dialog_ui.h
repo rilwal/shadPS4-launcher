@@ -4,6 +4,7 @@
 #pragma once
 
 #include <mutex>
+#include <string>
 #include <vector>
 #include <imgui.h>
 #include "common/cstring.h"
@@ -43,6 +44,7 @@ class ImeDialogState final {
     s32 user_id{};
     bool is_multi_line{};
     bool is_numeric{};
+    bool is_password{};
     bool fixed_position{};
     OrbisImeType type{};
     OrbisImeLanguage supported_languages{};
@@ -164,6 +166,16 @@ class ImeDialogUi final : public ImGui::Layer {
     bool nav_layout_selection_initialized = false;
     Libraries::Ime::ImeKbLayoutFamily kb_alpha_family = Libraries::Ime::ImeKbLayoutFamily::Latin;
     std::mutex draw_mutex;
+    // The launcher's keyboard showing the dialog, or 0; and Launcher::Osk::Generation() when one
+    // was last asked for
+    u32 launcher_osk = 0;
+    u64 launcher_osk_generation = ~0ull;
+    // The launcher's last edit applied, and the edit, text and cursor (in characters) it was last
+    // sent
+    u64 launcher_osk_seq = 0;
+    u64 launcher_osk_sent_seq = 0;
+    std::string launcher_osk_text;
+    u32 launcher_osk_cursor = 0;
 
 public:
     explicit ImeDialogUi(ImeDialogState* state = nullptr, OrbisImeDialogStatus* status = nullptr,
@@ -178,6 +190,10 @@ public:
 private:
     void FinishDialog(OrbisImeDialogEndStatus endstatus, bool restore_original, const char* reason);
     void Free();
+    // The game launcher's keyboard (launcher/osk.h) takes the dialog while it can: true while it
+    // has it, and this one isn't drawn
+    bool LauncherKeyboard();
+    u32 OpenLauncherKeyboard();
 
     bool DrawInputText(const Libraries::Ime::ImePanelMetrics& metrics,
                        bool pointer_selection_enabled);

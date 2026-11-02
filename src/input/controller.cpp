@@ -62,13 +62,18 @@ GameController::GameController() : m_states_queue(64) {}
 
 State GameController::ReadState() {
     std::lock_guard lock{m_state_mutex};
-    return m_state;
+    return m_launcher_hold ? m_frozen : VisibleLocked();
 }
 
 int GameController::ReadStates(State* states, int states_num) {
     std::lock_guard lock{m_state_mutex};
     if (states_num <= 0) {
         return 0;
+    }
+
+    if (m_launcher_hold) {
+        states[0] = m_frozen;
+        return 1;
     }
 
     if (!m_state.connected) {
@@ -79,7 +84,7 @@ int GameController::ReadStates(State* states, int states_num) {
     if (states_num == 1) {
         // Retained history can make a later multi-sample read return up to 64 stale reports, so
         // mixed single- and multi-sample reads require dedicated tests.
-        states[0] = m_state;
+        states[0] = VisibleLocked();
         return 1;
     }
 
@@ -212,7 +217,43 @@ void GameController::PushStateLocked(u64 timestamp) {
     m_state.time = timestamp;
     m_state.touch_time_since_held_down =
         m_touch_down_timestamp == 0 ? 0 : timestamp - m_touch_down_timestamp;
-    m_states_queue.Push(m_state);
+    if (m_launcher_hold) {
+        return;
+    }
+    // A hidden button shows again once it's been released
+    m_masked &= m_state.buttonsState;
+    m_states_queue.Push(VisibleLocked());
+}
+
+State GameController::VisibleLocked() const {
+    State state = m_state;
+    if (m_masked == OrbisPadButtonDataOffset::None) {
+        return state;
+    }
+    state.buttonsState &= ~m_masked;
+    // A hidden trigger reads as released, its analog value too
+    if (True(m_masked & OrbisPadButtonDataOffset::L2)) {
+        state.axes[std::to_underlying(Axis::TriggerLeft)] = 0;
+    }
+    if (True(m_masked & OrbisPadButtonDataOffset::R2)) {
+        state.axes[std::to_underlying(Axis::TriggerRight)] = 0;
+    }
+    return state;
+}
+
+void GameController::HoldForLauncher(bool hold) {
+    std::lock_guard lock{m_state_mutex};
+    if (hold == m_launcher_hold) {
+        return;
+    }
+    if (hold) {
+        m_frozen = VisibleLocked();
+        m_launcher_hold = true;
+        return;
+    }
+    m_launcher_hold = false;
+    m_masked = m_state.buttonsState;
+    PushStateLocked();
 }
 
 void GameController::SetLightBarRGB(u8 const r, u8 const g, u8 const b) {
@@ -240,6 +281,25 @@ Colour GameController::GetLightBarRGB() {
 void GameController::PollLightColour() {
     if (m_sdl_gamepad != nullptr) {
         SDL_SetGamepadLED(m_sdl_gamepad, colour.r, colour.g, colour.b);
+    }
+}
+
+void GameControllers::HoldForLauncher(bool hold) {
+    for (auto* c : controllers) {
+        c->HoldForLauncher(hold);
+    }
+}
+
+void GameController::HideHeldButtons() {
+    std::lock_guard lock{m_state_mutex};
+    m_masked |= m_state.buttonsState;
+    // Presses queued while the game wasn't reading (the dialog had the pads) are the launcher's
+    m_states_queue.Clear();
+}
+
+void GameControllers::HideHeldButtons() {
+    for (auto* c : controllers) {
+        c->HideHeldButtons();
     }
 }
 

@@ -49,7 +49,10 @@ static void ResumeThread(ThreadID id) {
 }
 
 void DebugStateImpl::AddCurrentThreadToGuestList() {
-    std::lock_guard lock{guest_threads_mutex};
+    std::unique_lock lock{guest_threads_mutex};
+    // A thread that starts while the guest is paused would miss the pause, and the resume's
+    // signal would then put it to sleep: it waits for the resume instead
+    guest_threads_resumed.wait(lock, [this] { return !is_guest_threads_paused; });
     const ThreadID id = ThisThreadID();
     guest_threads.push_back(id);
 }
@@ -70,6 +73,9 @@ void DebugStateImpl::PauseGuestThreads() {
         waiting_submit_pause = false;
         should_show_frame_dump = true;
     }
+#ifndef _WIN32
+    Core::SetGuestSleep(true);
+#endif
     bool self_guest = false;
     ThreadID self_id = ThisThreadID();
     for (const auto& id : guest_threads) {
@@ -95,10 +101,14 @@ void DebugStateImpl::ResumeGuestThreads() {
 
     u64 delta_time = Libraries::Kernel::Dev::GetClock()->GetUptime() - pause_time;
     Libraries::Kernel::Dev::GetInitialPtc() += delta_time;
+#ifndef _WIN32
+    Core::SetGuestSleep(false);
+#endif
     for (const auto& id : guest_threads) {
         ResumeThread(id);
     }
     is_guest_threads_paused = false;
+    guest_threads_resumed.notify_all();
 }
 
 void DebugStateImpl::RequestFrameDump(s32 count) {

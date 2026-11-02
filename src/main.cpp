@@ -25,6 +25,9 @@
 #include "core/user_settings.h"
 #include "emulator.h"
 #include "imgui/big_picture/big_picture.h"
+#include "launcher/plugin.h"
+#include "launcher/session.h"
+#include "launcher/settings.h"
 
 #ifdef _WIN32
 #include <windows.h>
@@ -49,6 +52,14 @@ int main(int argc, char* argv[]) {
         return -1;
     }
 #endif
+
+    if (Launcher::Plugin::IsPluginLaunch(argc, argv)) {
+        Common::Log::Setup("shadps4_plugin.log");
+        KeyManager::GetInstance()->LoadFromFile();
+        EmulatorSettings.Load();
+        UserSettings.Load();
+        return Launcher::Plugin::Run(argc, argv);
+    }
 
     CLI::App app{"shadPS4 Emulator CLI"};
 
@@ -75,6 +86,7 @@ int main(int argc, char* argv[]) {
 
     std::vector<std::pair<std::filesystem::path, std::string>> mounts;
     static std::vector<std::string> env_vars;
+    std::vector<std::string> launcherSettings;
 
     // ---- Options ----
     app.add_option("guest_arg", gamePath, "Game path or ID"); // positional
@@ -107,6 +119,8 @@ int main(int argc, char* argv[]) {
     app.add_option("--set-addon-folder", setAddonFolder)->check(CLI::ExistingDirectory);
     app.add_option("--mount", mounts, "Mount source to destination");
     app.add_option("-e,--env", env_vars, "Environment variables to pass to the guest");
+    app.add_option(Launcher::Settings::SettingFlag, launcherSettings,
+                   "A game launcher setting, key=value");
 
     // ---- Capture args after `--` verbatim ----
     app.allow_extras();
@@ -182,12 +196,15 @@ int main(int argc, char* argv[]) {
         return 0;
     }
 
+    Launcher::Session::Connect(std::move(launcherSettings));
+
     if (!gamePath.has_value()) {
         if (!gameArgs.empty()) {
             gamePath = gameArgs.front();
             gameArgs.erase(gameArgs.begin());
         } else {
             LOG_ERROR(Debug, "Please provide a game path or ID.");
+            Launcher::Session::Failed("No game to start.", "invalid_file_or_folder");
             return 1;
         }
     }
@@ -255,6 +272,8 @@ int main(int argc, char* argv[]) {
         }
         if (!found) {
             LOG_ERROR(Debug, "Game ID or file path not found: {}", *gamePath);
+            Launcher::Session::Failed(fmt::format("shadPS4 can't find the game {}.", *gamePath),
+                                      "invalid_file_or_folder");
             return 1;
         }
     }

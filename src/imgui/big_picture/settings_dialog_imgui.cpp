@@ -13,6 +13,7 @@
 #include "core/cpu_patches.h"
 #include "core/devtools/layer.h"
 #include "imgui/imgui_std.h"
+#include "launcher/session.h"
 #include "settings_dialog_imgui.h"
 
 CMRC_DECLARE(res);
@@ -242,6 +243,10 @@ void SettingsWindow::DeInit() {
 
     if (isGameRunning && !runningGameSerial.empty()) {
         EmulatorSettings.Load(runningGameSerial);
+    }
+    if (isGameRunning) {
+        // Loading dropped the game launcher's values
+        Launcher::Session::ApplySettings();
     }
 }
 void SettingsWindow::DrawSettings(bool* open, const std::function<void()>& applySettings) {
