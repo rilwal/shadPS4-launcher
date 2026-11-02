@@ -1,6 +1,7 @@
 // SPDX-FileCopyrightText: Copyright 2026 shadPS4 Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+#include <algorithm>
 #include <filesystem>
 #include <Cocoa/Cocoa.h>
 #include <SDL3/SDL_video.h>
@@ -43,6 +44,13 @@ void SetWindowIcon(SDL_Window* window, const std::vector<u8>& png) {
 
         [NSApp setApplicationIconImage:nativeIcon];
     }
+}
+
+u64 WindowNumber(SDL_Window* window) {
+    const auto ns_window = static_cast<NSWindow*>(SDL_GetPointerProperty(
+        SDL_GetWindowProperties(window), SDL_PROP_WINDOW_COCOA_WINDOW_POINTER, nullptr));
+    return ns_window != nil ? static_cast<u64>(std::max<NSInteger>([ns_window windowNumber], 0))
+                            : 0;
 }
 
 } // namespace Frontend
