@@ -53,11 +53,20 @@ Entry Live(Entry entry, std::function<void()> refresh) {
 // Read where it's used, so a change takes effect by itself
 void Nothing() {}
 
-// The window follows its size and fullscreen settings on the main thread (WindowSDL)
-void RefreshWindow() {
+// The window follows its size or fullscreen setting on the main thread (WindowSDL)
+void RefreshWindow(s32 changed) {
     SDL_Event event{};
     event.type = SDL_EVENT_LAUNCHER_WINDOW;
+    event.user.code = changed;
     SDL_PushEvent(&event);
+}
+
+void RefreshWindowSize() {
+    RefreshWindow(LAUNCHER_WINDOW_SIZE);
+}
+
+void RefreshDisplayMode() {
+    RefreshWindow(LAUNCHER_WINDOW_MODE);
 }
 
 void RefreshUpscaling() {
@@ -251,7 +260,7 @@ const std::vector<Entry>& Entries() {
                                  EmulatorSettings.SetWindowWidth(w, G);
                                  EmulatorSettings.SetWindowHeight(h, G);
                              }),
-                         RefreshWindow));
+                         RefreshWindowSize));
         e.push_back(Live(
             Choice(
                 "display-mode", "Display mode", "Display",
@@ -274,7 +283,7 @@ const std::vector<Entry>& Entries() {
                             value == "fullscreen" ? "Fullscreen" : "Fullscreen (Borderless)", G);
                     }
                 }),
-            RefreshWindow));
+            RefreshDisplayMode));
         e.push_back(Size(
             "output-resolution", "Output resolution", "Display",
             "The resolution games are told the console outputs.",
@@ -435,12 +444,10 @@ const std::vector<Entry>& Entries() {
             "Japanese-style buttons: Circle confirms and Cross cancels, in games that ask.",
             [] { return EmulatorSettings.IsCircleEnter(); },
             [](bool v) { EmulatorSettings.SetCircleEnter(v, G); }));
-        e.push_back(Live(Toggle(
-                             "motion-controls", "Motion controls", "Controls",
-                             "Pass the controller's gyro and accelerometer to games.",
-                             [] { return EmulatorSettings.IsMotionControlsEnabled(); },
-                             [](bool v) { EmulatorSettings.SetMotionControlsEnabled(v, G); }),
-                         Nothing));
+        e.push_back(Toggle("motion-controls", "Motion controls", "Controls",
+                           "Pass the controller's gyro and accelerometer to games.",
+                           [] { return EmulatorSettings.IsMotionControlsEnabled(); },
+                           [](bool v) { EmulatorSettings.SetMotionControlsEnabled(v, G); }));
         e.push_back(Live(Toggle(
                              "background-input", "Input in the background", "Controls",
                              "Keep reading the controller while the game window isn't focused.",

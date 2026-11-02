@@ -863,8 +863,9 @@ void Presenter::Present(Frame* frame, bool is_reusing_frame, bool is_game_frame)
     };
 
     // Recreate the swapchain if the window was resized, or its settings changed.
-    if (window.GetWidth() != swapchain.GetWidth() || window.GetHeight() != swapchain.GetHeight() ||
-        recreate_swapchain.exchange(false)) {
+    const bool settings_changed = recreate_swapchain.exchange(false);
+    if (settings_changed || window.GetWidth() != swapchain.GetWidth() ||
+        window.GetHeight() != swapchain.GetHeight()) {
         swapchain.Recreate(window.GetWidth(), window.GetHeight());
     }
 

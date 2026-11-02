@@ -218,11 +218,13 @@ void WindowSDL::WaitEvent() {
     }
 
     switch (event.type) {
+    case SDL_EVENT_WINDOW_RESTORED:
+    case SDL_EVENT_WINDOW_LEAVE_FULLSCREEN:
+        ApplyPendingSize();
+        [[fallthrough]];
     case SDL_EVENT_WINDOW_RESIZED:
     case SDL_EVENT_WINDOW_MAXIMIZED:
-    case SDL_EVENT_WINDOW_RESTORED:
     case SDL_EVENT_WINDOW_ENTER_FULLSCREEN:
-    case SDL_EVENT_WINDOW_LEAVE_FULLSCREEN:
         OnResize();
         break;
     case SDL_EVENT_WINDOW_MINIMIZED:
@@ -266,7 +268,7 @@ void WindowSDL::WaitEvent() {
         break;
     }
     case SDL_EVENT_LAUNCHER_WINDOW:
-        FollowWindowSettings();
+        FollowWindowSettings(event.user.code);
         break;
     case SDL_EVENT_TOGGLE_PAUSE:
         if (DebugState.IsGuestThreadsPaused()) {
@@ -368,18 +370,41 @@ void WindowSDL::ReleaseKeyboard() {
     }
 }
 
-void WindowSDL::FollowWindowSettings() {
-    // Its size when it isn't fullscreen, kept by SDL for leaving fullscreen
+void WindowSDL::FollowWindowSettings(s32 changed) {
+    if (changed & LAUNCHER_WINDOW_SIZE) {
+        size_pending = true;
+    }
+    // Only when it changed, so a size doesn't undo F11
+    if (changed & LAUNCHER_WINDOW_MODE) {
+        const SDL_DisplayMode* mode = nullptr;
+        if (EmulatorSettings.GetFullScreenMode() == "Fullscreen") {
+            mode = SDL_GetDesktopDisplayMode(SDL_GetDisplayForWindow(window));
+        }
+        SDL_SetWindowFullscreenMode(window, mode);
+        SDL_SetWindowFullscreen(window, EmulatorSettings.IsFullScreen());
+        SDL_SyncWindow(window);
+    }
+    ApplyPendingSize();
+    OnResize();
+}
+
+void WindowSDL::ApplyPendingSize() {
+    if (!size_pending) {
+        return;
+    }
+    const SDL_WindowFlags flags = SDL_GetWindowFlags(window);
+    // When it leaves fullscreen (SDL_EVENT_WINDOW_LEAVE_FULLSCREEN)
+    if (flags & SDL_WINDOW_FULLSCREEN) {
+        return;
+    }
+    // When it's restored (SDL_EVENT_WINDOW_RESTORED)
+    if (flags & SDL_WINDOW_MAXIMIZED) {
+        SDL_RestoreWindow(window);
+        return;
+    }
+    size_pending = false;
     SDL_SetWindowSize(window, static_cast<int>(EmulatorSettings.GetWindowWidth()),
                       static_cast<int>(EmulatorSettings.GetWindowHeight()));
-    const SDL_DisplayMode* mode = nullptr;
-    if (EmulatorSettings.GetFullScreenMode() == "Fullscreen") {
-        mode = SDL_GetDesktopDisplayMode(SDL_GetDisplayForWindow(window));
-    }
-    SDL_SetWindowFullscreenMode(window, mode);
-    SDL_SetWindowFullscreen(window, EmulatorSettings.IsFullScreen());
-    SDL_SyncWindow(window);
-    OnResize();
 }
 
 void WindowSDL::OnResize() {

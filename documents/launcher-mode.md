@@ -110,16 +110,17 @@ the game booted.
 
 | Live | How it takes effect |
 | --- | --- |
-| Window size, display mode | The window follows on the main thread (a `SDL_EVENT_LAUNCHER_WINDOW` event) |
+| Window size, display mode | The window follows on the main thread (a `SDL_EVENT_LAUNCHER_WINDOW` event saying which changed). SDL ignores a size set while the window is fullscreen or maximized, so a new size waits until it leaves fullscreen, and a maximized window is restored to take it |
 | Present mode | The swapchain is made again on the next present |
 | FSR, RCAS, sharpening strength | The presenter's upscaling settings |
 | Frame rate | shadPS4's frame rate counter |
 | Volume | The audio output's gain |
-| Hide the cursor, motion controls | Read where they're used |
+| Hide the cursor | Read where it's used |
 | Input in the background | SDL's background joystick hint |
 
 The rest (output resolution, HDR, vblank frequency, the accuracy options, PS4 Pro mode, the
-network, the audio backend, Confirm with Circle, the console language) are read while the game
+network, the audio backend, Confirm with Circle, motion controls (the sensors are turned on when a
+controller connects), the console language) are read while the game
 boots; their help says they take effect when the game next starts, and the launcher keeps a change
 for the next boot. shadPS4's own in-game settings dialog reloads its config when it closes, after
 which the launcher's values, live changes included, are applied again.
