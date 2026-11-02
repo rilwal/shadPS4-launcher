@@ -315,6 +315,71 @@ void unsealed_header() {
 	CHECK(shown.overlay != nullptr && shown.frame.buffer_count == 0);
 }
 
+// New surfaces (a resize) while the menu shows: its last frame stays up until the shell has drawn
+// into the new set, which the same present then draws
+void resize_keeps_last_frame() {
+	FakeShell shell;
+	FakeShell resized;
+	Shown     shown(shell);
+	CHECK(shown.overlay != nullptr);
+	if (shown.overlay == nullptr) {
+		return;
+	}
+	lc_frame& f = shown.frame;
+	shell.publish(0);
+	lc_overlay_begin(shown.overlay, 0, &f);
+	CHECK(f.generation == 1 && f.draw == 0);
+	lc_overlay_end(shown.overlay, 1, true);
+
+	shown.launcher.send(R"({"type":"overlay_surface","buffers":[11,12,13],"header":10,"service":")" +
+	                    resized.name() + R"(","width":96,"height":96})");
+	// While the shell hasn't drawn into them, the old set's frame is drawn
+	bool kept = true;
+	for (int i = 0; i < 20; i++) {
+		lc_overlay_begin(shown.overlay, 1, &f);
+		kept = kept && f.generation == 1 && f.draw == 0 && f.width == 64;
+		lc_overlay_end(shown.overlay, 1, true);
+		std::this_thread::sleep_for(std::chrono::milliseconds(10));
+	}
+	CHECK(kept);
+	CHECK(resized.gets == 1);
+	resized.publish(0);
+	lc_overlay_begin(shown.overlay, 1, &f);
+	CHECK(f.generation == 2 && f.width == 96 && f.draw == 0 && f.fresh);
+	lc_overlay_end(shown.overlay, 2, true);
+}
+
+// New surfaces the shell never draws into are taken anyway, after a while
+void resize_waits_only_so_long() {
+	FakeShell shell;
+	FakeShell resized;
+	Shown     shown(shell);
+	CHECK(shown.overlay != nullptr);
+	if (shown.overlay == nullptr) {
+		return;
+	}
+	lc_frame& f = shown.frame;
+	shell.publish(0);
+	lc_overlay_begin(shown.overlay, 0, &f);
+	lc_overlay_end(shown.overlay, 1, true);
+	shown.launcher.send(R"({"type":"overlay_surface","buffers":[11,12,13],"header":10,"service":")" +
+	                    resized.name() + R"(","width":96,"height":96})");
+	for (int i = 0; i < 100 && resized.gets == 0; i++) {
+		std::this_thread::sleep_for(std::chrono::milliseconds(10));
+	}
+	int presents = 0;
+	while (presents < 1000) {
+		presents++;
+		lc_overlay_begin(shown.overlay, 1, &f);
+		lc_overlay_end(shown.overlay, 1, true);
+		if (f.generation == 2) {
+			break;
+		}
+	}
+	CHECK(f.generation == 2 && f.draw == -1);
+	CHECK(presents > 100 && presents < 200);
+}
+
 } // namespace
 
 int main() {
@@ -328,5 +393,7 @@ int main() {
 	fresh_until_drawn();
 	import_failed();
 	unsealed_header();
+	resize_keeps_last_frame();
+	resize_waits_only_so_long();
 	return finish("overlay");
 }
