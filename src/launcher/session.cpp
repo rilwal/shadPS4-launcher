@@ -1,12 +1,17 @@
 // SPDX-FileCopyrightText: Copyright 2026 shadPS4 Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+#include <algorithm>
 #include <array>
 #include <atomic>
 #include <cstdlib>
 #include <mutex>
 #include <optional>
+#include <string>
+#include <utility>
+#include <vector>
 #include <SDL3/SDL_events.h>
+#include <SDL3/SDL_hints.h>
 #include <SDL3/SDL_properties.h>
 #include <SDL3/SDL_video.h>
 #include <launcher_client.h>
@@ -19,6 +24,7 @@
 #include "core/emulator_settings.h"
 #include "core/user_settings.h"
 #include "input/controller.h"
+#include "launcher/osk.h"
 #include "launcher/session.h"
 #include "launcher/settings.h"
 #include "launcher/trophies.h"
@@ -34,26 +40,92 @@ namespace {
 constexpr u32 CONFIGURE_WAIT_MS = 5000;
 
 lc_session* g_session = nullptr;
+// The launcher's values, by key: configure's, the plugin's own, and the live changes since
+std::mutex g_values_mutex;
 std::vector<std::pair<std::string, std::optional<std::string>>> g_values;
+// ApplySettings has run, so changes take effect as they come
+bool g_applied = false;
 std::atomic_flag g_ready;
 std::atomic_flag g_achievements_sent;
 // The quick menu paused the game, which it resumes when it closes. A game the player had paused
 // already (shadPS4's pause key) stays paused.
 std::atomic_bool g_paused_for_menu;
 
-void Log(void*, lc_log_level level, const char* line) {
-    if (level == LC_LOG_ERROR) {
-        LOG_ERROR(Frontend, "Launcher: {}", line);
-    } else {
+// While the guest is paused, one of its threads may be stopped inside the logger, holding its
+// lock, so the launcher's lines from then wait here until the guest resumes. A game thread can
+// hold g_held_mutex too (a trophy unlock logs through the client), so while paused it's only
+// tried, never waited for.
+enum class Level { Info, Warning, Error };
+std::mutex g_held_mutex;
+std::vector<std::pair<Level, std::string>> g_held;
+std::atomic_bool g_has_held;
+size_t g_dropped = 0;
+constexpr size_t HELD_LINES = 256;
+
+void Write(Level level, const std::string& line) {
+    switch (level) {
+    case Level::Info:
         LOG_INFO(Frontend, "Launcher: {}", line);
+        break;
+    case Level::Warning:
+        LOG_WARNING(Frontend, "Launcher: {}", line);
+        break;
+    case Level::Error:
+        LOG_ERROR(Frontend, "Launcher: {}", line);
+        break;
     }
 }
 
+// Logs the lines held while the guest was paused. After it resumes.
+void WriteHeld() {
+    if (!g_has_held.load()) {
+        return;
+    }
+    std::vector<std::pair<Level, std::string>> held;
+    size_t dropped = 0;
+    {
+        std::scoped_lock lock(g_held_mutex);
+        held.swap(g_held);
+        std::swap(dropped, g_dropped);
+        g_has_held = false;
+    }
+    for (const auto& [level, line] : held) {
+        Write(level, line);
+    }
+    if (dropped != 0) {
+        Write(Level::Warning,
+              fmt::format("{} lines from while the game was paused dropped", dropped));
+    }
+}
+
+void Say(Level level, std::string line) {
+    if (DebugState.IsGuestThreadsPaused()) {
+        std::unique_lock lock(g_held_mutex, std::try_to_lock);
+        if (!lock) {
+            return;
+        }
+        if (g_held.size() < HELD_LINES) {
+            g_held.emplace_back(level, std::move(line));
+        } else {
+            g_dropped++;
+        }
+        g_has_held = true;
+        return;
+    }
+    WriteHeld();
+    Write(level, line);
+}
+
+void Log(void*, lc_log_level level, const char* line) {
+    Say(level == LC_LOG_ERROR ? Level::Error : Level::Info, line);
+}
+
 void Quit(void*) {
-    LOG_INFO(Frontend, "Launcher: quit");
+    // Resumed before logging: a guest thread paused inside the logger holds its lock
     if (g_paused_for_menu.exchange(false)) {
         DebugState.ResumeGuestThreads();
     }
+    Say(Level::Info, "quit");
     if (g_window == nullptr) {
         // Still booting, before the window that would take the event
         std::quick_exit(0);
@@ -67,7 +139,9 @@ void Quit(void*) {
 // and with the overlay drawn in the game's window the next of those presents is copied for the
 // shell, as the menu's background (Launcher::Overlay)
 void MenuOpened(void*, bool opened) {
-    LOG_INFO(Frontend, "Launcher: quick menu {}", opened ? "opened" : "closed");
+    if (opened) {
+        Say(Level::Info, "quick menu opened");
+    }
     auto* controllers = Common::Singleton<Input::GameControllers>::Instance();
     if (opened) {
         // The pad is the menu's before the game pauses, and the game's again after it resumes
@@ -82,7 +156,40 @@ void MenuOpened(void*, bool opened) {
         }
         controllers->HoldForLauncher(false);
     }
+    // Logged after the resume (Say holds lines while the guest is paused)
+    if (!opened) {
+        Say(Level::Info, "quick menu closed");
+    }
     lc_paused(g_session, DebugState.IsGuestThreadsPaused());
+}
+
+void SetValue(const std::string& key, std::optional<std::string> value) {
+    const auto it = std::ranges::find_if(g_values, [&](const auto& kv) { return kv.first == key; });
+    if (it != g_values.end()) {
+        it->second = std::move(value);
+    } else {
+        g_values.emplace_back(key, std::move(value));
+    }
+}
+
+// A setting changed in the launcher while the game runs
+void SettingChanged(void*, const char* key, const char* value) {
+    if (key == nullptr) {
+        return;
+    }
+    const std::optional<std::string> v =
+        value != nullptr ? std::optional<std::string>(value) : std::nullopt;
+    std::scoped_lock lock(g_values_mutex);
+    SetValue(key, v);
+    if (!g_applied) {
+        return; // Still booting: ApplySettings applies it with the rest
+    }
+    const auto error = Settings::ApplyLive(key, v);
+    if (!error.empty()) {
+        Say(Level::Warning, error);
+    } else {
+        Say(Level::Info, fmt::format("{} = {} (live)", key, v.value_or("(default)")));
+    }
 }
 
 u64 NativeWindow() {
@@ -112,14 +219,23 @@ void Connect(std::vector<std::string> settings) {
     cb.log = Log;
     cb.quit = Quit;
     cb.overlay = MenuOpened;
+    cb.setting = SettingChanged;
+    cb.osk_available = [](void*, bool available) { Osk::OnAvailable(available); };
+    cb.osk_edit = [](void*, uint32_t osk, uint64_t seq, const lc_osk_edit* edit) {
+        if (edit != nullptr) {
+            Osk::OnEdit(osk, seq, *edit);
+        }
+    };
+    cb.osk_finish = [](void*, uint32_t osk, bool accepted) { Osk::OnFinish(osk, accepted); };
 
     const std::string name = std::string("shadPS4 ") + Common::g_version;
     lc_connect_info info{};
     info.name = name.c_str();
 #ifdef LAUNCHER_CLIENT_VULKAN
     // The presenter draws the launcher's quick menu into the game's frames (launcher/overlay.h)
+    // and the launcher's keyboard in place of the IME dialog's own (launcher/osk.h)
     if (lc_overlay_supported()) {
-        info.capabilities |= LC_CAP_COMPOSITED_OVERLAY;
+        info.capabilities |= LC_CAP_COMPOSITED_OVERLAY | LC_CAP_OSK;
     }
 #endif
     std::array<char, 512> error{};
@@ -129,14 +245,18 @@ void Connect(std::vector<std::string> settings) {
         return;
     }
     lc_booting(g_session);
+    // The launcher's menu and keyboard take text input from the window (launcher/input.h), which
+    // would otherwise show the system's on-screen keyboard over them: Steam's on a Steam Deck, or
+    // any time no keyboard is attached. SDL_ENABLE_SCREEN_KEYBOARD in the environment still wins.
+    SDL_SetHint(SDL_HINT_ENABLE_SCREEN_KEYBOARD, "0");
 
     const lc_kv* values = nullptr;
     size_t count = 0;
     if (lc_wait_configure(g_session, CONFIGURE_WAIT_MS, &values, &count)) {
         for (size_t i = 0; i < count; i++) {
-            g_values.emplace_back(values[i].key, values[i].value != nullptr
-                                                     ? std::optional<std::string>(values[i].value)
-                                                     : std::nullopt);
+            SetValue(values[i].key, values[i].value != nullptr
+                                        ? std::optional<std::string>(values[i].value)
+                                        : std::nullopt);
         }
     } else {
         LOG_WARNING(Frontend, "Launcher: no settings came before boot");
@@ -148,7 +268,7 @@ void Connect(std::vector<std::string> settings) {
             LOG_ERROR(Frontend, "Launcher: {} isn't key=value", setting);
             continue;
         }
-        g_values.emplace_back(setting.substr(0, eq), setting.substr(eq + 1));
+        SetValue(setting.substr(0, eq), setting.substr(eq + 1));
     }
 }
 
@@ -161,8 +281,10 @@ void ApplySettings() {
         return;
     }
     // Again after shadPS4's own settings dialog reloads its config, which says nothing new
-    static std::atomic_flag applied;
-    const bool again = applied.test_and_set();
+    std::scoped_lock lock(g_values_mutex);
+    const bool again = std::exchange(g_applied, true);
+    // What shadPS4's config says, which a setting set back to its default goes back to
+    Settings::CaptureLoaded();
     for (const auto& [key, value] : g_values) {
         const auto error = Settings::Apply(key, value);
         if (!error.empty()) {

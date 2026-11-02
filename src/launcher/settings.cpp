@@ -7,8 +7,18 @@
 #include <functional>
 #include <fmt/format.h>
 
+#include <map>
+#include <mutex>
+#include <SDL3/SDL_hints.h>
+
+#include "core/devtools/layer.h"
 #include "core/emulator_settings.h"
+#include "core/libraries/audio/audioout.h"
+#include "input/input_handler.h"
 #include "launcher/settings.h"
+#include "video_core/renderer_vulkan/vk_presenter.h"
+
+extern std::unique_ptr<Vulkan::Presenter> presenter;
 
 namespace Launcher::Settings {
 
@@ -30,7 +40,48 @@ struct Entry {
     // A choice that also takes values that aren't among its options (sizes, steps), as shadPS4's
     // own config may hold one
     bool free = false;
+    // Makes a change take effect while the game runs; none for a setting read only at boot
+    std::function<void()> live;
 };
+
+// A setting that can change while the game runs, with what makes the change take effect
+Entry Live(Entry entry, std::function<void()> refresh) {
+    entry.live = std::move(refresh);
+    return entry;
+}
+
+// Read where it's used, so a change takes effect by itself
+void Nothing() {}
+
+// The window follows its size or fullscreen setting on the main thread (WindowSDL)
+void RefreshWindow(s32 changed) {
+    SDL_Event event{};
+    event.type = SDL_EVENT_LAUNCHER_WINDOW;
+    event.user.code = changed;
+    SDL_PushEvent(&event);
+}
+
+void RefreshWindowSize() {
+    RefreshWindow(LAUNCHER_WINDOW_SIZE);
+}
+
+void RefreshDisplayMode() {
+    RefreshWindow(LAUNCHER_WINDOW_MODE);
+}
+
+void RefreshUpscaling() {
+    if (presenter) {
+        auto& fsr = presenter->GetFsrSettingsRef();
+        fsr.enable = EmulatorSettings.IsFsrEnabled();
+        fsr.use_rcas = EmulatorSettings.IsRcasEnabled();
+        fsr.rcas_attenuation = static_cast<float>(EmulatorSettings.GetRcasAttenuation() / 1000.f);
+    }
+}
+
+std::mutex g_loaded_mutex;
+std::map<std::string, std::string, std::less<>> g_loaded;
+
+constexpr char NEXT_BOOT[] = " Takes effect when the game next starts.";
 
 std::optional<long> ParseNumber(std::string_view text) {
     long value{};
@@ -197,39 +248,42 @@ const std::vector<Entry>& Entries() {
         std::vector<Entry> e;
 
         // Display
-        e.push_back(Size(
-            "window-size", "Window size", "Display",
-            "The game window's size when it isn't fullscreen.",
-            {"1280x720", "1600x900", "1920x1080", "2560x1440", "3840x2160"},
-            [] {
-                return std::pair{EmulatorSettings.GetWindowWidth(),
-                                 EmulatorSettings.GetWindowHeight()};
-            },
-            [](u32 w, u32 h) {
-                EmulatorSettings.SetWindowWidth(w, G);
-                EmulatorSettings.SetWindowHeight(h, G);
-            }));
-        e.push_back(Choice(
-            "display-mode", "Display mode", "Display",
-            "Exclusive fullscreen changes the display's mode; borderless covers the desktop.",
-            {{"windowed", "Windowed"},
-             {"fullscreen", "Fullscreen"},
-             {"borderless", "Borderless fullscreen"}},
-            [] {
-                if (!EmulatorSettings.IsFullScreen()) {
-                    return std::string("windowed");
-                }
-                return std::string(EmulatorSettings.GetFullScreenMode() == "Fullscreen"
-                                       ? "fullscreen"
-                                       : "borderless");
-            },
-            [](const std::string& value) {
-                EmulatorSettings.SetFullScreen(value != "windowed", G);
-                if (value != "windowed") {
-                    EmulatorSettings.SetFullScreenMode(
-                        value == "fullscreen" ? "Fullscreen" : "Fullscreen (Borderless)", G);
-                }
-            }));
+        e.push_back(Live(Size(
+                             "window-size", "Window size", "Display",
+                             "The game window's size when it isn't fullscreen.",
+                             {"1280x720", "1600x900", "1920x1080", "2560x1440", "3840x2160"},
+                             [] {
+                                 return std::pair{EmulatorSettings.GetWindowWidth(),
+                                                  EmulatorSettings.GetWindowHeight()};
+                             },
+                             [](u32 w, u32 h) {
+                                 EmulatorSettings.SetWindowWidth(w, G);
+                                 EmulatorSettings.SetWindowHeight(h, G);
+                             }),
+                         RefreshWindowSize));
+        e.push_back(Live(
+            Choice(
+                "display-mode", "Display mode", "Display",
+                "Exclusive fullscreen changes the display's mode; borderless covers the desktop.",
+                {{"windowed", "Windowed"},
+                 {"fullscreen", "Fullscreen"},
+                 {"borderless", "Borderless fullscreen"}},
+                [] {
+                    if (!EmulatorSettings.IsFullScreen()) {
+                        return std::string("windowed");
+                    }
+                    return std::string(EmulatorSettings.GetFullScreenMode() == "Fullscreen"
+                                           ? "fullscreen"
+                                           : "borderless");
+                },
+                [](const std::string& value) {
+                    EmulatorSettings.SetFullScreen(value != "windowed", G);
+                    if (value != "windowed") {
+                        EmulatorSettings.SetFullScreenMode(
+                            value == "fullscreen" ? "Fullscreen" : "Fullscreen (Borderless)", G);
+                    }
+                }),
+            RefreshDisplayMode));
         e.push_back(Size(
             "output-resolution", "Output resolution", "Display",
             "The resolution games are told the console outputs.",
@@ -242,34 +296,46 @@ const std::vector<Entry>& Entries() {
                 EmulatorSettings.SetInternalScreenWidth(w, G);
                 EmulatorSettings.SetInternalScreenHeight(h, G);
             }));
-        e.push_back(Choice(
-            "present-mode", "Present mode", "Display",
-            "Fifo waits for the display, Mailbox replaces waiting frames, Immediate can tear.",
-            {{"Mailbox", "Mailbox"}, {"Fifo", "Fifo (vsync)"}, {"Immediate", "Immediate"}},
-            [] { return EmulatorSettings.GetPresentMode(); },
-            [](const std::string& value) { EmulatorSettings.SetPresentMode(value, G); }));
+        e.push_back(Live(
+            Choice(
+                "present-mode", "Present mode", "Display",
+                "Fifo waits for the display, Mailbox replaces waiting frames, Immediate can tear.",
+                {{"Mailbox", "Mailbox"}, {"Fifo", "Fifo (vsync)"}, {"Immediate", "Immediate"}},
+                [] { return EmulatorSettings.GetPresentMode(); },
+                [](const std::string& value) { EmulatorSettings.SetPresentMode(value, G); }),
+            [] {
+                if (presenter) {
+                    presenter->RecreateSwapchain();
+                }
+            }));
         e.push_back(Toggle(
             "hdr", "HDR", "Display", "Output HDR10 when the game and the display support it.",
             [] { return EmulatorSettings.IsHdrAllowed(); },
             [](bool v) { EmulatorSettings.SetHdrAllowed(v, G); }));
-        e.push_back(Toggle(
-            "fsr", "FSR upscaling", "Display",
-            "Upscale the game's frame to the window with AMD FidelityFX Super Resolution.",
-            [] { return EmulatorSettings.IsFsrEnabled(); },
-            [](bool v) { EmulatorSettings.SetFsrEnabled(v, G); }));
-        e.push_back(Toggle(
-            "rcas", "RCAS sharpening", "Display", "Sharpen the upscaled frame (with FSR).",
-            [] { return EmulatorSettings.IsRcasEnabled(); },
-            [](bool v) { EmulatorSettings.SetRcasEnabled(v, G); }));
-        e.push_back(Steps(
-            "rcas-attenuation", "Sharpening strength", "Display",
-            "How much RCAS holds back: lower is sharper.",
-            {0, 100, 250, 500, 750, 1000, 1500, 2000},
-            [](long v) { return fmt::format("{:.2f}", v / 1000.0); },
-            [] { return EmulatorSettings.GetRcasAttenuation(); },
-            [](long v) {
-                EmulatorSettings.SetRcasAttenuation(static_cast<int>(std::clamp(v, 0L, 3000L)), G);
-            }));
+        e.push_back(
+            Live(Toggle(
+                     "fsr", "FSR upscaling", "Display",
+                     "Upscale the game's frame to the window with AMD FidelityFX Super Resolution.",
+                     [] { return EmulatorSettings.IsFsrEnabled(); },
+                     [](bool v) { EmulatorSettings.SetFsrEnabled(v, G); }),
+                 RefreshUpscaling));
+        e.push_back(
+            Live(Toggle(
+                     "rcas", "RCAS sharpening", "Display", "Sharpen the upscaled frame (with FSR).",
+                     [] { return EmulatorSettings.IsRcasEnabled(); },
+                     [](bool v) { EmulatorSettings.SetRcasEnabled(v, G); }),
+                 RefreshUpscaling));
+        e.push_back(Live(Steps(
+                             "rcas-attenuation", "Sharpening strength", "Display",
+                             "How much RCAS holds back: lower is sharper.",
+                             {0, 100, 250, 500, 750, 1000, 1500, 2000},
+                             [](long v) { return fmt::format("{:.2f}", v / 1000.0); },
+                             [] { return EmulatorSettings.GetRcasAttenuation(); },
+                             [](long v) {
+                                 EmulatorSettings.SetRcasAttenuation(
+                                     static_cast<int>(std::clamp(v, 0L, 3000L)), G);
+                             }),
+                         RefreshUpscaling));
         e.push_back(Steps(
             "vblank-frequency", "Vblank frequency", "Display",
             "The emulated display's refresh rate. Above 60 Hz speeds up games that count vblanks.",
@@ -282,17 +348,21 @@ const std::vector<Entry>& Entries() {
             "splash", "Splash screen", "Display", "Show the game's splash screen while it starts.",
             [] { return EmulatorSettings.IsShowSplash(); },
             [](bool v) { EmulatorSettings.SetShowSplash(v, G); }));
-        e.push_back(Toggle(
-            "fps-counter", "Frame rate", "Display", "Show shadPS4's frame rate counter.",
-            [] { return EmulatorSettings.IsShowFpsCounter(); },
-            [](bool v) { EmulatorSettings.SetShowFpsCounter(v, G); }));
-        e.push_back(Choice(
-            "hide-cursor", "Hide the cursor", "Display", "When the mouse cursor hides.",
-            {{"0", "Never"}, {"1", "When idle"}, {"2", "Always"}},
-            [] { return std::to_string(EmulatorSettings.GetCursorState()); },
-            [](const std::string& value) {
-                EmulatorSettings.SetCursorState(std::stoi(value), G);
-            }));
+        e.push_back(
+            Live(Toggle(
+                     "fps-counter", "Frame rate", "Display", "Show shadPS4's frame rate counter.",
+                     [] { return EmulatorSettings.IsShowFpsCounter(); },
+                     [](bool v) { EmulatorSettings.SetShowFpsCounter(v, G); }),
+                 [] { Overlay::SetSimpleFps(EmulatorSettings.IsShowFpsCounter()); }));
+        e.push_back(
+            Live(Choice(
+                     "hide-cursor", "Hide the cursor", "Display", "When the mouse cursor hides.",
+                     {{"0", "Never"}, {"1", "When idle"}, {"2", "Always"}},
+                     [] { return std::to_string(EmulatorSettings.GetCursorState()); },
+                     [](const std::string& value) {
+                         EmulatorSettings.SetCursorState(std::stoi(value), G);
+                     }),
+                 Nothing));
 
         // Accuracy
         e.push_back(Choice(
@@ -350,14 +420,16 @@ const std::vector<Entry>& Entries() {
         }
 
         // Audio
-        e.push_back(Steps(
-            "volume", "Volume", "Audio", "The game's volume.",
-            {0, 10, 20, 30, 40, 50, 60, 70, 80, 90, 100, 120, 150},
-            [](long v) { return fmt::format("{}%", v); },
-            [] { return static_cast<long>(EmulatorSettings.GetVolumeSlider()); },
-            [](long v) {
-                EmulatorSettings.SetVolumeSlider(static_cast<int>(std::clamp(v, 0L, 500L)), G);
-            }));
+        e.push_back(Live(Steps(
+                             "volume", "Volume", "Audio", "The game's volume.",
+                             {0, 10, 20, 30, 40, 50, 60, 70, 80, 90, 100, 120, 150},
+                             [](long v) { return fmt::format("{}%", v); },
+                             [] { return static_cast<long>(EmulatorSettings.GetVolumeSlider()); },
+                             [](long v) {
+                                 EmulatorSettings.SetVolumeSlider(
+                                     static_cast<int>(std::clamp(v, 0L, 500L)), G);
+                             }),
+                         Libraries::AudioOut::AdjustVol));
         e.push_back(Choice(
             "audio-backend", "Audio backend", "Audio", "How sound reaches the system.",
             {{"0", "SDL"}, {"1", "OpenAL"}},
@@ -372,16 +444,20 @@ const std::vector<Entry>& Entries() {
             "Japanese-style buttons: Circle confirms and Cross cancels, in games that ask.",
             [] { return EmulatorSettings.IsCircleEnter(); },
             [](bool v) { EmulatorSettings.SetCircleEnter(v, G); }));
-        e.push_back(Toggle(
-            "motion-controls", "Motion controls", "Controls",
-            "Pass the controller's gyro and accelerometer to games.",
-            [] { return EmulatorSettings.IsMotionControlsEnabled(); },
-            [](bool v) { EmulatorSettings.SetMotionControlsEnabled(v, G); }));
-        e.push_back(Toggle(
-            "background-input", "Input in the background", "Controls",
-            "Keep reading the controller while the game window isn't focused.",
-            [] { return EmulatorSettings.IsBackgroundControllerInput(); },
-            [](bool v) { EmulatorSettings.SetBackgroundControllerInput(v, G); }));
+        e.push_back(Toggle("motion-controls", "Motion controls", "Controls",
+                           "Pass the controller's gyro and accelerometer to games.",
+                           [] { return EmulatorSettings.IsMotionControlsEnabled(); },
+                           [](bool v) { EmulatorSettings.SetMotionControlsEnabled(v, G); }));
+        e.push_back(Live(Toggle(
+                             "background-input", "Input in the background", "Controls",
+                             "Keep reading the controller while the game window isn't focused.",
+                             [] { return EmulatorSettings.IsBackgroundControllerInput(); },
+                             [](bool v) { EmulatorSettings.SetBackgroundControllerInput(v, G); }),
+                         [] {
+                             SDL_SetHint(SDL_HINT_JOYSTICK_ALLOW_BACKGROUND_EVENTS,
+                                         EmulatorSettings.IsBackgroundControllerInput() ? "1"
+                                                                                        : "0");
+                         }));
         return e;
     }();
     return entries;
@@ -397,10 +473,14 @@ std::vector<Row> Rows() {
         row.label = e.label;
         row.section = e.section;
         row.help = e.help;
+        if (!e.live) {
+            row.help += NEXT_BOOT;
+        }
         row.kind = e.kind;
         row.options = e.options;
         row.default_value = e.get();
         row.runner = e.runner;
+        row.live = static_cast<bool>(e.live);
         if (row.kind == Row::Kind::Choice && std::ranges::none_of(row.options, [&](const auto& o) {
                 return o.first == row.default_value;
             })) {
@@ -412,6 +492,14 @@ std::vector<Row> Rows() {
     return rows;
 }
 
+void CaptureLoaded() {
+    std::scoped_lock lock(g_loaded_mutex);
+    g_loaded.clear();
+    for (const auto& e : Entries()) {
+        g_loaded.emplace(e.key, e.get());
+    }
+}
+
 std::string Apply(std::string_view key, const std::optional<std::string>& value) {
     const auto& entries = Entries();
     const auto it = std::ranges::find_if(entries, [&](const Entry& e) { return e.key == key; });
@@ -419,6 +507,17 @@ std::string Apply(std::string_view key, const std::optional<std::string>& value)
         return fmt::format("shadPS4 has no setting {}", key);
     }
     if (!value) {
+        // Back to what the loaded config says
+        std::string loaded;
+        {
+            std::scoped_lock lock(g_loaded_mutex);
+            const auto l = g_loaded.find(key);
+            if (l == g_loaded.end()) {
+                return {};
+            }
+            loaded = l->second;
+        }
+        it->set(loaded);
         return {};
     }
     const bool listed =
@@ -427,6 +526,19 @@ std::string Apply(std::string_view key, const std::optional<std::string>& value)
     if ((!listed && !it->free) || !it->set(*value)) {
         return fmt::format("{} can't be {}", it->label, *value);
     }
+    return {};
+}
+
+std::string ApplyLive(std::string_view key, const std::optional<std::string>& value) {
+    if (auto error = Apply(key, value); !error.empty()) {
+        return error;
+    }
+    const auto& entries = Entries();
+    const auto it = std::ranges::find_if(entries, [&](const Entry& e) { return e.key == key; });
+    if (!it->live) {
+        return fmt::format("{} takes effect when the game next starts.", it->label);
+    }
+    it->live();
     return {};
 }
 

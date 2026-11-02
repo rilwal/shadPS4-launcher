@@ -16,6 +16,7 @@
 #include "imgui/renderer/imgui_core.h"
 #include "imgui/renderer/imgui_impl_vulkan.h"
 #include "imgui/shadnet_notifications_layer.h"
+#include "launcher/input.h"
 #include "launcher/overlay.h"
 #include "launcher/session.h"
 #include "sdl_window.h"
@@ -862,8 +863,10 @@ void Presenter::Present(Frame* frame, bool is_reusing_frame, bool is_game_frame)
         }
     };
 
-    // Recreate the swapchain if the window was resized.
-    if (window.GetWidth() != swapchain.GetWidth() || window.GetHeight() != swapchain.GetHeight()) {
+    // Recreate the swapchain if the window was resized, or its settings changed.
+    const bool settings_changed = recreate_swapchain.exchange(false);
+    if (settings_changed || window.GetWidth() != swapchain.GetWidth() ||
+        window.GetHeight() != swapchain.GetHeight()) {
         swapchain.Recreate(window.GetWidth(), window.GetHeight());
     }
 
@@ -902,6 +905,15 @@ void Presenter::Present(Frame* frame, bool is_reusing_frame, bool is_game_frame)
             scheduler.Wait(tick);
             return gpu_tick();
         });
+    // While it has the window's keys, SDL makes text of them for it
+    if (const bool wanted = Launcher::Input::Wanted(); wanted != launcher_input) {
+        launcher_input = wanted;
+        if (wanted) {
+            window.RequestKeyboard();
+        } else {
+            window.ReleaseKeyboard();
+        }
+    }
 
     const u32 capture_with_overlays_count = VideoCore::ConsumeWithOverlaysScreenshotRequests();
     std::optional<ScreenshotReadback> pending_screenshot;

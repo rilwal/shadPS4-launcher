@@ -192,7 +192,7 @@ public:
         info.capabilities = LC_CAP_LIBRARY | LC_CAP_LAUNCH | LC_CAP_ACHIEVEMENTS | LC_CAP_SETTINGS;
 #ifdef LAUNCHER_CLIENT_VULKAN
         // The games it starts draw the quick menu themselves (launcher/overlay.h), so launcherd
-        // keeps its own overlay out of them. Only Linux has that so far.
+        // keeps its own overlay out of them (Linux and macOS).
         info.capabilities |= LC_CAP_COMPOSITED_OVERLAY;
 #endif
         std::array<char, 512> error{};
@@ -293,6 +293,7 @@ private:
             s.value = row.default_value.c_str();
             s.default_value = row.default_value.c_str();
             s.group = GROUP;
+            s.live = row.live;
             if (row.kind == Settings::Row::Kind::Toggle) {
                 s.kind = LC_SETTING_TOGGLE;
             } else {
