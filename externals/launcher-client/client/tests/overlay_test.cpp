@@ -126,9 +126,30 @@ void overlay() {
 	CHECK(named && id && named->find("id")->as_uint() == *id);
 	CHECK(named && named->find("width")->as_uint() == 64);
 
+	// Keys stay the game's until the menu shows
+	lc_input key {};
+	key.kind = LC_INPUT_KEY;
+	key.key  = "Enter";
+	key.down = true;
+	CHECK(!lc_overlay_wants_input(overlay));
+	lc_overlay_input(overlay, &key);
+
 	// Shown: nothing to draw until the shell publishes
 	launcher.send(R"({"type":"overlay_visible","visible":true})");
 	std::this_thread::sleep_for(std::chrono::milliseconds(100));
+	// and the keys and mouse are the shell's
+	CHECK(lc_overlay_wants_input(overlay));
+	key.key = "ArrowDown";
+	lc_overlay_input(overlay, &key);
+	lc_input click {};
+	click.kind = LC_INPUT_POINTER;
+	click.x    = 0.25f;
+	click.y    = 2.0f;
+	lc_overlay_input(overlay, &click);
+	const auto keyed = launcher.wait_for("overlay_input");
+	CHECK(keyed && keyed->find("input")->text("key") == "ArrowDown");
+	const auto pointed = launcher.wait_for("overlay_input", 1);
+	CHECK(pointed && pointed->find("input")->find("x")->as_uint() == 2500 && pointed->find("input")->find("y")->as_uint() == 10000);
 	lc_overlay_begin(overlay, 5, &frame);
 	CHECK(frame.draw == -1);
 	lc_overlay_end(overlay, 6, false);
@@ -164,6 +185,8 @@ void overlay() {
 
 	// Closing: hidden, then the surfaces go
 	launcher.send(R"({"type":"overlay_visible","visible":false})");
+	std::this_thread::sleep_for(std::chrono::milliseconds(100));
+	CHECK(!lc_overlay_wants_input(overlay));
 	launcher.send(R"({"type":"overlay_closed"})");
 	launcher.send(R"({"type":"overlay_surface","buffers":[],"width":0,"height":0})");
 	CHECK(present_until(overlay, 100, frame, [&]() { return frame.generation == 2; }));

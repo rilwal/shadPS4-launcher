@@ -58,6 +58,8 @@ A plugin runner connects with `lc_runner_connect` instead, declaring `LC_CAP_LIB
 
 Every call takes a NULL session and does nothing, so the rest of the emulator can call `lc_unlocked(lc_get(), ...)` without checking for launcher mode. The overlay with the Vulkan helper, on the present thread, is in `launcher_overlay_vk.h`'s comment.
 
+While the shell's menu or keyboard shows in the game's frames, the game's window keeps the focus, so its keys and mouse are the shell's to have: when `lc_overlay_wants_input` is true, pass each event on with `lc_overlay_input` (key, text, pointer, button, wheel) and don't act on it in the game. Controllers need nothing; the shell reads them itself.
+
 ## Building and testing
 
 ```sh

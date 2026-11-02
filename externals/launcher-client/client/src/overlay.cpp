@@ -440,6 +440,20 @@ void lc_overlay_capture(lc_overlay* overlay, const lc_capture* capture, uint64_t
 	o.waiting = std::move(c);
 }
 
+bool lc_overlay_wants_input(lc_overlay* overlay) {
+	return overlay != nullptr && overlay->visible;
+}
+
+void lc_overlay_input(lc_overlay* overlay, const lc_input* input) {
+	if (overlay == nullptr || input == nullptr || !overlay->visible) {
+		return;
+	}
+	auto msg = lc::protocol::overlay_input(*input);
+	if (!msg.type.empty()) {
+		overlay->session.send(std::move(msg));
+	}
+}
+
 bool lc_overlay_wants_presents(lc_overlay* overlay) {
 	if (overlay == nullptr) {
 		return false;
