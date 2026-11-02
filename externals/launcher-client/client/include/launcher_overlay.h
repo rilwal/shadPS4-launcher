@@ -112,7 +112,11 @@ void lc_overlay_capture(lc_overlay *overlay, const lc_capture *capture, uint64_t
 bool lc_overlay_wants_presents(lc_overlay *overlay);
 
 /* Keyboard and mouse input from the game's window, for the shell while its menu or a keyboard is
-   shown in the game's frames: the game's window keeps the focus, so the game passes them on. */
+   shown in the game's frames: the game's window keeps the focus, so the game passes them on.
+   Send every key as LC_INPUT_KEY, and what a key typed as LC_INPUT_TEXT as well: keys that type
+   (letters, digits, Space) act only through their text, so without it they do nothing. With
+   SDL3, that means SDL_StartTextInput while lc_overlay_wants_input. Send no text for a key
+   pressed with Ctrl (Command on a Mac): it's a shortcut. */
 typedef enum lc_input_kind {
 	LC_INPUT_KEY     = 0, /* A key went down or up */
 	LC_INPUT_TEXT    = 1, /* Text the keys typed, after the layout and any input method */
