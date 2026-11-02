@@ -7,7 +7,9 @@
 #include <cstdlib>
 #include <mutex>
 #include <optional>
+#include <string>
 #include <utility>
+#include <vector>
 #include <SDL3/SDL_events.h>
 #include <SDL3/SDL_hints.h>
 #include <SDL3/SDL_properties.h>
@@ -49,12 +51,53 @@ std::atomic_flag g_achievements_sent;
 // already (shadPS4's pause key) stays paused.
 std::atomic_bool g_paused_for_menu;
 
-void Log(void*, lc_log_level level, const char* line) {
-    if (level == LC_LOG_ERROR) {
-        LOG_ERROR(Frontend, "Launcher: {}", line);
-    } else {
+// While the guest is paused, one of its threads may be stopped inside the logger, holding its
+// lock, so the launcher's lines from then wait here until the guest resumes
+enum class Level { Info, Warning, Error };
+std::mutex g_held_mutex;
+std::vector<std::pair<Level, std::string>> g_held;
+constexpr size_t HELD_LINES = 256;
+
+void Write(Level level, const std::string& line) {
+    switch (level) {
+    case Level::Info:
         LOG_INFO(Frontend, "Launcher: {}", line);
+        break;
+    case Level::Warning:
+        LOG_WARNING(Frontend, "Launcher: {}", line);
+        break;
+    case Level::Error:
+        LOG_ERROR(Frontend, "Launcher: {}", line);
+        break;
     }
+}
+
+// Logs the lines held while the guest was paused. After it resumes.
+void WriteHeld() {
+    std::vector<std::pair<Level, std::string>> held;
+    {
+        std::scoped_lock lock(g_held_mutex);
+        held.swap(g_held);
+    }
+    for (const auto& [level, line] : held) {
+        Write(level, line);
+    }
+}
+
+void Say(Level level, std::string line) {
+    if (DebugState.IsGuestThreadsPaused()) {
+        std::scoped_lock lock(g_held_mutex);
+        if (g_held.size() < HELD_LINES) {
+            g_held.emplace_back(level, std::move(line));
+        }
+        return;
+    }
+    WriteHeld();
+    Write(level, line);
+}
+
+void Log(void*, lc_log_level level, const char* line) {
+    Say(level == LC_LOG_ERROR ? Level::Error : Level::Info, line);
 }
 
 void Quit(void*) {
@@ -62,7 +105,7 @@ void Quit(void*) {
     if (g_paused_for_menu.exchange(false)) {
         DebugState.ResumeGuestThreads();
     }
-    LOG_INFO(Frontend, "Launcher: quit");
+    Say(Level::Info, "quit");
     if (g_window == nullptr) {
         // Still booting, before the window that would take the event
         std::quick_exit(0);
@@ -77,7 +120,7 @@ void Quit(void*) {
 // shell, as the menu's background (Launcher::Overlay)
 void MenuOpened(void*, bool opened) {
     if (opened) {
-        LOG_INFO(Frontend, "Launcher: quick menu opened");
+        Say(Level::Info, "quick menu opened");
     }
     auto* controllers = Common::Singleton<Input::GameControllers>::Instance();
     if (opened) {
@@ -93,10 +136,9 @@ void MenuOpened(void*, bool opened) {
         }
         controllers->HoldForLauncher(false);
     }
-    // Logged after the resume: a guest thread paused inside the logger holds its lock, so
-    // logging while the guest is paused could wait for good
+    // Logged after the resume (Say holds lines while the guest is paused)
     if (!opened) {
-        LOG_INFO(Frontend, "Launcher: quick menu closed");
+        Say(Level::Info, "quick menu closed");
     }
     lc_paused(g_session, DebugState.IsGuestThreadsPaused());
 }
@@ -124,9 +166,9 @@ void SettingChanged(void*, const char* key, const char* value) {
     }
     const auto error = Settings::ApplyLive(key, v);
     if (!error.empty()) {
-        LOG_WARNING(Frontend, "Launcher: {}", error);
+        Say(Level::Warning, error);
     } else {
-        LOG_INFO(Frontend, "Launcher: {} = {} (live)", key, v.value_or("(default)"));
+        Say(Level::Info, fmt::format("{} = {} (live)", key, v.value_or("(default)")));
     }
 }
 
