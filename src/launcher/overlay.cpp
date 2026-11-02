@@ -71,8 +71,7 @@ void Destroy() {
 #endif
 }
 
-bool Begin(u64 completed, VkExtent2D window, bool new_frame,
-           const std::function<u64(u64)>& wait) {
+bool Begin(u64 completed, VkExtent2D window, bool new_frame, const std::function<u64(u64)>& wait) {
 #ifdef LAUNCHER_CLIENT_VULKAN
     if (g_vk == nullptr) {
         return false;

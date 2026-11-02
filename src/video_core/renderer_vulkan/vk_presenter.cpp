@@ -900,11 +900,11 @@ void Presenter::Present(Frame* frame, bool is_reusing_frame, bool is_game_frame)
         scheduler.GetWorkSemaphore()->Refresh();
         return scheduler.GetWorkSemaphore()->KnownGpuTick();
     };
-    const bool launcher_capture = Launcher::Overlay::Begin(
-        gpu_tick(), swapchain.GetExtent(), !is_reusing_frame, [&](u64 tick) {
-            scheduler.Wait(tick);
-            return gpu_tick();
-        });
+    const bool launcher_capture = Launcher::Overlay::Begin(gpu_tick(), swapchain.GetExtent(),
+                                                           !is_reusing_frame, [&](u64 tick) {
+                                                               scheduler.Wait(tick);
+                                                               return gpu_tick();
+                                                           });
     // While it has the window's keys, SDL makes text of them for it
     if (const bool wanted = Launcher::Input::Wanted(); wanted != launcher_input) {
         launcher_input = wanted;

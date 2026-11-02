@@ -40,8 +40,7 @@ void Destroy();
 // presented last (false when the last frame is drawn again, as while paused). `wait` waits for a
 // serial to finish on the GPU and returns the newest finished one. True if this present's frame is
 // to be copied with Capture.
-bool Begin(u64 completed, VkExtent2D window, bool new_frame,
-           const std::function<u64(u64)>& wait);
+bool Begin(u64 completed, VkExtent2D window, bool new_frame, const std::function<u64(u64)>& wait);
 
 // Copies `image` (TRANSFER_SRC_OPTIMAL) for the menu's glass
 void Capture(VkCommandBuffer command, VkImage image, VkFormat format, VkExtent2D extent);
