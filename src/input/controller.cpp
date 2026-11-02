@@ -290,6 +290,17 @@ void GameControllers::HoldForLauncher(bool hold) {
     }
 }
 
+void GameController::HideHeldButtons() {
+    std::lock_guard lock{m_state_mutex};
+    m_masked |= m_state.buttonsState;
+}
+
+void GameControllers::HideHeldButtons() {
+    for (auto* c : controllers) {
+        c->HideHeldButtons();
+    }
+}
+
 void GameControllers::ResetLightbarColors() {
     for (auto& c : controllers) {
         auto const* u = UserManagement.GetUserByID(c->user_id);

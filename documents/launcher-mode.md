@@ -125,10 +125,33 @@ boots; their help says they take effect when the game next starts, and the launc
 for the next boot. shadPS4's own in-game settings dialog reloads its config when it closes, after
 which the launcher's values, live changes included, are applied again.
 
+## The on-screen keyboard
+
+When a game asks for text (`sceImeDialogInit`), the launcher draws its own keyboard into the game's
+window instead of shadPS4's, wherever it can draw the quick menu there (`LC_CAP_OSK`, Linux for
+now). `src/launcher/osk.cpp` bridges the client library's keyboard calls to the IME dialog
+(`ImeDialogUi::LauncherKeyboard` in `src/core/libraries/ime/ime_dialog_ui.cpp`):
+
+- The dialog asks for a keyboard the first time it draws, with the game's title, placeholder, text,
+  caret, length limit, kind (text, Latin, URL, email, number), multiline, password, Enter label and
+  panel position.
+- The dialog keeps the text. Each of the launcher's edits (insert, backspace, delete, move, replace;
+  positions in characters, where the dialog counts UTF-16 units) is applied to it within the length
+  limit, run through the game's text filter, and copied to the game's buffer. The text that results
+  goes back to the launcher with the edit it includes.
+- Done or Back in the launcher's keyboard finishes the dialog as the game's own buttons would (OK,
+  or cancelled with the text it started with). The button that did it is hidden from the game
+  until it's let go. The game closing the dialog closes the launcher's keyboard (aborted).
+- While the launcher can't draw keyboards, or stops being able to, shadPS4's own keyboard is
+  drawn, with the text as it is.
+
+The game doesn't read the pads while the dialog is open, either way.
+
 ## Not done yet
 
-- The quick menu in the game's window on macOS and Windows.
-- The launcher's on-screen keyboard for the game's text input.
+- The quick menu and keyboard in the game's window on macOS and Windows.
+- The launcher's keyboard for `sceIme` (the keyboard games draw themselves, without the dialog),
+  and typing on a real keyboard while the launcher's keyboard is up.
 - The console language is global only, since the plugin needs it for trophy lists. Trophy lists
   aren't sent again when the language changes.
 - A game that restarts itself (`sceSystemServiceLoadExec`) starts a new process, which connects

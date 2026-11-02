@@ -43,6 +43,7 @@ class ImeDialogState final {
     s32 user_id{};
     bool is_multi_line{};
     bool is_numeric{};
+    bool is_password{};
     bool fixed_position{};
     OrbisImeType type{};
     OrbisImeLanguage supported_languages{};
@@ -164,6 +165,10 @@ class ImeDialogUi final : public ImGui::Layer {
     bool nav_layout_selection_initialized = false;
     Libraries::Ime::ImeKbLayoutFamily kb_alpha_family = Libraries::Ime::ImeKbLayoutFamily::Latin;
     std::mutex draw_mutex;
+    // The launcher's keyboard showing the dialog, or 0; and Launcher::Osk::Generation() when one
+    // was last asked for
+    u32 launcher_osk = 0;
+    u64 launcher_osk_generation = ~0ull;
 
 public:
     explicit ImeDialogUi(ImeDialogState* state = nullptr, OrbisImeDialogStatus* status = nullptr,
@@ -178,6 +183,10 @@ public:
 private:
     void FinishDialog(OrbisImeDialogEndStatus endstatus, bool restore_original, const char* reason);
     void Free();
+    // The game launcher's keyboard (launcher/osk.h) takes the dialog while it can: true while it
+    // has it, and this one isn't drawn
+    bool LauncherKeyboard();
+    u32 OpenLauncherKeyboard();
 
     bool DrawInputText(const Libraries::Ime::ImePanelMetrics& metrics,
                        bool pointer_selection_enabled);

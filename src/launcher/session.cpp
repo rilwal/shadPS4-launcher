@@ -21,6 +21,7 @@
 #include "core/emulator_settings.h"
 #include "core/user_settings.h"
 #include "input/controller.h"
+#include "launcher/osk.h"
 #include "launcher/session.h"
 #include "launcher/settings.h"
 #include "launcher/trophies.h"
@@ -147,14 +148,22 @@ void Connect(std::vector<std::string> settings) {
     cb.quit = Quit;
     cb.overlay = MenuOpened;
     cb.setting = SettingChanged;
+    cb.osk_available = [](void*, bool available) { Osk::OnAvailable(available); };
+    cb.osk_edit = [](void*, uint32_t osk, uint64_t seq, const lc_osk_edit* edit) {
+        if (edit != nullptr) {
+            Osk::OnEdit(osk, seq, *edit);
+        }
+    };
+    cb.osk_finish = [](void*, uint32_t osk, bool accepted) { Osk::OnFinish(osk, accepted); };
 
     const std::string name = std::string("shadPS4 ") + Common::g_version;
     lc_connect_info info{};
     info.name = name.c_str();
 #ifdef LAUNCHER_CLIENT_VULKAN
     // The presenter draws the launcher's quick menu into the game's frames (launcher/overlay.h)
+    // and the launcher's keyboard in place of the IME dialog's own (launcher/osk.h)
     if (lc_overlay_supported()) {
-        info.capabilities |= LC_CAP_COMPOSITED_OVERLAY;
+        info.capabilities |= LC_CAP_COMPOSITED_OVERLAY | LC_CAP_OSK;
     }
 #endif
     std::array<char, 512> error{};
