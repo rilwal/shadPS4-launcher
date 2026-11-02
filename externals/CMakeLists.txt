@@ -432,8 +432,9 @@ if (NOT TARGET ZArchive::zarchive)
 endif()
 
 # The game launcher's client library (rilwal/game-launcher's client/), for running as its plugin
-# with its Vulkan helper for the quick menu in the game's window, which shares dma-bufs (Linux only)
-if (CMAKE_SYSTEM_NAME STREQUAL "Linux")
+# with its Vulkan helper for the quick menu in the game's window, which shares dma-bufs on Linux and
+# IOSurfaces on macOS
+if (CMAKE_SYSTEM_NAME STREQUAL "Linux" OR APPLE)
     set(LAUNCHER_CLIENT_VULKAN ON)
     get_target_property(LAUNCHER_CLIENT_VULKAN_INCLUDE Vulkan::Headers INTERFACE_INCLUDE_DIRECTORIES)
 else()

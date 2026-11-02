@@ -120,6 +120,8 @@ private:
     u32 expected_frame_height{1080};
 
     Frontend::WindowSDL& window;
+    // Whether the launcher's menu or keyboard had the window's keys at the last present
+    bool launcher_input{};
     Instance instance;
     HostPasses::FsrPass fsr_pass;
     HostPasses::FsrPass::Settings fsr_settings{};

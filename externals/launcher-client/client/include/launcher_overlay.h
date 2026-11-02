@@ -111,6 +111,56 @@ void lc_overlay_capture(lc_overlay *overlay, const lc_capture *capture, uint64_t
    overlay, finish a capture, or catch up with a change. Any thread. */
 bool lc_overlay_wants_presents(lc_overlay *overlay);
 
+/* Keyboard and mouse input from the game's window, for the shell while its menu or a keyboard is
+   shown in the game's frames: the game's window keeps the focus, so the game passes them on.
+   Send every key as LC_INPUT_KEY, and what a key typed as LC_INPUT_TEXT as well: keys that type
+   (letters, digits, Space) act only through their text, so without it they do nothing. With
+   SDL3, that means SDL_StartTextInput while lc_overlay_wants_input. Send no text for a key
+   pressed with Ctrl (Command on a Mac): it's a shortcut. */
+typedef enum lc_input_kind {
+	LC_INPUT_KEY     = 0, /* A key went down or up */
+	LC_INPUT_TEXT    = 1, /* Text the keys typed, after the layout and any input method */
+	LC_INPUT_POINTER = 2, /* The pointer moved */
+	LC_INPUT_BUTTON  = 3, /* A mouse button went down or up */
+	LC_INPUT_WHEEL   = 4, /* The wheel or a trackpad scrolled */
+} lc_input_kind;
+
+#define LC_MOD_SHIFT 1u
+#define LC_MOD_CTRL  2u
+#define LC_MOD_ALT   4u
+#define LC_MOD_SUPER 8u /* Command on a Mac, the Windows key elsewhere */
+
+typedef struct lc_input {
+	lc_input_kind kind;
+	/* KEY: the W3C KeyboardEvent.key value: "ArrowUp", "Enter", "Escape", "Backspace", "Tab",
+	   "F1", " ", or the character the key makes ("a") */
+	const char *key;
+	/* TEXT, UTF-8 */
+	const char *text;
+	/* KEY, BUTTON */
+	bool down;
+	/* KEY: held down, repeating */
+	bool repeat;
+	/* KEY: LC_MOD_* */
+	uint32_t mods;
+	/* POINTER: where in the window, 0 to 1 of its width and height from the top left.
+	   WHEEL: how far, in lines (or pixels if `pixels`); positive y scrolls up. */
+	float x;
+	float y;
+	/* WHEEL: x and y are pixels, from a trackpad */
+	bool pixels;
+	/* BUTTON: 0 left, 1 right, 2 middle, 3 back, 4 forward */
+	uint32_t button;
+} lc_input;
+
+/* Whether keys and the mouse in the game's window are the shell's now: its menu or one of its
+   keyboards is shown in the game's frames. While it is, pass them on with lc_overlay_input and
+   don't act on them in the game. Any thread. */
+bool lc_overlay_wants_input(lc_overlay *overlay);
+
+/* Passes one on to the shell; dropped unless lc_overlay_wants_input. Any thread. */
+void lc_overlay_input(lc_overlay *overlay, const lc_input *input);
+
 /* A surface's id, size and memory layout, for importing it. */
 uint32_t lc_surface_id(const lc_surface *surface);
 uint32_t lc_surface_stride(const lc_surface *surface);

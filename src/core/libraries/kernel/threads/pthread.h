@@ -358,6 +358,8 @@ struct Pthread {
     OrbisKernelExceptionHandlerStack sigaltstack{};
     Mcontext suspended_context{};
     std::atomic_bool is_suspended_in_signal{false};
+    // Linux: the guest suspended this thread; it sleeps in SIGSLEEP's handler while this is set
+    std::atomic_bool suspend_requested{false};
 
     bool IsSignalBlocked(s32 sig) const;
     void QueueSignal(s32 sig);
