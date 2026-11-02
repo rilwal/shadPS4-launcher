@@ -142,7 +142,7 @@ class GameControllers {
 public:
     GameControllers()
         : controllers({new GameController(), new GameController(), new GameController(),
-                       new GameController(), new GameController()}){};
+                       new GameController(), new GameController()}) {};
     virtual ~GameControllers() = default;
     GameController* operator[](const size_t& i) const {
         if (i > 4) {

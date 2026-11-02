@@ -989,7 +989,9 @@ void Presenter::Present(Frame* frame, bool is_reusing_frame, bool is_game_frame)
                                                 vk::ImageLayout::eTransferSrcOptimal,
                                                 vk::AccessFlagBits::eShaderRead,
                                                 vk::AccessFlagBits::eTransferRead));
-            Launcher::Overlay::Capture(cmdbuf, frame->image,
+            // An HDR frame holds PQ values, which the launcher would read as sRGB: no capture,
+            // so the launcher's own window shows the menu
+            Launcher::Overlay::Capture(cmdbuf, swapchain.GetHDR() ? VK_NULL_HANDLE : frame->image,
                                        static_cast<VkFormat>(swapchain.GetSurfaceFormat().format),
                                        {frame->width, frame->height});
             cmdbuf.pipelineBarrier(vk::PipelineStageFlagBits::eTransfer,
@@ -1053,9 +1055,12 @@ void Presenter::Present(Frame* frame, bool is_reusing_frame, bool is_game_frame)
             ImGui::PopStyleColor();
         }
         ImGui::Core::Render(cmdbuf, swapchain_image_view, swapchain.GetExtent());
-        Launcher::Overlay::Draw(cmdbuf, swapchain_image_view,
-                                static_cast<VkFormat>(swapchain.GetSurfaceFormat().format),
-                                swapchain.GetExtent());
+        // Not over an HDR swapchain, whose images aren't of the SDR surface format
+        if (!swapchain.GetHDR()) {
+            Launcher::Overlay::Draw(cmdbuf, swapchain_image_view,
+                                    static_cast<VkFormat>(swapchain.GetSurfaceFormat().format),
+                                    swapchain.GetExtent());
+        }
 
         if (capture_with_overlays_count > 0) {
             auto& readback = pending_screenshot.emplace(
