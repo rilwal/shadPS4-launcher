@@ -29,7 +29,7 @@ extern "C" {
 #endif
 
 /* The plugin API version the library speaks. */
-#define LC_PLUGIN_API 5
+#define LC_PLUGIN_API 6
 
 typedef struct lc_session lc_session;
 
@@ -86,10 +86,10 @@ typedef struct lc_callbacks {
 
 	/* Save what's needed and exit. launcherd ends the process group 30 s later. */
 	void (*quit)(void *user);
-	/* The player opened (true) or closed (false) the quick menu. Pause if that suits the game,
-	   and say so with lc_paused. With the composited overlay the library also starts or stops
-	   the capture itself. */
-	void (*overlay)(void *user, bool opened);
+	/* The quick menu opened over the game (true) or closed (false). Pause if that suits the
+	   game, and say so with lc_paused. Called only when it changes. With the composited overlay
+	   the library also starts or stops the capture itself. */
+	void (*pause)(void *user, bool pause);
 	/* The player chose an overlay item: `value` is NULL for an action, "true"/"false" for a
 	   toggle, the option's value for a choice. */
 	void (*invoke)(void *user, const char *key, const char *value);

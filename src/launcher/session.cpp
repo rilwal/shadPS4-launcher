@@ -137,10 +137,10 @@ void Quit(void*) {
     SDL_PushEvent(&event);
 }
 
-// The present thread keeps showing the frame the game paused on (VideoOutDriver::PresentThread),
-// and with the overlay drawn in the game's window the next of those presents is copied for the
-// shell, as the menu's background (Launcher::Overlay)
-void MenuOpened(void*, bool opened) {
+// The quick menu opened (pause) or closed. The present thread keeps showing the frame the game
+// paused on (VideoOutDriver::PresentThread), and with the overlay drawn in the game's window the
+// next of those presents is copied for the shell, as the menu's background (Launcher::Overlay)
+void Pause(void*, bool opened) {
     if (opened) {
         Say(Level::Info, "quick menu opened");
     }
@@ -220,7 +220,7 @@ void Connect(std::vector<std::string> settings) {
     lc_callbacks cb{};
     cb.log = Log;
     cb.quit = Quit;
-    cb.overlay = MenuOpened;
+    cb.pause = Pause;
     cb.setting = SettingChanged;
     cb.osk_available = [](void*, bool available) { Osk::OnAvailable(available); };
     cb.osk_edit = [](void*, uint32_t osk, uint64_t seq, const lc_osk_edit* edit) {
