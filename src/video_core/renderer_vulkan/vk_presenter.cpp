@@ -603,6 +603,10 @@ void Presenter::RecreateFrame(Frame* frame, u32 width, u32 height) {
     frame->is_hdr = swapchain.GetHDR();
 }
 
+bool Presenter::FirstPresentOwed() const {
+    return first_present_owed.load(std::memory_order_relaxed) && !window.IsHidden();
+}
+
 Frame* Presenter::PrepareLastFrame() {
     if (last_submit_frame == nullptr) {
         return nullptr;
@@ -862,6 +866,18 @@ void Presenter::Present(Frame* frame, bool is_reusing_frame, bool is_game_frame)
             free_cv.notify_one();
         }
     };
+
+    // Hidden while the launcher shows the game booting. The game's first frame shows it; frames
+    // until it is up are dropped, as presenting to a window not yet shown can wait forever
+    // (Wayland's FIFO) or break the protocol (a buffer before the first configure)
+    if (window.IsHidden()) {
+        if (!is_reusing_frame && is_game_frame) {
+            first_present_owed = true;
+            window.Show();
+        }
+        free_frame();
+        return;
+    }
 
     // Recreate the swapchain if the window was resized, or its settings changed.
     const bool settings_changed = recreate_swapchain.exchange(false);
@@ -1173,8 +1189,11 @@ void Presenter::Present(Frame* frame, bool is_reusing_frame, bool is_game_frame)
     }
 
     free_frame();
+    const bool owed = first_present_owed.exchange(false);
     if (!is_reusing_frame && is_game_frame) {
         DebugState.IncFlipFrameNum();
+    }
+    if ((!is_reusing_frame && is_game_frame) || owed) {
         Launcher::Session::FirstFrame();
     }
 }

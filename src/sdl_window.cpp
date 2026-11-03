@@ -28,6 +28,7 @@
 #include "input/input_handler.h"
 #include "input/input_mouse.h"
 #include "launcher/input.h"
+#include "launcher/session.h"
 #include "sdl_window.h"
 #include "video_core/renderdoc.h"
 
@@ -123,6 +124,8 @@ WindowSDL::WindowSDL(s32 width_, s32 height_, Input::GameControllers* controller
     SDL_SetNumberProperty(props, SDL_PROP_WINDOW_CREATE_HEIGHT_NUMBER, height);
     SDL_SetNumberProperty(props, "flags", SDL_WINDOW_VULKAN);
     SDL_SetBooleanProperty(props, SDL_PROP_WINDOW_CREATE_RESIZABLE_BOOLEAN, true);
+    hidden = Launcher::Session::Active();
+    SDL_SetBooleanProperty(props, SDL_PROP_WINDOW_CREATE_HIDDEN_BOOLEAN, hidden);
     // Creating the window directly in fullscreen avoids a visible windowed -> fullscreen
     // transition on startup. SDL sizes the window to the display and keeps the requested
     // width/height as the windowed size to restore when leaving fullscreen.
@@ -155,6 +158,7 @@ WindowSDL::WindowSDL(s32 width_, s32 height_, Input::GameControllers* controller
     SDL_SyncWindow(window);
     // The window geometry is only final once the fullscreen transition has settled; refresh
     // the cached size so the first swapchain and the splashscreen use the real drawable size.
+    // A hidden window settles when it's shown (Show).
     SDL_GetWindowSizeInPixels(window, &width, &height);
 
     SDL_InitSubSystem(SDL_INIT_GAMEPAD);
@@ -366,6 +370,29 @@ void WindowSDL::RequestKeyboard() {
             false);
     }
     keyboard_grab++;
+}
+
+void WindowSDL::Show() {
+    if (!IsHidden() || show_asked.test_and_set()) {
+        return;
+    }
+    const bool asked = SDL_RunOnMainThread(
+        [](void* userdata) {
+            auto* const self = static_cast<WindowSDL*>(userdata);
+            SDL_ShowWindow(self->window);
+            SDL_RaiseWindow(self->window);
+            // Fullscreen (pending while hidden) and the output's scale are known once it's up,
+            // so the first frames go out at its real size. Wayland: SDL has had the shell's
+            // first configure, so frames can be presented.
+            SDL_SyncWindow(self->window);
+            self->OnResize();
+            self->hidden.store(false, std::memory_order_release);
+        },
+        this, false);
+    if (!asked) {
+        LOG_ERROR(Frontend, "Can't show the window yet: {}", SDL_GetError());
+        show_asked.clear();
+    }
 }
 
 void WindowSDL::ReleaseKeyboard() {

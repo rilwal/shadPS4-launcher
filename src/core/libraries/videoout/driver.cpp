@@ -377,7 +377,8 @@ void VideoOutDriver::PresentThread(std::stop_token token) {
                     if (!main_port.is_open) {
                         DrawBlankFrame();
                     } else if (ImGui::Core::MustKeepDrawing() ||
-                               Launcher::Overlay::WantsPresents()) {
+                               Launcher::Overlay::WantsPresents() ||
+                               presenter->FirstPresentOwed()) {
                         DrawLastFrame();
                     }
                 }
