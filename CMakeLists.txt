@@ -1297,6 +1297,8 @@ set(EMULATOR src/emulator.cpp
 
 set(LAUNCHER src/launcher/input.cpp
              src/launcher/input.h
+             src/launcher/keys.cpp
+             src/launcher/keys.h
              src/launcher/library.cpp
              src/launcher/library.h
              src/launcher/osk.cpp

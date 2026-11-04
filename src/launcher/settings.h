@@ -15,7 +15,7 @@
 namespace Launcher::Settings {
 
 struct Row {
-    enum class Kind { Toggle, Choice };
+    enum class Kind { Toggle, Choice, Folder };
     std::string key;
     std::string label;
     std::string section;

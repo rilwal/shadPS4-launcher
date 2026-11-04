@@ -4,6 +4,7 @@
 #include <algorithm>
 #include <array>
 #include <charconv>
+#include <filesystem>
 #include <functional>
 #include <fmt/format.h>
 
@@ -11,6 +12,7 @@
 #include <mutex>
 #include <SDL3/SDL_hints.h>
 
+#include "common/path_util.h"
 #include "core/devtools/layer.h"
 #include "core/emulator_settings.h"
 #include "core/libraries/audio/audioout.h"
@@ -135,6 +137,25 @@ Entry Toggle(const char* key, const char* label, const char* section, const char
                      }
                      return b.has_value();
                  }};
+}
+
+// A folder, picked with the launcher's picker. Empty is shadPS4's own folder for it.
+Entry Folder(const char* key, const char* label, const char* section, const char* help,
+             std::function<std::filesystem::path()> get,
+             std::function<void(const std::filesystem::path&)> set) {
+    Entry entry{key,
+                label,
+                section,
+                help,
+                Row::Kind::Folder,
+                {},
+                [get] { return Common::FS::PathToUTF8String(get()); },
+                [set](const std::string& value) {
+                    set(std::filesystem::path(std::u8string(value.begin(), value.end())));
+                    return true;
+                }};
+    entry.free = true;
+    return entry;
 }
 
 Entry Choice(const char* key, const char* label, const char* section, const char* help,
@@ -419,6 +440,25 @@ const std::vector<Entry>& Entries() {
             e.push_back(std::move(language));
         }
 
+        // What the player dumped from their own console, for games that need it
+        auto modules = Folder(
+            "sys-modules-dir", "System modules", "System files",
+            "A folder of system modules (.sprx files) from your PS4's firmware, for games that "
+            "need one shadPS4 doesn't emulate. Modules in a folder named after a game's title id "
+            "are for that game alone.",
+            [] { return EmulatorSettings.GetSysModulesDir(); },
+            [](const std::filesystem::path& dir) { EmulatorSettings.SetSysModulesDir(dir); });
+        modules.runner = true;
+        e.push_back(std::move(modules));
+        auto fonts = Folder(
+            "fonts-dir", "System fonts", "System files",
+            "A folder holding the font and font2 folders from your PS4's system software, for "
+            "games that draw text with the console's fonts.",
+            [] { return EmulatorSettings.GetFontsDir(); },
+            [](const std::filesystem::path& dir) { EmulatorSettings.SetFontsDir(dir); });
+        fonts.runner = true;
+        e.push_back(std::move(fonts));
+
         // Audio
         e.push_back(Live(Steps(
                              "volume", "Volume", "Audio", "The game's volume.",
@@ -444,10 +484,11 @@ const std::vector<Entry>& Entries() {
             "Japanese-style buttons: Circle confirms and Cross cancels, in games that ask.",
             [] { return EmulatorSettings.IsCircleEnter(); },
             [](bool v) { EmulatorSettings.SetCircleEnter(v, G); }));
-        e.push_back(Toggle("motion-controls", "Motion controls", "Controls",
-                           "Pass the controller's gyro and accelerometer to games.",
-                           [] { return EmulatorSettings.IsMotionControlsEnabled(); },
-                           [](bool v) { EmulatorSettings.SetMotionControlsEnabled(v, G); }));
+        e.push_back(Toggle(
+            "motion-controls", "Motion controls", "Controls",
+            "Pass the controller's gyro and accelerometer to games.",
+            [] { return EmulatorSettings.IsMotionControlsEnabled(); },
+            [](bool v) { EmulatorSettings.SetMotionControlsEnabled(v, G); }));
         e.push_back(Live(Toggle(
                              "background-input", "Input in the background", "Controls",
                              "Keep reading the controller while the game window isn't focused.",

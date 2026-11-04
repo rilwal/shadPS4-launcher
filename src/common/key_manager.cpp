@@ -18,9 +18,9 @@ std::mutex KeyManager::s_mutex;
 KeyManager::KeyManager() {
     SetDefaultKeys();
 }
-KeyManager::~KeyManager() {
-    SaveToFile();
-}
+// Not saved here: whatever changes the keys saves them (LoadFromFile, the launcher's trophy key),
+// and a game that exits would otherwise write back the keys it loaded over newer ones.
+KeyManager::~KeyManager() = default;
 
 std::shared_ptr<KeyManager> KeyManager::GetInstance() {
     std::lock_guard<std::mutex> lock(s_mutex);
