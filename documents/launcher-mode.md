@@ -104,13 +104,13 @@ in the launcher keeps shadPS4's value (and its per-game config).
   language, which the plugin lists trophies in, and the system modules and system fonts folders
   (shadPS4's `sys_modules` and `fonts`, defaulting to the ones in its user folder). It passes them
   to the games it starts as `--launcher-setting <key>=<value>`.
-- The trophy key, under System files: an `install` file pick (plugin API 7). The player picks a
-  file holding the key (shadPS4's keys.json, an old config.toml with `[Keys] TrophyKey`, a text
-  file with the key as 32 hex digits, or the 16-byte key itself), and the plugin saves it to
-  shadPS4's keys.json (`src/launcher/keys.cpp`). The row says Installed or Not installed. Trophy
-  lists the launcher asked for before there was a key are read again once it's installed.
+- The trophy key, under System files: a text row taking the 128-bit key as 32 hex digits (spaces
+  are ignored). Its value is the key in shadPS4's keys.json, and the plugin saves what the player
+  types there (`src/launcher/keys.cpp`), telling them if it isn't 32 hex digits. The launcher
+  sends its stored value on each connect, which the plugin skips when keys.json already has it.
+  Trophy lists the launcher asked for before there was a key are read again once it's saved.
   KeyManager no longer saves keys.json when it's destroyed, so a game that was running before the
-  key was installed doesn't write its own (no) key back when it exits.
+  key was saved doesn't write its own (no) key back when it exits.
 - Everything else is a game setting (`game_settings`): toggles and choices, numbers being offered
   as steps. The launcher stores the player's values, globally and per game, and sends them with
   `configure` before boot. shadPS4 applies them after loading its config for the game, as

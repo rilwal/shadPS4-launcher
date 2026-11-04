@@ -158,9 +158,6 @@ public:
         cb.setting = [](void* user, const char* key, const char* value) {
             static_cast<Plugin*>(user)->OnSetting(key, value);
         };
-        cb.invoke = [](void* user, const char* key, const char* value) {
-            static_cast<Plugin*>(user)->OnInvoke(key, value);
-        };
         cb.closed = [](void* user) { static_cast<Plugin*>(user)->OnClosed(); };
 
         lc_runner_callbacks rc{};
@@ -290,24 +287,18 @@ private:
         dirs.group = GROUP;
         own.push_back(dirs);
 
-        // Every file shows: key files go by any name
-        lc_path_pick key_pick{};
-        key_pick.file = true;
-        key_pick.title = "Choose a file with your PS4 trophy key";
-        key_pick.start = "~";
-        key_pick.install = true;
-
+        // Its own words: what's in keys.json, which other shadPS4 front ends also set
+        const std::string key_hex = Keys::TrophyKeyHex();
         lc_setting key{};
         key.key = TROPHY_KEY;
         key.section = SYSTEM_FILES;
         key.label = "Trophy key";
-        key.help = "Your PS4's trophy key, which shadPS4 needs to read games' trophy lists: "
-                   "shadPS4's keys.json, a text file with the key as 32 hex digits, or the key "
-                   "file itself. It's copied into shadPS4's keys.json.";
-        key.kind = LC_SETTING_PATH;
-        key.path = &key_pick;
-        key.value = Keys::HaveTrophyKey() ? "Installed" : "Not installed";
-        key.default_value = "Not installed";
+        key.help = "Your PS4's trophy key, 32 hex digits, which shadPS4 needs to read games' "
+                   "trophy lists. It's kept in shadPS4's keys.json.";
+        key.kind = LC_SETTING_TEXT;
+        key.placeholder = "32 hex digits";
+        key.value = key_hex.c_str();
+        key.default_value = "";
         key.group = GROUP;
 
         lc_path_pick folder_pick{};
@@ -400,25 +391,23 @@ private:
         }
     }
 
-    // One of its install rows: the file the player picked
-    void OnInvoke(const char* key, const char* value) {
-        if (key == nullptr || std::string_view(key) != TROPHY_KEY || value == nullptr) {
+    // The key the player typed. Nothing for a reset: an empty row shows there's no key, and
+    // clearing keys.json isn't worth a row.
+    void SetTrophyKey(const std::string& text) {
+        auto parsed = Keys::ParseTrophyKey(text);
+        if (const auto* error = std::get_if<std::string>(&parsed)) {
+            lc_notify(m_session, "Trophy key not saved", error->c_str(), true);
             return;
         }
-        // On the worker, which also reads trophy files with the key
-        Post([this, file = std::string(value)] { InstallTrophyKey(file); });
-    }
-
-    void InstallTrophyKey(const std::string& file) {
-        const auto error =
-            Keys::InstallTrophyKey(fs::path(std::u8string(file.begin(), file.end())));
-        if (!error.empty()) {
-            lc_notify(m_session, "Trophy key not installed", error.c_str(), true);
+        const auto& key = std::get<std::vector<u8>>(parsed);
+        if (key == Keys::TrophyKey()) {
+            return; // The launcher sends its stored value on each connect
+        }
+        if (const auto error = Keys::SaveTrophyKey(key); !error.empty()) {
+            lc_notify(m_session, "Trophy key not saved", error.c_str(), true);
             return;
         }
-        SendSettings();
-        lc_notify(m_session, "Trophy key installed", "Your PS4 games' trophies will show now.",
-                  false);
+        lc_notify(m_session, "Trophy key saved", "Your PS4 games' trophies will show now.", false);
         // The trophy lists it couldn't read without it
         std::map<uint64_t, std::pair<std::string, std::string>> waiting;
         {
@@ -488,7 +477,12 @@ private:
         bool rescan = false;
         {
             std::scoped_lock lock(m_mutex);
-            if (k == GAME_DIRS_KEY) {
+            if (k == TROPHY_KEY) {
+                // On the worker, which also reads trophy files with the key
+                if (value != nullptr && *value != '\0') {
+                    Post([this, text = std::string(value)] { SetTrophyKey(text); });
+                }
+            } else if (k == GAME_DIRS_KEY) {
                 m_setting_dirs = SplitFolders(value != nullptr ? value : "", false);
                 m_have_game_dirs = true;
                 rescan = m_started; // Before that, the first library has them

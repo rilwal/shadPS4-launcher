@@ -3,25 +3,30 @@
 
 #pragma once
 
-#include <filesystem>
 #include <string>
+#include <string_view>
 #include <variant>
 #include <vector>
 
 #include "common/types.h"
 
-// The PS4 trophy key the player brings, installed from a file they pick on shadPS4's settings
-// page in the game launcher. shadPS4 keeps it in keys.json (KeyManager), as its own launcher does.
+// The PS4 trophy key the player types on shadPS4's settings page in the game launcher. shadPS4
+// keeps it in keys.json (KeyManager), as its own launcher does.
 namespace Launcher::Keys {
 
-// The trophy key in a file: shadPS4's keys.json, an older shadPS4 config.toml ([Keys] TrophyKey),
-// a text file with the key as 32 hex digits, or the 16-byte key itself. Else why not.
-[[nodiscard]] std::variant<std::vector<u8>, std::string> ReadTrophyKey(
-    const std::filesystem::path& file);
+// The 128-bit key as 32 hex digits, in either case; spaces are ignored. Returns the key or an
+// error for the player.
+[[nodiscard]] std::variant<std::vector<u8>, std::string> ParseTrophyKey(std::string_view text);
 
-// Reads the trophy key from `file` and saves it to keys.json, where the games shadPS4 starts read
-// it. Returns an error, or an empty string.
-std::string InstallTrophyKey(const std::filesystem::path& file);
+// The key shadPS4 has; empty if it has none.
+[[nodiscard]] std::vector<u8> TrophyKey();
+
+// The key shadPS4 has, as 32 hex digits; empty if it has none.
+[[nodiscard]] std::string TrophyKeyHex();
+
+// Saves the key to keys.json, where the games shadPS4 starts read it. Returns an error, or an
+// empty string.
+std::string SaveTrophyKey(const std::vector<u8>& key);
 
 // Whether shadPS4 has a trophy key.
 [[nodiscard]] bool HaveTrophyKey();
