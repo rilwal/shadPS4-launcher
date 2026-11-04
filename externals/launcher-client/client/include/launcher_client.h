@@ -204,8 +204,7 @@ typedef enum lc_setting_kind {
 	LC_SETTING_CHOICE = 2, /* value is one of `options` */
 	LC_SETTING_TEXT   = 3, /* value is free text; `placeholder` shows when it's empty */
 	/* A file or folder, chosen with the shell's picker (`path`). value is the path, "" for none; for
-	   a `multiple` pick, the paths one per line; for an `install` pick, the plugin's own words. A
-	   runner's settings only. */
+	   a `multiple` pick, the paths one per line. A runner's settings only. */
 	LC_SETTING_PATH = 4,
 } lc_setting_kind;
 
@@ -228,11 +227,6 @@ typedef struct lc_path_pick {
 	/* Files shown; none shows every file in a file pick, and none in a folder pick */
 	const lc_pick_filter *filters;
 	size_t                filter_count;
-	/* What's picked is the plugin's to install (a firmware update, a key file), and isn't kept: it
-	   arrives as lc_callbacks.invoke with the row's key and the path (paths one per line for
-	   `multiple`). The row's `value` is the plugin's word on what it has installed ("Firmware 4.92"),
-	   which it changes by calling lc_settings again. */
-	bool install;
 } lc_path_pick;
 
 typedef struct lc_option {
@@ -257,6 +251,12 @@ typedef struct lc_setting {
 	const char *group;
 	/* A runner's game settings (lc_game_settings): it can change while a game runs */
 	bool live;
+	/* An LC_SETTING_PATH or LC_SETTING_TEXT runner setting whose value is the plugin's to install (a
+	   firmware update, a key), and isn't kept: what the player picks or types arrives as
+	   lc_callbacks.invoke with the row's key (paths one per line for a `multiple` pick). The row's
+	   `value` is the plugin's own ("Firmware 4.92", the key it has), which it changes by calling
+	   lc_settings again. */
+	bool install;
 } lc_setting;
 
 /* Replaces the quick-menu items. */

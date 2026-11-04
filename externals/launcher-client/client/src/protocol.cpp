@@ -179,7 +179,7 @@ static Value setting_value(const lc_setting& s, const char* value) {
 	Value obj = Value::object();
 	if (s.kind == LC_SETTING_TOGGLE) {
 		obj.set("Bool", str(value) == "true");
-	} else if (s.kind == LC_SETTING_PATH && s.path != nullptr && s.path->multiple && !s.path->install) {
+	} else if (s.kind == LC_SETTING_PATH && s.path != nullptr && s.path->multiple && !s.install) {
 		Value       items = Value::array();
 		std::string text  = str(value);
 		for (size_t start = 0; start < text.size();) {
@@ -217,6 +217,7 @@ static Value setting(const lc_setting& s) {
 		case LC_SETTING_TEXT: {
 			Value text = Value::object();
 			text.set("placeholder", str(s.placeholder));
+			text.set("install", s.install);
 			kind = Value::object();
 			kind.set("Text", std::move(text));
 			break;
@@ -251,7 +252,7 @@ static Value setting(const lc_setting& s) {
 			pick.set("space", false);
 			pick.set("writable", false);
 			pick.set("multiple", p.multiple);
-			pick.set("install", p.install);
+			pick.set("install", s.install);
 			kind = Value::object();
 			kind.set("Path", std::move(pick));
 			break;

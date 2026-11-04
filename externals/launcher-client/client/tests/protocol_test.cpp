@@ -232,7 +232,7 @@ static void sent() {
 	// A folder list, against the example's second row
 	const char* const    iso[] = {"iso"};
 	const lc_pick_filter discs {"Disc images", iso, 1, nullptr, 0};
-	const lc_path_pick   folders_pick {false, "Choose a folder of PS3 games", "~/Games", true, &discs, 1, false};
+	const lc_path_pick   folders_pick {false, "Choose a folder of PS3 games", "~/Games", true, &discs, 1};
 	lc_setting         folders {};
 	folders.key           = "game_dirs";
 	folders.section       = "Library";
@@ -260,7 +260,7 @@ static void sent() {
 	// An install pick: the row's value is the plugin's words, as text, even for several files
 	const char* const    raps[] = {"*.rap"};
 	const lc_pick_filter licences {"Licences", nullptr, 0, raps, 1};
-	const lc_path_pick   licence_pick {true, "Choose licence files", nullptr, true, &licences, 1, true};
+	const lc_path_pick   licence_pick {true, "Choose licence files", nullptr, true, &licences, 1};
 	lc_setting           licence {};
 	licence.key           = "licences";
 	licence.section       = "System";
@@ -269,13 +269,27 @@ static void sent() {
 	licence.path          = &licence_pick;
 	licence.value         = "12 installed";
 	licence.default_value = "None";
-	const auto installs   = lc::json::parse(protocol::settings("", &licence, 1).json);
+	licence.install       = true;
+	// And an install text row: its value is the plugin's too
+	lc_setting trophy {};
+	trophy.key              = "trophy_key";
+	trophy.section          = "System";
+	trophy.label            = "Trophy key";
+	trophy.kind             = LC_SETTING_TEXT;
+	trophy.value            = "00112233";
+	trophy.default_value    = "";
+	trophy.install          = true;
+	const lc_setting both[] = {licence, trophy};
+	const auto installs     = lc::json::parse(protocol::settings("", both, 2).json);
 	CHECK(installs.has_value());
 	if (installs) {
 		const Value& row = installs->find("items")->items().front();
 		CHECK(row.find("kind")->find("Path")->find("install")->as_bool());
 		CHECK(row.find("kind")->find("Path")->text("pick") == "file");
 		CHECK(row.find("value")->text("Text") == "12 installed" && row.find("default")->text("Text") == "None");
+		const Value& text = installs->find("items")->items().back();
+		CHECK(text.find("kind")->find("Text")->find("install")->as_bool());
+		CHECK(text.find("value")->text("Text") == "00112233");
 	}
 
 	// Game settings: rows as settings' are, with `live` and the group of the page they go on

@@ -158,6 +158,9 @@ public:
         cb.setting = [](void* user, const char* key, const char* value) {
             static_cast<Plugin*>(user)->OnSetting(key, value);
         };
+        cb.invoke = [](void* user, const char* key, const char* value) {
+            static_cast<Plugin*>(user)->OnInvoke(key, value);
+        };
         cb.closed = [](void* user) { static_cast<Plugin*>(user)->OnClosed(); };
 
         lc_runner_callbacks rc{};
@@ -297,9 +300,10 @@ private:
                    "trophy lists. It's kept in shadPS4's keys.json.";
         key.kind = LC_SETTING_TEXT;
         key.placeholder = "32 hex digits";
-        // The launcher shows the default until the player types one
+        // What the player types comes to OnInvoke; the row shows the key in keys.json
         key.value = key_hex.c_str();
-        key.default_value = key_hex.c_str();
+        key.default_value = "";
+        key.install = true;
         key.group = GROUP;
 
         lc_path_pick folder_pick{};
@@ -392,7 +396,15 @@ private:
         }
     }
 
-    // The key the player typed. A reset needs nothing: the row's default is keys.json's key.
+    // An install row's value: the trophy key the player typed, which the launcher doesn't keep
+    void OnInvoke(const char* key, const char* value) {
+        if (key == nullptr || std::string_view(key) != TROPHY_KEY || value == nullptr) {
+            return;
+        }
+        // On the worker, which also reads trophy files with the key
+        Post([this, text = std::string(value)] { SetTrophyKey(text); });
+    }
+
     void SetTrophyKey(const std::string& text) {
         auto parsed = Keys::ParseTrophyKey(text);
         if (const auto* error = std::get_if<std::string>(&parsed)) {
@@ -400,14 +412,11 @@ private:
             return;
         }
         const auto& key = std::get<std::vector<u8>>(parsed);
-        if (key == Keys::TrophyKey()) {
-            return; // The launcher sends its stored value on each connect
-        }
         if (const auto error = Keys::SaveTrophyKey(key); !error.empty()) {
             lc_notify(m_session, "Trophy key not saved", error.c_str(), true);
             return;
         }
-        SendSettings(); // Its default is keys.json's key
+        SendSettings(); // The row shows the key in keys.json
         lc_notify(m_session, "Trophy key saved", "Your PS4 games' trophies will show now.", false);
         // The trophy lists it couldn't read without it
         std::map<uint64_t, std::pair<std::string, std::string>> waiting;
@@ -475,13 +484,6 @@ private:
 
     void OnSetting(const char* key, const char* value) {
         const std::string k = key != nullptr ? key : "";
-        if (k == TROPHY_KEY) {
-            // On the worker, which also reads trophy files with the key
-            if (value != nullptr && *value != '\0') {
-                Post([this, text = std::string(value)] { SetTrophyKey(text); });
-            }
-            return;
-        }
         bool rescan = false;
         {
             std::scoped_lock lock(m_mutex);
