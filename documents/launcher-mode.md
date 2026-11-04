@@ -105,7 +105,7 @@ in the launcher keeps shadPS4's value (and its per-game config).
   (shadPS4's `sys_modules` and `fonts`, defaulting to the ones in its user folder). It passes them
   to the games it starts as `--launcher-setting <key>=<value>`.
 - The trophy key, under System files: a text row taking the 128-bit key as 32 hex digits (spaces
-  are ignored). Its value is the key in shadPS4's keys.json, and the plugin saves what the player
+  are ignored). Its default is the key in shadPS4's keys.json, and the plugin saves what the player
   types there (`src/launcher/keys.cpp`), telling them if it isn't 32 hex digits. The launcher
   sends its stored value on each connect, which the plugin skips when keys.json already has it.
   Trophy lists the launcher asked for before there was a key are read again once it's saved.
