@@ -76,6 +76,9 @@ struct GraphicsPipeline::Build {
     bool uses_heap{};
     std::array<StageHeapMappings, MaxShaderStages> heap_mappings;
     vk::PipelineCreateFlags2CreateInfo flags2{};
+    /// With shader objects: the code of each helper stage we generate, by shader stage index,
+    /// copied so that a worker can create it after the constructor.
+    std::array<std::vector<u32>, MaxShaderStages> generated;
 };
 
 GraphicsPipeline::GraphicsPipeline(
@@ -477,7 +480,6 @@ GraphicsPipeline::GraphicsPipeline(
 
     if (shader_objects) {
         // Helper stages are made here, so their code is the shader object's key.
-        std::array<const std::vector<u32>*, MaxShaderStages> generated{};
         for (size_t i = 0; i < shader_stages.size(); ++i) {
             const auto sw_stage = StageBitToLogicalStage(shader_stages[i].stage);
             if (infos[u32(sw_stage)]) {
@@ -485,22 +487,43 @@ GraphicsPipeline::GraphicsPipeline(
             }
             switch (sw_stage) {
             case Shader::SwStage::TessellationControl:
-                generated[i] = &sdata.tcs;
+                b.generated[i] = sdata.tcs;
                 break;
             case Shader::SwStage::TessellationEval:
-                generated[i] = &sdata.tes;
+                b.generated[i] = sdata.tes;
                 break;
             case Shader::SwStage::Fragment:
-                generated[i] = &sdata.fragment;
+                b.generated[i] = sdata.fragment;
                 break;
             default:
                 UNREACHABLE();
             }
         }
-        CreateShaderObjects(b, *shader_objects, generated);
-        if (options.on_created) {
-            options.on_created(driver_ns);
+        if (!options.compiler) {
+            CreateShaderObjects(b, *shader_objects);
+            if (options.on_created) {
+                options.on_created(driver_ns);
+            }
+            return;
         }
+        // Workers create the shaders that don't exist yet; draws skip or wait until then.
+        state.store(State::Pending, std::memory_order_relaxed);
+        options.compiler->Submit([this, build = std::move(build), shader_objects,
+                                  compiler = options.compiler,
+                                  on_created = std::move(options.on_created)](bool drop) {
+            if (drop) {
+                Finish(State::Dropped);
+                return;
+            }
+            CreateShaderObjects(*build, *shader_objects);
+            const u64 created_ns = driver_ns;
+            // The pipeline may be destroyed from here on, so nothing below touches it.
+            Finish(State::Ready);
+            compiler->Notify();
+            if (on_created) {
+                on_created(created_ns);
+            }
+        });
         return;
     }
 
@@ -594,8 +617,7 @@ GraphicsPipeline::GraphicsPipeline(
     });
 }
 
-void GraphicsPipeline::CreateShaderObjects(const Build& b, ShaderObjects& objects,
-                                           std::span<const std::vector<u32>* const> generated) {
+void GraphicsPipeline::CreateShaderObjects(const Build& b, ShaderObjects& objects) {
     auto st = std::make_unique<ShaderObjectState>();
     // Every stage the device has is bound, null when the draw doesn't use it.
     st->stages[st->num_stages++] = vk::ShaderStageFlagBits::eVertex;
@@ -614,8 +636,8 @@ void GraphicsPipeline::CreateShaderObjects(const Build& b, ShaderObjects& object
         const auto slot = std::ranges::find(st->stages, stage_ci.stage) - st->stages.begin();
         ASSERT(slot < st->num_stages);
         st->shaders[slot] =
-            generated[i]
-                ? objects.GetGenerated(*generated[i], stage_ci.stage, stage_ci.pNext, created_ns)
+            !b.generated[i].empty()
+                ? objects.GetGenerated(b.generated[i], stage_ci.stage, stage_ci.pNext, created_ns)
                 : objects.Get(stage_ci.module, stage_ci.stage, stage_ci.pNext, created_ns);
         st->tessellation |= stage_ci.stage == vk::ShaderStageFlagBits::eTessellationEvaluation;
     }

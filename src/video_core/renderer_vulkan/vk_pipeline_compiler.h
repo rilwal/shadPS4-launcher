@@ -68,8 +68,8 @@ private:
 
 /// How a pipeline gets created in the driver.
 struct PipelineCompileOptions {
-    /// Draws with shader objects from here instead of a pipeline. They're created at once, so
-    /// the async options below don't apply.
+    /// Draws with shader objects from here instead of a pipeline. With `compiler`, the missing
+    /// ones are created on the workers; the tiered and probe options don't apply.
     ShaderObjects* shader_objects{};
     /// Creates it on these workers instead of at once; draws skip it until it's ready.
     PipelineCompiler* compiler{};

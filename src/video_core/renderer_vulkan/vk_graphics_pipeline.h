@@ -132,8 +132,8 @@ private:
                       const std::function<void(u64, u64)>& on_probed);
 
     /// Takes the shaders and baked state from a filled build, instead of creating a pipeline.
-    void CreateShaderObjects(const Build& build, ShaderObjects& objects,
-                             std::span<const std::vector<u32>* const> generated);
+    /// Runs on a worker with async creation.
+    void CreateShaderObjects(const Build& build, ShaderObjects& objects);
 
 private:
     /// With shader objects: what BindShaderObjects binds and sets.

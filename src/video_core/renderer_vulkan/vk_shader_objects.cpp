@@ -14,56 +14,77 @@ ShaderObjects::ShaderObjects(const Instance& instance_) : instance{instance_} {}
 
 ShaderObjects::~ShaderObjects() {
     const auto device = instance.GetDevice();
-    for (auto& [_, entry] : by_module) {
-        if (entry.shader) {
-            device.destroyShaderEXT(entry.shader);
+    for (auto& [_, slot] : by_module) {
+        if (slot->shader) {
+            device.destroyShaderEXT(slot->shader);
         }
     }
-    for (auto& [_, shader] : generated) {
-        device.destroyShaderEXT(shader);
+    for (auto& [_, slot] : generated) {
+        if (slot->shader) {
+            device.destroyShaderEXT(slot->shader);
+        }
     }
 }
 
 void ShaderObjects::Register(vk::ShaderModule module, std::span<const u32> code) {
-    auto& entry = by_module[static_cast<VkShaderModule>(module)];
-    entry.code.assign(code.begin(), code.end());
+    auto slot = std::make_shared<Slot>();
+    slot->code.assign(code.begin(), code.end());
+    std::scoped_lock lock{mutex};
+    by_module[static_cast<VkShaderModule>(module)] = std::move(slot);
 }
 
 void ShaderObjects::Forget(vk::ShaderModule module) {
+    std::scoped_lock lock{mutex};
     const auto it = by_module.find(static_cast<VkShaderModule>(module));
     if (it == by_module.end()) {
         return;
     }
-    if (it->second.shader) {
-        instance.GetDevice().destroyShaderEXT(it->second.shader);
+    if (it->second->shader) {
+        instance.GetDevice().destroyShaderEXT(it->second->shader);
     }
     by_module.erase(it);
 }
 
 vk::ShaderEXT ShaderObjects::Get(vk::ShaderModule module, vk::ShaderStageFlagBits stage,
                                  const void* next, u64& driver_ns) {
-    const auto it = by_module.find(static_cast<VkShaderModule>(module));
-    ASSERT_MSG(it != by_module.end(), "No SPIR-V kept for a {} shader module",
-               vk::to_string(stage));
-    auto& entry = it.value();
-    if (entry.shader) {
-        ++counts.reused;
-        return entry.shader;
+    std::shared_ptr<Slot> slot;
+    {
+        std::scoped_lock lock{mutex};
+        const auto it = by_module.find(static_cast<VkShaderModule>(module));
+        ASSERT_MSG(it != by_module.end(), "No SPIR-V kept for a {} shader module",
+                   vk::to_string(stage));
+        slot = it->second;
     }
-    entry.shader = Create(entry.code, stage, next, driver_ns);
-    return entry.shader;
+    return Resolve(*slot, stage, next, driver_ns);
 }
 
 vk::ShaderEXT ShaderObjects::GetGenerated(std::span<const u32> code, vk::ShaderStageFlagBits stage,
                                           const void* next, u64& driver_ns) {
     const u64 key = XXH3_64bits(code.data(), code.size_bytes()) ^ static_cast<u64>(stage);
-    const auto [it, is_new] = generated.try_emplace(key);
-    if (!is_new) {
-        ++counts.reused;
-        return it->second;
+    std::shared_ptr<Slot> slot;
+    {
+        std::scoped_lock lock{mutex};
+        auto& entry = generated[key];
+        if (!entry) {
+            entry = std::make_shared<Slot>();
+            entry->code.assign(code.begin(), code.end());
+        }
+        slot = entry;
     }
-    it.value() = Create(code, stage, next, driver_ns);
-    return it->second;
+    return Resolve(*slot, stage, next, driver_ns);
+}
+
+vk::ShaderEXT ShaderObjects::Resolve(Slot& slot, vk::ShaderStageFlagBits stage, const void* next,
+                                     u64& driver_ns) {
+    bool made = false;
+    std::call_once(slot.once, [&] {
+        slot.shader = Create(slot.code, stage, next, driver_ns);
+        made = true;
+    });
+    if (!made) {
+        reused.fetch_add(1, std::memory_order_relaxed);
+    }
+    return slot.shader;
 }
 
 vk::ShaderEXT ShaderObjects::Create(std::span<const u32> code, vk::ShaderStageFlagBits stage,
@@ -110,7 +131,7 @@ vk::ShaderEXT ShaderObjects::Create(std::span<const u32> code, vk::ShaderStageFl
     driver_ns += VideoCore::PerfStats::NowNs() - start;
     ASSERT_MSG(result == vk::Result::eSuccess, "Failed to create {} shader object: {}",
                vk::to_string(stage), vk::to_string(result));
-    ++counts.created;
+    created.fetch_add(1, std::memory_order_relaxed);
     return shader;
 }
 

@@ -423,17 +423,17 @@ void PipelineCache::FlushCompileStats(u64 now_ns) {
 }
 
 PipelineCache::AsyncMode PipelineCache::GetAsyncMode() const {
-    if (shader_objects) {
-        // Shaders are created at once; compiling them in the background comes later.
-        return AsyncMode::Off;
-    }
     const u32 setting = EmulatorSettings.GetAsyncPipelines();
     const auto mode = setting <= 3 ? static_cast<AsyncMode>(setting) : AsyncMode::Off;
+    const auto chosen = [this](AsyncMode m) {
+        // Shader objects have no unoptimized version to start with, so tiered is sync there.
+        return shader_objects && m == AsyncMode::Tiered ? AsyncMode::Off : m;
+    };
     if (EmulatorSettings.GetAsyncPipelinesAbSeconds() != 0) {
         // Flips between off and the chosen mode (background skipping if none is chosen).
-        return ab_async ? (mode == AsyncMode::Off ? AsyncMode::Skip : mode) : AsyncMode::Off;
+        return ab_async ? chosen(mode == AsyncMode::Off ? AsyncMode::Skip : mode) : AsyncMode::Off;
     }
-    return mode;
+    return chosen(mode);
 }
 
 const char* PipelineCache::AsyncModeName(AsyncMode mode) {

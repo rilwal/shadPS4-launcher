@@ -239,7 +239,7 @@ bool PipelineCache::LoadGraphicsPipeline(Serialization::Archive& ar) {
     // With async pipelines, the cache is replayed on all the compile threads at once.
     PipelineCompileOptions options{};
     options.shader_objects = shader_objects.get();
-    if (UseAsyncPipelines() && !shader_objects) {
+    if (UseAsyncPipelines()) {
         options.compiler = compiler.get();
     }
     it.value() = std::make_unique<GraphicsPipeline>(
