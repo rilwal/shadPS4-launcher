@@ -470,6 +470,12 @@ const std::vector<Entry>& Entries() {
             "Experimental, Linux only.",
             [] { return EmulatorSettings.IsShaderPrescan(); },
             [](bool v) { EmulatorSettings.SetShaderPrescan(v, G); }));
+        e.push_back(Toggle(
+            "fewer-shader-variants", "Fewer shader variants", "Accuracy",
+            "Compile one shader for draws that differ only in ways that don't change it, such as "
+            "the exact format they draw to. Experimental.",
+            [] { return EmulatorSettings.IsFewerShaderVariants(); },
+            [](bool v) { EmulatorSettings.SetFewerShaderVariants(v, G); }));
 
         // System
         e.push_back(Toggle(

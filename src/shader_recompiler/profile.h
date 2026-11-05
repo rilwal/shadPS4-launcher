@@ -57,6 +57,9 @@ struct Profile {
     /// Resources come from VK_EXT_descriptor_heap: each stage numbers its own bindings, and
     /// buffer offsets are read from the stage's table instead of push constants.
     bool uses_descriptor_heap{};
+    /// Leaves out of specialisations what doesn't change the code: the exact format of
+    /// render targets (only its number class), and sRGB where no sampler forces degamma.
+    bool fewer_shader_variants{};
 
     bool operator==(const Profile&) const = default;
 };

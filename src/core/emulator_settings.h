@@ -457,6 +457,9 @@ struct GPUSettings {
     /// Looks through the game's memory for shaders as it loads them, ahead of their first
     /// draw. Linux only for now.
     Setting<bool> shader_prescan{false};
+    /// Compiles one shader for draws that only differ in what doesn't change its code, such
+    /// as render targets of the same number class but different formats.
+    Setting<bool> fewer_shader_variants{false};
 
     std::vector<OverrideItem> GetOverrideableFields() const {
         return std::vector<OverrideItem>{
@@ -493,6 +496,8 @@ struct GPUSettings {
             make_override<GPUSettings>("shader_objects", &GPUSettings::shader_objects),
             make_override<GPUSettings>("compile_lookahead", &GPUSettings::compile_lookahead),
             make_override<GPUSettings>("shader_prescan", &GPUSettings::shader_prescan),
+            make_override<GPUSettings>("fewer_shader_variants",
+                                       &GPUSettings::fewer_shader_variants),
         };
     }
 };
@@ -503,7 +508,7 @@ NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE(
     full_screen_mode, present_mode, hdr_allowed, fsr_enabled, rcas_enabled, rcas_attenuation,
     userfaultfd, inline_fetch_shader, fast_shader_math, async_pipelines, async_pipeline_wait_ms,
     async_pipelines_ab_seconds, pipeline_compile_probe, descriptor_heap, shader_objects,
-    compile_lookahead, shader_prescan)
+    compile_lookahead, shader_prescan, fewer_shader_variants)
 
 // -------------------------------
 // Vulkan settings
@@ -819,6 +824,7 @@ public:
     SETTING_FORWARD_BOOL(m_gpu, ShaderObjects, shader_objects)
     SETTING_FORWARD_BOOL(m_gpu, CompileLookahead, compile_lookahead)
     SETTING_FORWARD_BOOL(m_gpu, ShaderPrescan, shader_prescan)
+    SETTING_FORWARD_BOOL(m_gpu, FewerShaderVariants, fewer_shader_variants)
 
     u32 GetVblankFrequency() {
         if (m_gpu.vblank_frequency.value < 30) {

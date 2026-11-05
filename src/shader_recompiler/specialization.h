@@ -157,7 +157,8 @@ struct StageSpecialization {
 
         // sRGB only changes the code where a sampler forces degamma; otherwise the view format
         // does the conversion.
-        if (std::ranges::none_of(samplers, [](const auto& s) { return s.force_degamma; })) {
+        if (profile_.fewer_shader_variants &&
+            std::ranges::none_of(samplers, [](const auto& s) { return s.force_degamma; })) {
             for (auto& image : images) {
                 image.is_srgb = false;
             }

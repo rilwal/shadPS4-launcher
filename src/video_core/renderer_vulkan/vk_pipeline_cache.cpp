@@ -348,7 +348,9 @@ const Shader::RuntimeInfo& PipelineCache::BuildRuntimeInfo(HwStage stage, SwStag
             };
         }
         for (u32 i = 0; i < Shader::MaxColorBuffers; i++) {
-            info.hw.fs.color_buffers[i] = ShaderColorBuffer(graphics_key.color_buffers[i]);
+            const auto& target = graphics_key.color_buffers[i];
+            info.hw.fs.color_buffers[i] =
+                profile.fewer_shader_variants ? ShaderColorBuffer(target) : target;
         }
         // Lowered user clip planes ride the same emulation path as guest-exported distances, so
         // the fragment side arms whenever the hardware vertex stage lowers them, keeping its input
@@ -473,6 +475,7 @@ PipelineCache::PipelineCache(const Instance& instance_, Scheduler& scheduler_,
         .fast_shader_math = EmulatorSettings.IsFastShaderMath(),
         .support_bda = instance_.IsBufferDeviceAddressSupported(),
         .uses_descriptor_heap = instance_.UsesDescriptorHeap(),
+        .fewer_shader_variants = EmulatorSettings.IsFewerShaderVariants(),
     };
     // A quarter of the cores: the game's own threads and the GPU thread need the rest.
     const u32 compile_threads = std::clamp(std::thread::hardware_concurrency() / 4, 1u, 4u);
