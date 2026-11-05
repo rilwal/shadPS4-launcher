@@ -1210,8 +1210,11 @@ std::pair<vk::ShaderModule, u64> PipelineCache::CompileModule(Shader::Info& info
 
     vk::ShaderModule module;
 
-    auto patch = GetShaderPatch(info.pgm_hash, info.hw_stage, perm_idx, "spv");
-    const bool is_patched = patch && EmulatorSettings.IsPatchShaders();
+    // Only looked up when patching is on: it's two file system checks per shader.
+    auto patch = EmulatorSettings.IsPatchShaders()
+                     ? GetShaderPatch(info.pgm_hash, info.hw_stage, perm_idx, "spv")
+                     : std::nullopt;
+    const bool is_patched = patch.has_value();
     if (is_patched) {
         LOG_INFO(Loader, "Loaded patch for {} shader {:#x}", info.hw_stage, info.pgm_hash);
         module = CompileSPV(*patch, instance.GetDevice());
