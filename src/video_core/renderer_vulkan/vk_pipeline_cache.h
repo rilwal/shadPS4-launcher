@@ -3,6 +3,8 @@
 
 #pragma once
 
+#include <map>
+#include <string>
 #include <variant>
 #include <tsl/robin_map.h>
 #include <tsl/robin_set.h>
@@ -259,6 +261,34 @@ private:
     /// With shader objects: every guest shader compiled once, shared by the draws that use it.
     std::unique_ptr<ShaderObjects> shader_objects;
     std::unique_ptr<VideoCore::ShaderScanner> shader_scanner;
+    /// Measurement for translating shaders ahead of their first draw: each program the scan
+    /// found is translated once more with nothing known of the draw (no user data, so empty
+    /// resources), and compared with what the draw needed. Only while SHADPS4_GUESS_CHECK=1.
+    void CheckGuess(Shader::HwStage hw_stage, Shader::SwStage sw_stage,
+                    const Shader::ShaderParams& params, Shader::RuntimeInfo& runtime_info,
+                    const Shader::Backend::Bindings& start, const Shader::StageSpecialization& spec,
+                    u64 perm_hash);
+    void LogGuessStats();
+    bool guess_check{};
+    /// Each checked program's guessed SPIR-V hash, to see if a later variant matches it.
+    tsl::robin_map<u64, u64> guessed_hashes;
+    struct GuessStats {
+        u32 checked{};
+        /// Same SPIR-V as the first variant.
+        u32 matched{};
+        /// Same specialisation as the first variant.
+        u32 spec_matched{};
+        /// Matched none at first, but a later variant.
+        u32 matched_later{};
+        /// The scan's copy of the code differed from the draw's.
+        u32 code_differs{};
+        /// Skipped: stages the guess can't translate yet (vertex shaders need the fetch
+        /// shader, tessellation stages their constants).
+        u32 skipped{};
+        /// How many programs each part of the specialisation was guessed wrong in.
+        std::map<std::string, u32> wrong;
+        bool changed{};
+    } guess_stats;
     vk::UniquePipelineLayout pipeline_layout;
     Shader::Profile profile{};
     Shader::Pools pools;

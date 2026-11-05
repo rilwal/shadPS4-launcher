@@ -3,6 +3,7 @@
 
 #pragma once
 
+#include <algorithm>
 #include <span>
 #include <vector>
 #include <boost/container/static_vector.hpp>
@@ -134,6 +135,9 @@ struct Info : InfoPersistent {
     bool stores_tess_level_outer{};
     bool stores_tess_level_inner{};
     bool translation_failed{};
+    /// Translates without the draw's state, as if all user data were zero: to measure how
+    /// often a shader found ahead of its first draw translates the same with nothing known.
+    bool guess_state{};
 
     std::array<Interpolation, IR::NumParams> fs_interpolation{};
 
@@ -166,6 +170,10 @@ struct Info : InfoPersistent {
 
     void RefreshFlatBuf() {
         flattened_ud_buf.resize(srt_info.flattened_bufsize_dw);
+        if (guess_state) {
+            std::ranges::fill(flattened_ud_buf, 0u);
+            return;
+        }
         ASSERT(user_data.size() <= NUM_USER_DATA_REGS);
         std::memcpy(flattened_ud_buf.data(), user_data.data(), user_data.size_bytes());
         if (srt_info.walker_func) {

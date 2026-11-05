@@ -2,6 +2,8 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 #include <algorithm>
+#include <cctype>
+#include <cstdlib>
 #include <ranges>
 #include <fmt/ranges.h>
 #include <xxhash.h>
@@ -480,6 +482,9 @@ PipelineCache::PipelineCache(const Instance& instance_, Scheduler& scheduler_,
     }
     if (EmulatorSettings.IsShaderPrescan()) {
         shader_scanner = std::make_unique<VideoCore::ShaderScanner>();
+        // Temporary, for measuring guessed translation.
+        const char* check = std::getenv("SHADPS4_GUESS_CHECK");
+        guess_check = check && check[0] == '1';
     }
     LOG_INFO(Render_Vulkan, "{} pipeline compile threads", compile_threads);
     WarmUp();
@@ -566,6 +571,7 @@ void PipelineCache::FlushCompileStats(u64 now_ns) {
                      scan.scanned_mb, scan.scan_ms);
         }
     }
+    LogGuessStats();
     const u64 probes = bg.probes.exchange(0, std::memory_order_relaxed);
     const u64 probe_optimized_ns = bg.probe_optimized_ns.exchange(0, std::memory_order_relaxed);
     const u64 probe_unoptimized_ns = bg.probe_unoptimized_ns.exchange(0, std::memory_order_relaxed);
@@ -1180,6 +1186,9 @@ PipelineCache::Result PipelineCache::GetProgram(HwStage hw_stage, SwStage sw_sta
         const auto [module, perm_hash] =
             CompileModule(program->info, runtime_info, params.code, 0, binding);
         auto spec = Shader::StageSpecialization(program->info, runtime_info, profile, start);
+        if (guess_check && shader_scanner && shader_scanner->Find(params.hash)) {
+            CheckGuess(hw_stage, sw_stage, params, runtime_info, start, spec, perm_hash);
+        }
 
         RegisterShaderMeta(program->info, spec.fetch_shader_data, spec, perm_hash, 0);
         program->AddPermut(module, std::move(spec), perm_hash);
@@ -1227,6 +1236,15 @@ PipelineCache::Result PipelineCache::GetProgram(HwStage hw_stage, SwStage sw_sta
         std::tie(module, perm_hash) =
             CompileModule(new_info, runtime_info, params.code, perm_idx, binding);
 
+        if (const auto guessed = guessed_hashes.find(params.hash);
+            guessed != guessed_hashes.end() && guessed->second == perm_hash) {
+            LOG_INFO(Render_Vulkan, "Guess for {} shader {:#x} matches variant {}", hw_stage,
+                     params.hash, perm_idx);
+            ++guess_stats.matched_later;
+            guess_stats.changed = true;
+            guessed_hashes.erase(guessed);
+        }
+
         RegisterShaderMeta(info, spec.fetch_shader_data, spec, perm_hash, perm_idx);
         program->AddPermut(module, std::move(spec), perm_hash);
     } else {
@@ -1239,6 +1257,75 @@ PipelineCache::Result PipelineCache::GetProgram(HwStage hw_stage, SwStage sw_sta
         fetch_shader = &fetch;
     }
     return std::make_tuple(&program->info, module, perm_hash);
+}
+
+void PipelineCache::CheckGuess(HwStage hw_stage, SwStage sw_stage,
+                               const Shader::ShaderParams& params,
+                               Shader::RuntimeInfo& runtime_info,
+                               const Shader::Backend::Bindings& start,
+                               const Shader::StageSpecialization& spec, u64 perm_hash) {
+    guess_stats.changed = true;
+    if (sw_stage != SwStage::Fragment && sw_stage != SwStage::Compute) {
+        ++guess_stats.skipped;
+        return;
+    }
+    ++guess_stats.checked;
+    if (const auto found = shader_scanner->Find(params.hash);
+        found->code.size() != params.code.size() || !std::ranges::equal(found->code, params.code)) {
+        LOG_INFO(Render_Vulkan, "Shader scan's copy of {} shader {:#x} differs: {} vs {} words",
+                 hw_stage, params.hash, found->code.size(), params.code.size());
+        ++guess_stats.code_differs;
+    }
+    // The draw's register state is kept for now: this measures guessing resources only.
+    Shader::Info guess(hw_stage, sw_stage, params);
+    guess.guess_state = true;
+    auto binding = start;
+    const auto ir_program =
+        Shader::TranslateProgram(params.code, pools, guess, runtime_info, profile);
+    const auto spv = Shader::Backend::SPIRV::EmitSPIRV(profile, runtime_info, ir_program, binding);
+    const u64 hash = HashCombine(params.hash, XXH3_64bits(spv.data(), spv.size() * sizeof(u32)));
+    const auto guess_spec = Shader::StageSpecialization(guess, runtime_info, profile, start);
+    const auto wrong = SpecDifferences(spec, guess_spec);
+    if (wrong.empty()) {
+        ++guess_stats.spec_matched;
+    }
+    for (const auto& part : wrong) {
+        // Counted per kind, not per binding: "buf3.format" counts as "buf.format".
+        std::string kind;
+        std::ranges::copy_if(part, std::back_inserter(kind),
+                             [](char c) { return !std::isdigit(static_cast<unsigned char>(c)); });
+        ++guess_stats.wrong[kind];
+    }
+    if (hash == perm_hash) {
+        ++guess_stats.matched;
+        LOG_INFO(Render_Vulkan, "Guess for {} shader {:#x} matches{}", hw_stage, params.hash,
+                 wrong.empty()
+                     ? ""
+                     : fmt::format(" (specialisation differs in {})", fmt::join(wrong, ", ")));
+    } else {
+        guessed_hashes[params.hash] = hash;
+        LOG_INFO(Render_Vulkan, "Guess for {} shader {:#x} differs in: {}", hw_stage, params.hash,
+                 wrong.empty() ? std::string{"nothing in the specialisation"}
+                               : fmt::format("{}", fmt::join(wrong, ", ")));
+    }
+}
+
+void PipelineCache::LogGuessStats() {
+    if (!guess_stats.changed) {
+        return;
+    }
+    guess_stats.changed = false;
+    std::vector<std::string> wrong;
+    for (const auto& [kind, count] : guess_stats.wrong) {
+        wrong.push_back(fmt::format("{} {}", kind, count));
+    }
+    LOG_INFO(Render_Vulkan,
+             "Guessed translation so far: {} programs checked, {} same SPIR-V, {} same "
+             "specialisation, {} matched a later variant, {} skipped, {} scan copies differed; "
+             "wrong: {}",
+             guess_stats.checked, guess_stats.matched, guess_stats.spec_matched,
+             guess_stats.matched_later, guess_stats.skipped, guess_stats.code_differs,
+             wrong.empty() ? std::string{"none"} : fmt::format("{}", fmt::join(wrong, ", ")));
 }
 
 std::optional<vk::ShaderModule> PipelineCache::ReplaceShader(vk::ShaderModule module,
