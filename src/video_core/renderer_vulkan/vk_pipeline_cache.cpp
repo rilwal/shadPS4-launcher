@@ -1410,7 +1410,12 @@ PipelineCache::Result PipelineCache::GetProgram(HwStage hw_stage, SwStage sw_sta
         if (precompile.active) {
             NotePrecompileType(params.hash, hw_stage);
         }
-        if (shader_scanner && hw_stage == HwStage::Fragment) {
+        // Temporary switch (SHADPS4_NO_LEARN=1) while finding a heap corruption at boot.
+        static const bool no_learn = [] {
+            const char* value = std::getenv("SHADPS4_NO_LEARN");
+            return value && value[0] == '1';
+        }();
+        if (shader_scanner && hw_stage == HwStage::Fragment && !no_learn) {
             LearnSemanticBase(params.hash, runtime_info);
         }
         it_pgm.value() = std::make_unique<Program>(hw_stage, sw_stage, params);
