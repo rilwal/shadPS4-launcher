@@ -197,6 +197,12 @@ private:
     std::unique_ptr<Buffer> null_index_buffer;
     RangeSet gpu_modified_ranges;
     std::deque<std::shared_ptr<Landing>> landings;
+    /// Host memory the landings are copied through: allocated at the head on the GPU thread,
+    /// freed at the tail by the priority thread (both are running byte totals).
+    static constexpr u64 LandingRingSize = 64_MB;
+    std::unique_ptr<Buffer> landing_ring;
+    u64 landing_ring_head{};
+    std::atomic<u64> landing_ring_tail{};
     /// Precise or Fenced: GPU-written pages are protected until their data is in guest memory.
     bool tracks_gpu_pages{};
 

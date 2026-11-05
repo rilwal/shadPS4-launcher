@@ -160,6 +160,10 @@ void Liverpool::Process(std::stop_token stoken) {
             }
             task.resume();
 
+            if (!task.done() && rasterizer) {
+                // The queue is waiting, possibly on a fence signal that needs a submit.
+                rasterizer->FlushFenceSignals();
+            }
             if (task.done()) {
                 task.destroy();
 
@@ -179,6 +183,9 @@ void Liverpool::Process(std::stop_token stoken) {
                 rasterizer->Flush();
             }
             submit_done = false;
+        } else if (rasterizer) {
+            // Going idle: the guest may be waiting on a deferred fence signal.
+            rasterizer->FlushFenceSignals();
         }
 
         Platform::IrqC::Instance()->Signal(Platform::InterruptId::GpuIdle);
