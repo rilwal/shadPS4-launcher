@@ -1,7 +1,9 @@
 // SPDX-FileCopyrightText: Copyright 2024 shadPS4 Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+#include "core/emulator_settings.h"
 #include "shader_recompiler/frontend/translate/translate.h"
+#include "shader_recompiler/profile.h"
 
 namespace Shader::Gcn {
 
@@ -214,6 +216,32 @@ void Translator::BUFFER_LOAD(u32 num_dwords, bool is_inst_typed, bool is_buffer_
     const auto& mubuf = inst.control.mubuf;
     const IR::VectorReg vaddr{inst.src[0].code};
     const IR::ScalarReg sharp{inst.src[2].code * 4};
+
+    if (mubuf.addr64 && !is_inst_typed && !is_buffer_typed && scalar_width == 32 &&
+        EmulatorSettings.IsDirectMemoryAccessEnabled() && profile.support_bda) {
+        // GCN2 addr64: the address is the V# base plus the 64-bit pointer in vaddr, plus the
+        // offsets. It is read like a scalar load from that pointer, through direct memory
+        // access: a pointer that varies per lane can't be flattened on the CPU.
+        const IR::U32 vaddr_lo{ir.GetVectorReg(vaddr)};
+        const IR::U32 vaddr_hi{ir.GetVectorReg(vaddr + 1)};
+        const IR::U32 base_lo{ir.GetScalarReg(sharp)};
+        const IR::U32 base_hi{ir.BitwiseAnd(ir.GetScalarReg(sharp + 1), ir.Imm32(0xFFFFu))};
+        const IR::U32 addr_lo{ir.IAdd(vaddr_lo, base_lo)};
+        const IR::U32 carry{
+            ir.Select(ir.ILessThan(addr_lo, vaddr_lo, false), ir.Imm32(1u), ir.Imm32(0u))};
+        const IR::U32 addr_hi{ir.IAdd(ir.IAdd(vaddr_hi, base_hi), carry)};
+        const IR::Value base = ir.CompositeConstruct(addr_lo, addr_hi);
+        const IR::U32 soffset{GetSrc(inst.src[3])};
+        IR::U32 dword_offset{ir.Imm32(u32(mubuf.offset) >> 2)};
+        if (!soffset.IsImmediate() || soffset.U32() != 0) {
+            dword_offset = ir.IAdd(dword_offset, ir.ShiftRightLogical(soffset, ir.Imm32(2u)));
+        }
+        const IR::VectorReg dst_reg{inst.src[1].code};
+        for (u32 i = 0; i < num_dwords; i++) {
+            ir.SetVectorReg(dst_reg + i, ir.ReadConst(base, ir.IAdd(dword_offset, ir.Imm32(i))));
+        }
+        return;
+    }
 
     const IR::U32 index = mubuf.idxen ? ir.GetVectorReg(vaddr) : ir.Imm32(0);
     const IR::VectorReg voffset_vgpr = mubuf.idxen ? vaddr + 1 : vaddr;

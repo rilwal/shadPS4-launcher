@@ -502,6 +502,7 @@ static bool IsAllowedOffsetInstruction(const IR::Inst* inst) {
     case IR::Opcode::UMin32:
     case IR::Opcode::UMax32:
     case IR::Opcode::BitFieldUExtract:
+    case IR::Opcode::ReadFirstLane:
         return true;
     default:
         return false;
@@ -559,6 +560,16 @@ static bool ComputeOffset(Xbyak::CodeGenerator& c, Xbyak::Reg32 reg, PassInfo& p
     case IR::Opcode::BitFieldUExtract:
         ABORT_ON_FAILURE(EmitComputeOffsetBitFieldUExtract(c, reg, pass_info, inst));
         return true;
+    case IR::Opcode::ReadFirstLane: {
+        // A uniform offset moved through a vector register (v_mov + v_readfirstlane) has the
+        // value of its operand. An operand that varies per lane fails below.
+        const IR::Value value = inst->Arg(0);
+        if (value.IsImmediate()) {
+            c.mov(reg, value.U32());
+            return true;
+        }
+        return ComputeOffset(c, reg, pass_info, value);
+    }
     default:
         LOG_ERROR(Render_Recompiler, "Unexpected instruction for offset computation, {}",
                   magic_enum::enum_name(inst->GetOpcode()));
@@ -829,8 +840,12 @@ void FlattenExtendedUserdataPass(IR::Program& program) {
             inst && inst->GetOpcode() == IR::Opcode::ReadFirstLane) {
             continue;
         }
-        ASSERT_MSG(IsReadConstSource(base->Arg(0)), "ReadConst base low not from constant memory");
-        ASSERT_MSG(IsReadConstSource(base->Arg(1)), "ReadConst base high not from constant memory");
+        if (!IsReadConstSource(base->Arg(0)) || !IsReadConstSource(base->Arg(1))) {
+            // A pointer computed per lane (an addr64 buffer load) can't be walked on the CPU.
+            // The read is left to direct memory access, like one with a ReadFirstLane base.
+            LOG_WARNING(Render_Recompiler, "ReadConst base not from constant memory");
+            continue;
+        }
 
         IR::Inst* ptr_lo = base->Arg(0).Inst();
         ptr_lo = pass_info.DeduplicateInstruction(ptr_lo);

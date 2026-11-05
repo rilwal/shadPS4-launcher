@@ -28,7 +28,10 @@ Sampler::Sampler(const Vulkan::Instance& instance, const AmdGpu::Sampler& sample
         if (border_color == vk::BorderColor::eFloatCustomEXT) {
             const auto border_color_index = sampler.border_color_ptr.Value();
             const auto border_color_buffer = border_color_base.Address<std::array<float, 4>*>();
-            const auto custom_border_color_array = border_color_buffer[border_color_index];
+            // A custom border color without a border color table is transparent black.
+            const auto custom_border_color_array = border_color_buffer
+                                                       ? border_color_buffer[border_color_index]
+                                                       : std::array<float, 4>{};
 
             const vk::SamplerCustomBorderColorCreateInfoEXT ret{
                 .customBorderColor =
