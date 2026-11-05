@@ -66,6 +66,10 @@ struct Profile {
     /// Storage image loads and stores read the image's swizzle from the stage table. Needs
     /// the descriptor heap.
     bool runtime_storage_swizzles{};
+    /// Color exports read each render target's swizzle from the stage table, and export to
+    /// every target the shader's export format names whether or not the draw binds it. Needs
+    /// the descriptor heap.
+    bool runtime_target_swizzles{};
 
     bool operator==(const Profile&) const = default;
 };

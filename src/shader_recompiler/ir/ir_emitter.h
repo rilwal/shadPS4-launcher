@@ -121,6 +121,8 @@ public:
     [[nodiscard]] Value BufferFormat(const Value& handle);
     /// A storage image's swizzle from the stage table (see EncodeImageSwizzle).
     [[nodiscard]] U32 ImageSwizzle(const Value& image_index);
+    /// A render target's swizzle from the stage table (see StageTable::TargetSwizzlesOffset).
+    [[nodiscard]] U32 TargetSwizzle(const Value& target);
 
     [[nodiscard]] U8 LoadBufferU8(const Value& handle, const Value& address, BufferInstInfo info);
     [[nodiscard]] U16 LoadBufferU16(const Value& handle, const Value& address, BufferInstInfo info);

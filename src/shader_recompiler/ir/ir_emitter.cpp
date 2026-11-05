@@ -444,6 +444,10 @@ U32 IREmitter::ImageSwizzle(const Value& image_index) {
     return Inst<U32>(Opcode::ImageSwizzle, image_index);
 }
 
+U32 IREmitter::TargetSwizzle(const Value& target) {
+    return Inst<U32>(Opcode::TargetSwizzle, target);
+}
+
 U8 IREmitter::LoadBufferU8(const Value& handle, const Value& address, BufferInstInfo info) {
     return Inst<U8>(Opcode::LoadBufferU8, Flags{info}, handle, address);
 }

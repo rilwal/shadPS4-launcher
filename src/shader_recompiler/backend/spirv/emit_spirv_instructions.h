@@ -66,6 +66,7 @@ Id EmitReadConstBuffer(EmitContext& ctx, u32 handle, Id index);
 Id EmitBufferStride(EmitContext& ctx, u32 handle);
 Id EmitBufferFormat(EmitContext& ctx, u32 handle);
 Id EmitImageSwizzle(EmitContext& ctx, u32 image_index);
+Id EmitTargetSwizzle(EmitContext& ctx, u32 target);
 Id EmitLoadBufferU8(EmitContext& ctx, IR::Inst* inst, u32 handle, Id address);
 Id EmitLoadBufferU16(EmitContext& ctx, IR::Inst* inst, u32 handle, Id address);
 Id EmitLoadBufferU32(EmitContext& ctx, IR::Inst* inst, u32 handle, Id address);

@@ -351,7 +351,12 @@ const Shader::RuntimeInfo& PipelineCache::BuildRuntimeInfo(HwStage stage, SwStag
             };
         }
         for (u32 i = 0; i < Shader::MaxColorBuffers; i++) {
-            const auto& target = graphics_key.color_buffers[i];
+            auto target = graphics_key.color_buffers[i];
+            if (profile.runtime_target_swizzles && !info.hw.fs.dual_source_blending) {
+                // The shader exports what its export format says whatever the draw binds;
+                // exports to a location without an attachment are dropped.
+                target.export_format = regs.color_export_format.GetFormat(i);
+            }
             info.hw.fs.color_buffers[i] =
                 profile.fewer_shader_variants ? ShaderColorBuffer(target) : target;
         }
@@ -482,6 +487,8 @@ PipelineCache::PipelineCache(const Instance& instance_, Scheduler& scheduler_,
         .runtime_buffer_formats =
             instance_.UsesDescriptorHeap() && EmulatorSettings.IsFewerShaderVariants(),
         .runtime_storage_swizzles =
+            instance_.UsesDescriptorHeap() && EmulatorSettings.IsFewerShaderVariants(),
+        .runtime_target_swizzles =
             instance_.UsesDescriptorHeap() && EmulatorSettings.IsFewerShaderVariants(),
     };
     // A quarter of the cores: the game's own threads and the GPU thread need the rest.
@@ -1210,8 +1217,10 @@ Shader::PsColorBuffer PipelineCache::ShaderColorBuffer(const Shader::PsColorBuff
         }
     }
     for (u32 i = 0; i < 4; ++i) {
+        // With runtime target swizzles the shader reads the order from the stage table.
+        const u32 component = profile.runtime_target_swizzles ? i : target.swizzle.Map(i);
         buffer.swizzle.array[i] =
-            static_cast<AmdGpu::CompSwizzle>(u32(AmdGpu::CompSwizzle::Red) + target.swizzle.Map(i));
+            static_cast<AmdGpu::CompSwizzle>(u32(AmdGpu::CompSwizzle::Red) + component);
     }
     return buffer;
 }

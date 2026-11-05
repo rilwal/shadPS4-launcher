@@ -65,6 +65,8 @@ struct HeapStageWrites {
     u32 num_formats{};
     /// Swizzles of storage images whose shaders read them at run time.
     std::array<u32, Shader::NUM_IMAGES> image_swizzles{};
+    /// Render target swizzles, for fragment shaders that read them at run time.
+    std::array<u32, 8> target_swizzles{};
 };
 
 /// What the rasterizer gathered for one draw or dispatch.

@@ -571,6 +571,21 @@ bool Rasterizer::BindResources(const Pipeline* pipeline) {
         BindTextures(*stage, binding);
         if (heaps) {
             auto& stage_writes = heap_stages.back();
+            if (stage->sw_stage == Shader::SwStage::Fragment &&
+                pipeline_cache.GetProfile().runtime_target_swizzles) {
+                // Fragment shaders put their colours in each target's component order.
+                const auto& regs = liverpool->regs;
+                for (u32 cb = 0; cb < stage_writes.target_swizzles.size(); ++cb) {
+                    const auto& col_buf = regs.color_buffers[cb];
+                    const auto swizzle = col_buf ? col_buf.Swizzle() : AmdGpu::CompMapping{};
+                    AmdGpu::CompMapping order;
+                    for (u32 i = 0; i < 4; ++i) {
+                        order.array[i] = static_cast<AmdGpu::CompSwizzle>(
+                            u32(AmdGpu::CompSwizzle::Red) + swizzle.Map(i));
+                    }
+                    stage_writes.target_swizzles[cb] = Shader::EncodeImageSwizzle(order) & 0xfff;
+                }
+            }
             stage_writes.num_writes = set_write_index - stage_writes.first_write;
             stage_writes.num_bindings = binding.unified;
             std::copy(push_data.buf_offsets.begin(), push_data.buf_offsets.end(),

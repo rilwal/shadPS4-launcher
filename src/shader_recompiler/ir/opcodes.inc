@@ -19,6 +19,7 @@ OPCODE(ReadConstBuffer,                                     U32,            Opaq
 OPCODE(BufferStride,                                        U32,            Opaque,                                                                         )
 OPCODE(BufferFormat,                                        U32x4,          Opaque,                                                                         )
 OPCODE(ImageSwizzle,                                        U32,            Opaque,                                                                         )
+OPCODE(TargetSwizzle,                                       U32,            Opaque,                                                                         )
 
 // Barriers
 OPCODE(Barrier,                                             Void,                                                                                           )

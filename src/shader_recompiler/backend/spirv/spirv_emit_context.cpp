@@ -806,7 +806,9 @@ void EmitContext::DefineStageTable() {
     static_assert(StageTable::FormatsOffset == StageTable::FormatsMember * 16);
     static_assert(StageTable::ImageSwizzlesMember == StageTable::FormatsMember + 1);
     static_assert(StageTable::ImageSwizzlesSize % 16 == 0);
-    std::array<Id, StageTable::ImageSwizzlesMember + 1> members;
+    static_assert(StageTable::TargetSwizzlesMember == StageTable::ImageSwizzlesMember + 1);
+    static_assert(StageTable::TargetSwizzlesSize % 16 == 0);
+    std::array<Id, StageTable::TargetSwizzlesMember + 1> members;
     members.fill(U32[4]);
     const auto define_array = [&](u32 size) {
         const Id type{TypeArray(U32[4], ConstU32(size / 16))};
@@ -815,6 +817,7 @@ void EmitContext::DefineStageTable() {
     };
     members[StageTable::FormatsMember] = define_array(StageTable::FormatsSize);
     members[StageTable::ImageSwizzlesMember] = define_array(StageTable::ImageSwizzlesSize);
+    members[StageTable::TargetSwizzlesMember] = define_array(StageTable::TargetSwizzlesSize);
     const Id table_type{Name(TypeStruct(members), "StageTable")};
     Decorate(table_type, spv::Decoration::Block);
     for (u32 i = 0; i < members.size(); ++i) {
@@ -827,9 +830,12 @@ void EmitContext::DefineStageTable() {
         } else if (i == StageTable::FormatsMember) {
             name = "formats";
             offset = StageTable::FormatsOffset;
-        } else {
+        } else if (i == StageTable::ImageSwizzlesMember) {
             name = "image_swizzles";
             offset = StageTable::ImageSwizzlesOffset;
+        } else {
+            name = "target_swizzles";
+            offset = StageTable::TargetSwizzlesOffset;
         }
         MemberName(table_type, i, name);
         MemberDecorate(table_type, i, spv::Decoration::Offset, offset);
