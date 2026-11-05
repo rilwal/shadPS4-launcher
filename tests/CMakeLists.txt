@@ -195,6 +195,9 @@ target_link_libraries(shadps4_settings_test PRIVATE
     SDL3::SDL3
     spdlog::spdlog
 )
+target_link_libraries(shadps4_npbind_test PRIVATE
+    GTest::gtest_main
+)
 target_link_libraries(shadps4_ngs2_test PRIVATE
     GTest::gtest_main
     fmt::fmt
