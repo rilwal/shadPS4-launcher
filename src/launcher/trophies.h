@@ -16,7 +16,7 @@
 namespace Launcher::Trophies {
 
 struct Trophy {
-    // The trophy's id, prefixed with its set's service label past the first ("1:12")
+    // The trophy's id, prefixed with its set's service label unless that's 0 ("1:12")
     std::string id;
     std::string name;
     std::string description;

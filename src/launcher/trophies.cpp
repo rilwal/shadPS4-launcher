@@ -137,12 +137,13 @@ std::map<s32, std::string> ExtractSets(const fs::path& game) {
 
     for (size_t index = 0; index < np_comm_ids.size(); index++) {
         const auto& np_comm_id = np_comm_ids[index];
-        // The set's file: usually trophy<index>.trp, but npbind says (ExtractTrophies)
+        // The set's file, trophy<number>.trp, whose number is the service label the game opens
+        // it with: usually the entry's index, but npbind says (ExtractTrophies)
         const s32 number = trophy_numbers[index];
         const auto output = Common::FS::GetUserPath(Common::FS::PathType::TrophyDir) / np_comm_id;
         std::error_code ec;
         if (fs::exists(output / "Xml", ec)) {
-            sets[static_cast<s32>(index)] = np_comm_id;
+            sets[number] = np_comm_id;
             continue;
         }
         bool extracted = false;
@@ -179,7 +180,7 @@ std::map<s32, std::string> ExtractSets(const fs::path& game) {
             }
         }
         if (extracted) {
-            sets[static_cast<s32>(index)] = np_comm_id;
+            sets[number] = np_comm_id;
         }
     }
     return sets;
