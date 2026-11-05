@@ -63,6 +63,8 @@ struct HeapStageWrites {
     std::array<Shader::RuntimeBufferFormat, Shader::NUM_BUFFERS> formats{};
     /// One more than the highest buffer with a format.
     u32 num_formats{};
+    /// Swizzles of storage images whose shaders read them at run time.
+    std::array<u32, Shader::NUM_IMAGES> image_swizzles{};
 };
 
 /// What the rasterizer gathered for one draw or dispatch.

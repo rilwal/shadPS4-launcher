@@ -160,6 +160,19 @@ inline std::optional<RuntimeBufferFormat> DescribeRuntimeBufferFormat(
     return format;
 }
 
+/// A storage image's swizzle for the stage table: the destination select of x, y, z and w in
+/// 3 bits each, then its inverse for stores the same way from bit 12.
+inline u32 EncodeImageSwizzle(const AmdGpu::CompMapping& swizzle) {
+    u32 value = 0;
+    const auto inverse = swizzle.Inverse();
+    for (u32 i = 0; i < 4; ++i) {
+        value |= (static_cast<u32>(swizzle.array[i]) & 7) << (i * 3);
+        value |= (static_cast<u32>(inverse.array[i]) & 7) << (12 + i * 3);
+    }
+    return value;
+}
+static constexpr u32 ImageSwizzleInverseShift = 12;
+
 /// Whether a buffer's formatted loads read its format at run time. The specialisation and the
 /// translation both decide with this, so they always agree. Buffers with formatted stores
 /// stay specialised.

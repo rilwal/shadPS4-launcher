@@ -844,7 +844,7 @@ void PatchImageSampleArgs(IR::Inst& inst, Info& info, const ImageResource& image
     inst.ReplaceUsesWith(converted);
 }
 
-void PatchImageArgs(IR::Inst& inst, Info& info) {
+void PatchImageArgs(IR::Inst& inst, Info& info, const Profile& profile) {
     // Nothing to patch for dimension query.
     if (inst.GetOpcode() == IR::Opcode::ImageQueryDimensions) {
         return;
@@ -916,7 +916,10 @@ void PatchImageArgs(IR::Inst& inst, Info& info) {
     const auto is_storage = image_res.is_written;
     if (inst.GetOpcode() == IR::Opcode::ImageRead) {
         auto texel = ir.ImageRead(image_handle, coords, lod, ms, inst_info);
-        if (is_storage) {
+        if (is_storage && profile.runtime_storage_swizzles) {
+            // The swizzle comes from the stage's table.
+            texel = ApplyRuntimeSwizzle(ir, texel, ir.ImageSwizzle(ir.Imm32(binding_index)), 0);
+        } else if (is_storage) {
             // Storage image requires shader swizzle.
             texel = ApplySwizzle(ir, texel, image.DstSelect());
         }
@@ -930,7 +933,10 @@ void PatchImageArgs(IR::Inst& inst, Info& info) {
             inst.SetArg(3, ms);
 
             auto texel = inst.Arg(4);
-            if (is_storage) {
+            if (is_storage && profile.runtime_storage_swizzles) {
+                texel = ApplyRuntimeSwizzle(ir, texel, ir.ImageSwizzle(ir.Imm32(binding_index)),
+                                            ImageSwizzleInverseShift);
+            } else if (is_storage) {
                 // Storage image requires shader swizzle.
                 texel = ApplySwizzle(ir, texel, image.DstSelect().Inverse());
             }
@@ -961,7 +967,7 @@ void ResourcePatchingPass(Shader::Info& info, const ResourceDiscoveryList& resou
         if (IsBufferInstruction(inst)) {
             PatchBufferArgs(inst, info, profile);
         } else if (IsImageInstruction(inst)) {
-            PatchImageArgs(inst, info);
+            PatchImageArgs(inst, info, profile);
         } else if (IsDataRingInstruction(inst)) {
             PatchGlobalDataShareAccess(inst, info, descriptors, profile);
         }

@@ -1054,8 +1054,15 @@ void Rasterizer::BindTextures(const Shader::Info& stage, Shader::Backend::Bindin
     boost::container::small_vector<u32, 8> image_descriptor_array_sizes;
 
     u32 num_images{};
-    for (const auto& image_desc : stage.images) {
+    const bool runtime_swizzles = pipeline_cache.GetProfile().runtime_storage_swizzles;
+    for (u32 image_index = 0; const auto& image_desc : stage.images) {
         const auto tsharp = image_desc.GetSharp(stage);
+        if (runtime_swizzles && image_desc.is_written) {
+            // Storage image shaders read the swizzle from the stage's table.
+            heap_stages.back().image_swizzles[image_index] =
+                Shader::EncodeImageSwizzle(tsharp.DstSelect());
+        }
+        ++image_index;
         const auto data_fmt = tsharp.GetDataFmt();
         const auto num_fmt = tsharp.GetNumberFmt();
         if (tsharp.Address() == 0 || data_fmt == AmdGpu::DataFormat::FormatInvalid) {

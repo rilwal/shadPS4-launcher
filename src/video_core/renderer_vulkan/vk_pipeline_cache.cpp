@@ -479,6 +479,8 @@ PipelineCache::PipelineCache(const Instance& instance_, Scheduler& scheduler_,
         .fewer_shader_variants = EmulatorSettings.IsFewerShaderVariants(),
         .runtime_buffer_formats =
             instance_.UsesDescriptorHeap() && EmulatorSettings.IsFewerShaderVariants(),
+        .runtime_storage_swizzles =
+            instance_.UsesDescriptorHeap() && EmulatorSettings.IsFewerShaderVariants(),
     };
     // A quarter of the cores: the game's own threads and the GPU thread need the rest.
     const u32 compile_threads = std::clamp(std::thread::hardware_concurrency() / 4, 1u, 4u);

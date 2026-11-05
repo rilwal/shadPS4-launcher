@@ -84,6 +84,14 @@ Id EmitBufferFormat(EmitContext& ctx, u32 handle) {
     return ctx.OpLoad(ctx.U32[4], pointer);
 }
 
+Id EmitImageSwizzle(EmitContext& ctx, u32 image_index) {
+    const Id pointer{
+        ctx.OpAccessChain(ctx.TypePointer(spv::StorageClass::Uniform, ctx.U32[1]),
+                          ctx.stage_table_block, ctx.ConstU32(StageTable::ImageSwizzlesMember),
+                          ctx.ConstU32(image_index / 4), ctx.ConstU32(image_index % 4))};
+    return ctx.OpLoad(ctx.U32[1], pointer);
+}
+
 Id EmitReadConstBuffer(EmitContext& ctx, u32 handle, Id index) {
     const auto& buffer = ctx.buffers[handle];
     if (const Id offset = buffer.Offset(PointerSize::B32); Sirit::ValidId(offset)) {

@@ -260,7 +260,12 @@ struct StageTable {
     static constexpr u32 FormatsOffset = StridesOffset + StridesSize;
     static constexpr u32 FormatsSize = NUM_BUFFERS * 16;
     static constexpr u32 FormatsMember = StridesMember + StridesSize / 16;
-    static constexpr u32 IndicesOffset = FormatsOffset + FormatsSize;
+    /// With runtime storage swizzles, each storage image's swizzle as a u32 (see
+    /// EncodeImageSwizzle), indexed by image resource and read as uvec4s.
+    static constexpr u32 ImageSwizzlesOffset = FormatsOffset + FormatsSize;
+    static constexpr u32 ImageSwizzlesSize = NUM_IMAGES * sizeof(u32);
+    static constexpr u32 ImageSwizzlesMember = FormatsMember + 1;
+    static constexpr u32 IndicesOffset = ImageSwizzlesOffset + ImageSwizzlesSize;
     /// Room for every buffer, image binding and sampler a stage can have.
     static constexpr u32 MaxIndices = NUM_BUFFERS + NUM_IMAGES * 16 + NUM_SAMPLERS;
     static constexpr u32 MaxSize = IndicesOffset + MaxIndices * sizeof(u32);

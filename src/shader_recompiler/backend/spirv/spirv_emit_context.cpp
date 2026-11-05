@@ -804,21 +804,35 @@ void EmitContext::DefineStageTable() {
     static_assert(StageTable::BufOffsetsSize == 4 * 16);
     static_assert(StageTable::StridesOffset == StageTable::StridesMember * 16);
     static_assert(StageTable::FormatsOffset == StageTable::FormatsMember * 16);
-    constexpr u32 num_formats = StageTable::FormatsSize / 16;
-    std::array<Id, StageTable::FormatsMember + 1> members;
+    static_assert(StageTable::ImageSwizzlesMember == StageTable::FormatsMember + 1);
+    static_assert(StageTable::ImageSwizzlesSize % 16 == 0);
+    std::array<Id, StageTable::ImageSwizzlesMember + 1> members;
     members.fill(U32[4]);
-    const Id formats_type{TypeArray(U32[4], ConstU32(num_formats))};
-    Decorate(formats_type, spv::Decoration::ArrayStride, 16U);
-    members.back() = formats_type;
+    const auto define_array = [&](u32 size) {
+        const Id type{TypeArray(U32[4], ConstU32(size / 16))};
+        Decorate(type, spv::Decoration::ArrayStride, 16U);
+        return type;
+    };
+    members[StageTable::FormatsMember] = define_array(StageTable::FormatsSize);
+    members[StageTable::ImageSwizzlesMember] = define_array(StageTable::ImageSwizzlesSize);
     const Id table_type{Name(TypeStruct(members), "StageTable")};
     Decorate(table_type, spv::Decoration::Block);
     for (u32 i = 0; i < members.size(); ++i) {
-        MemberName(table_type, i,
-                   i < StageTable::StridesMember ? fmt::format("buf_offsets{}", i)
-                   : i < StageTable::FormatsMember
-                       ? fmt::format("strides{}", i - StageTable::StridesMember)
-                       : std::string{"formats"});
-        MemberDecorate(table_type, i, spv::Decoration::Offset, i * 16U);
+        std::string name;
+        u32 offset = i * 16;
+        if (i < StageTable::StridesMember) {
+            name = fmt::format("buf_offsets{}", i);
+        } else if (i < StageTable::FormatsMember) {
+            name = fmt::format("strides{}", i - StageTable::StridesMember);
+        } else if (i == StageTable::FormatsMember) {
+            name = "formats";
+            offset = StageTable::FormatsOffset;
+        } else {
+            name = "image_swizzles";
+            offset = StageTable::ImageSwizzlesOffset;
+        }
+        MemberName(table_type, i, name);
+        MemberDecorate(table_type, i, spv::Decoration::Offset, offset);
     }
     stage_table_block = DefineVar(table_type, spv::StorageClass::Uniform);
     Decorate(stage_table_block, spv::Decoration::DescriptorSet, StageTable::DescriptorSet);

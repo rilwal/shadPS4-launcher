@@ -440,6 +440,10 @@ Value IREmitter::BufferFormat(const Value& handle) {
     return Inst(Opcode::BufferFormat, handle);
 }
 
+U32 IREmitter::ImageSwizzle(const Value& image_index) {
+    return Inst<U32>(Opcode::ImageSwizzle, image_index);
+}
+
 U8 IREmitter::LoadBufferU8(const Value& handle, const Value& address, BufferInstInfo info) {
     return Inst<U8>(Opcode::LoadBufferU8, Flags{info}, handle, address);
 }

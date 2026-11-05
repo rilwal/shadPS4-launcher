@@ -137,19 +137,21 @@ struct StageSpecialization {
                     spec.element_size = sharp.element_size;
                 }
             });
-        ForEachSharp(binding, images, info->images,
-                     [&](auto& spec, const auto& desc, AmdGpu::Image sharp) {
-                         spec.type = sharp.GetViewType(desc.is_array);
-                         spec.is_integer = AmdGpu::IsInteger(sharp.GetNumberFmt());
-                         spec.is_storage = desc.is_written;
-                         if (spec.is_storage) {
-                             spec.dst_select = sharp.DstSelect();
-                         } else {
-                             spec.is_srgb = sharp.GetNumberFmt() == AmdGpu::NumberFormat::Srgb;
-                         }
-                         spec.num_conversion = sharp.GetNumberConversion();
-                         spec.num_bindings = desc.NumBindings(*info);
-                     });
+        const bool runtime_swizzles = profile_.runtime_storage_swizzles;
+        ForEachSharp(
+            binding, images, info->images, [&](auto& spec, const auto& desc, AmdGpu::Image sharp) {
+                spec.type = sharp.GetViewType(desc.is_array);
+                spec.is_integer = AmdGpu::IsInteger(sharp.GetNumberFmt());
+                spec.is_storage = desc.is_written;
+                if (spec.is_storage) {
+                    // With runtime swizzles the shader reads it from the table.
+                    spec.dst_select = runtime_swizzles ? AmdGpu::CompMapping{} : sharp.DstSelect();
+                } else {
+                    spec.is_srgb = sharp.GetNumberFmt() == AmdGpu::NumberFormat::Srgb;
+                }
+                spec.num_conversion = sharp.GetNumberConversion();
+                spec.num_bindings = desc.NumBindings(*info);
+            });
         ForEachSharp(binding, fmasks, info->fmasks,
                      [](auto& spec, const auto& desc, AmdGpu::Image sharp) {
                          spec.width = sharp.width;
