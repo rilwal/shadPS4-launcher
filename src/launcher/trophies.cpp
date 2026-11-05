@@ -133,18 +133,22 @@ std::map<s32, std::string> ExtractSets(const fs::path& game) {
         return sets;
     }
     const auto np_comm_ids = npbind.GetNpCommIds();
+    const auto trophy_numbers = npbind.GetTrophyNumbers();
 
     for (size_t index = 0; index < np_comm_ids.size(); index++) {
         const auto& np_comm_id = np_comm_ids[index];
+        // The set's file, trophy<number>.trp, whose number is the service label the game opens
+        // it with: usually the entry's index, but npbind says (ExtractTrophies)
+        const s32 number = trophy_numbers[index];
         const auto output = Common::FS::GetUserPath(Common::FS::PathType::TrophyDir) / np_comm_id;
         std::error_code ec;
         if (fs::exists(output / "Xml", ec)) {
-            sets[static_cast<s32>(index)] = np_comm_id;
+            sets[number] = np_comm_id;
             continue;
         }
         bool extracted = false;
         for (const auto& name :
-             {fmt::format("trophy{:02}.trp", index), fmt::format("TROPHY{:02}.TRP", index)}) {
+             {fmt::format("trophy{:02}.trp", number), fmt::format("TROPHY{:02}.TRP", number)}) {
             // An update without trophies falls back to the game's own, as at boot
             for (const auto& root : roots) {
                 const auto trp = Core::FileSys::ResolveGameFilePath(root, "sce_sys/trophy/" + name);
@@ -176,7 +180,7 @@ std::map<s32, std::string> ExtractSets(const fs::path& game) {
             }
         }
         if (extracted) {
-            sets[static_cast<s32>(index)] = np_comm_id;
+            sets[number] = np_comm_id;
         }
     }
     return sets;
