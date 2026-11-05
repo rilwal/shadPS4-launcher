@@ -1410,12 +1410,7 @@ PipelineCache::Result PipelineCache::GetProgram(HwStage hw_stage, SwStage sw_sta
         if (precompile.active) {
             NotePrecompileType(params.hash, hw_stage);
         }
-        // Temporary switch (SHADPS4_NO_LEARN=1) while finding a heap corruption at boot.
-        static const bool no_learn = [] {
-            const char* value = std::getenv("SHADPS4_NO_LEARN");
-            return value && value[0] == '1';
-        }();
-        if (shader_scanner && hw_stage == HwStage::Fragment && !no_learn) {
+        if (shader_scanner && hw_stage == HwStage::Fragment) {
             LearnSemanticBase(params.hash, runtime_info);
         }
         it_pgm.value() = std::make_unique<Program>(hw_stage, sw_stage, params);
@@ -1790,7 +1785,9 @@ static std::optional<std::vector<u16>> PsInputSemantics(std::span<const u8> head
     const u32 num_usage_slots = common >> 24;
     const u32 count = header[CountOffset];
     const size_t start = CountOffset + 4 + num_usage_slots * 4;
-    if (start + count * sizeof(u16) > header.size()) {
+    // memcpy's pointers are declared nonnull, so with an empty vector the compiler may assume
+    // count isn't zero and drop the vector's own empty checks: return before building one.
+    if (count == 0 || start + count * sizeof(u16) > header.size()) {
         return std::nullopt;
     }
     std::vector<u16> semantics(count);

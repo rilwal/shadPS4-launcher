@@ -447,6 +447,9 @@ void ShaderScanner::Load() {
                         save_path.string(), i);
             break;
         }
+        if (code_dwords == 0) {
+            break;
+        }
         Shader shader{.type = type, .found_ns = now, .stage = stage};
         shader.code.resize(code_dwords);
         std::memcpy(shader.code.data(), in.data(), code_dwords * sizeof(u32));
