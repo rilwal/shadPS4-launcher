@@ -2,9 +2,11 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 #include <algorithm>
+#include <array>
 #include <chrono>
 #include <condition_variable>
 #include <cstring>
+#include <functional>
 
 #ifdef __linux__
 #include <fcntl.h>
@@ -22,8 +24,8 @@ namespace VideoCore {
 
 namespace {
 
-/// "OrbS" as a little-endian word: BinaryInfo is word aligned.
-constexpr u32 SignatureWord = 0x5362724F;
+/// The start of every BinaryInfo.
+constexpr std::array<u8, 7> Signature{'O', 'r', 'b', 'S', 'h', 'd', 'r'};
 /// s_mov_b32 vcc_hi, literal: the first instruction of every shader. Its literal is the
 /// distance from the code to its BinaryInfo, in 8-byte units minus one.
 constexpr u32 TokenMovVccHi = 0xBEEB03FF;
@@ -129,8 +131,10 @@ void ShaderScanner::ScanOnce() {
 }
 
 void ShaderScanner::ScanRange(u64 base, u64 size, std::vector<u8>& chunk) {
-    // Chunks overlap by a word so a signature across a boundary is still seen.
-    for (u64 offset = 0; offset < size; offset += ChunkSize - sizeof(u32)) {
+    // Shaders in executables are often only 2-byte aligned, so this searches bytes. Chunks
+    // overlap by a signature's length so one across a boundary is still seen.
+    static const std::boyer_moore_horspool_searcher searcher(Signature.begin(), Signature.end());
+    for (u64 offset = 0; offset < size; offset += ChunkSize - Signature.size()) {
         const u64 len = std::min(ChunkSize, size - offset);
         if (len < sizeof(AmdGpu::BinaryInfo)) {
             break;
@@ -147,18 +151,10 @@ void ShaderScanner::ScanRange(u64 base, u64 size, std::vector<u8>& chunk) {
                 }
             }
         }
-        const auto* words = reinterpret_cast<const u32*>(chunk.data());
-        const u64 num_words = len / sizeof(u32);
-        for (u64 i = 0; i < num_words; ++i) {
-            if (words[i] != SignatureWord) [[likely]] {
-                continue;
-            }
-            const u8* bytes = reinterpret_cast<const u8*>(&words[i]);
-            if (i * sizeof(u32) + 8 > len || bytes[4] != 'h' || bytes[5] != 'd' ||
-                bytes[6] != 'r') {
-                continue;
-            }
-            TryAdd(base + offset + i * sizeof(u32));
+        const auto* data = chunk.data();
+        for (const u8* it = data; (it = std::search(it, data + len, searcher)) != data + len;
+             ++it) {
+            TryAdd(base + offset + (it - data));
         }
         if (len < ChunkSize) {
             break;
