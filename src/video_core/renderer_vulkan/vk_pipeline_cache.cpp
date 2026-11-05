@@ -578,6 +578,35 @@ void PipelineCache::FlushCompileStats(u64 now_ns) {
                  bg_worst_latency_ns / 1e6, stats.skipped_draws, stats.waited_draws, stats.ran_now,
                  stats.waited_ns / 1e6, compiler->Pending());
     }
+    if (stats.shaders != 0) {
+        // Where the GPU thread's recompile time went, largest first.
+        std::vector<std::pair<u64, std::string_view>> parts;
+        u64 translate_ns = 0;
+        for (size_t i = 0; i < stats.translate.ns.size(); ++i) {
+            translate_ns += stats.translate.ns[i];
+            parts.emplace_back(stats.translate.ns[i],
+                               Shader::TranslatePhaseName(static_cast<Shader::TranslatePhase>(i)));
+        }
+        parts.emplace_back(stats.emit_ns, "SPIR-V emission");
+        parts.emplace_back(stats.module_ns, "shader modules");
+        const u64 known_ns = translate_ns + stats.emit_ns + stats.module_ns;
+        parts.emplace_back(stats.recompile_ns > known_ns ? stats.recompile_ns - known_ns : 0,
+                           "the rest");
+        std::ranges::sort(parts, std::greater{});
+        std::string list;
+        for (const auto& [ns, name] : parts) {
+            if (ns != 0) {
+                list += fmt::format("{}{} {:.1f} ms", list.empty() ? "" : ", ", name, ns / 1e6);
+            }
+        }
+        LOG_INFO(Render_Vulkan,
+                 "Recompile time over {:.1f} s: {:.1f} ms for {} shaders ({:.0f} us per 1000 "
+                 "code dwords): {}",
+                 seconds, stats.recompile_ns / 1e6, stats.shaders,
+                 stats.code_dwords != 0 ? stats.recompile_ns / 1e3 / (stats.code_dwords / 1e3)
+                                        : 0.0,
+                 list);
+    }
     if (stats.prefetched != 0 || stats.prefetch_used != 0 || stats.waited_dispatches != 0) {
         LOG_INFO(Render_Vulkan,
                  "Look-ahead over {:.1f} s: {} pipelines made ahead of their draw, {} found later "
@@ -1166,8 +1195,17 @@ std::pair<vk::ShaderModule, u64> PipelineCache::CompileModule(Shader::Info& info
         ++compile_stats.shaders;
     };
 
+    const auto translate_before = Shader::ThreadTranslateTimes();
     const auto ir_program = Shader::TranslateProgram(code, pools, info, runtime_info, profile);
+    const auto& translate_after = Shader::ThreadTranslateTimes();
+    for (size_t i = 0; i < translate_after.ns.size(); ++i) {
+        compile_stats.translate.ns[i] += translate_after.ns[i] - translate_before.ns[i];
+    }
+    compile_stats.code_dwords += code.size();
+    const u64 emit_start = VideoCore::PerfStats::NowNs();
     auto spv = Shader::Backend::SPIRV::EmitSPIRV(profile, runtime_info, ir_program, binding);
+    const u64 module_start = VideoCore::PerfStats::NowNs();
+    compile_stats.emit_ns += module_start - emit_start;
     DumpShader(spv, info.pgm_hash, info.hw_stage, perm_idx, "spv");
 
     vk::ShaderModule module;
@@ -1180,6 +1218,7 @@ std::pair<vk::ShaderModule, u64> PipelineCache::CompileModule(Shader::Info& info
     } else {
         module = CompileSPV(spv, instance.GetDevice());
     }
+    compile_stats.module_ns += VideoCore::PerfStats::NowNs() - module_start;
 
     if (shader_objects) {
         shader_objects->Register(module, is_patched ? std::span<const u32>{*patch} : spv);

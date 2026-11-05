@@ -1,6 +1,8 @@
 // SPDX-FileCopyrightText: Copyright 2024 shadPS4 Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+#include <chrono>
+
 #include "common/logging/classes.h"
 #include "shader_recompiler/frontend/control_flow_graph.h"
 #include "shader_recompiler/frontend/decode.h"
@@ -60,8 +62,52 @@ void EmitControlFlowGraph(IR::Program& program, Pools& pools, Gcn::CFG& cfg,
     program.post_order_blocks = Shader::IR::PostOrder(program.blocks.front());
 }
 
+const char* TranslatePhaseName(TranslatePhase phase) {
+    switch (phase) {
+    case TranslatePhase::Decode:
+        return "decode";
+    case TranslatePhase::ControlFlow:
+        return "control flow graph";
+    case TranslatePhase::Translate:
+        return "GCN to IR";
+    case TranslatePhase::EarlyPasses:
+        return "SSA and early passes";
+    case TranslatePhase::ResourceDiscover:
+        return "resource discovery";
+    case TranslatePhase::ResourcePatch:
+        return "resource patching";
+    case TranslatePhase::BufferLowering:
+        return "buffer format lowering";
+    case TranslatePhase::MiddlePasses:
+        return "shared memory, clip planes, phis";
+    case TranslatePhase::Structurize:
+        return "structurizing";
+    case TranslatePhase::SsaRepair:
+        return "SSA repair";
+    case TranslatePhase::LatePasses:
+        return "late passes";
+    case TranslatePhase::CollectInfo:
+        return "info collection";
+    default:
+        return "unknown";
+    }
+}
+
+TranslateTimes& ThreadTranslateTimes() {
+    thread_local TranslateTimes times;
+    return times;
+}
+
 IR::Program TranslateProgram(const std::span<const u32>& code, Pools& pools, Info& info,
                              RuntimeInfo& runtime_info, const Profile& profile) {
+    auto& times = ThreadTranslateTimes();
+    auto last = std::chrono::steady_clock::now();
+    const auto mark = [&](TranslatePhase phase) {
+        const auto now = std::chrono::steady_clock::now();
+        times.ns[static_cast<size_t>(phase)] +=
+            std::chrono::duration_cast<std::chrono::nanoseconds>(now - last).count();
+        last = now;
+    };
     // Ensure first instruction is expected.
     constexpr u32 token_mov_vcchi = 0xBEEB03FF;
     if (code[0] != token_mov_vcchi) {
@@ -77,6 +123,7 @@ IR::Program TranslateProgram(const std::span<const u32>& code, Pools& pools, Inf
     while (!slice.atEnd()) {
         program.ins_list.emplace_back(decoder.decodeInstruction(slice));
     }
+    mark(TranslatePhase::Decode);
 
     // Clear any previous pooled data.
     pools.ReleaseContents();
@@ -84,7 +131,9 @@ IR::Program TranslateProgram(const std::span<const u32>& code, Pools& pools, Inf
     // Create control flow graph
     Common::ObjectPool<Gcn::Block> gcn_block_pool{64};
     Gcn::CFG cfg{gcn_block_pool, program.ins_list};
+    mark(TranslatePhase::ControlFlow);
     EmitControlFlowGraph(program, pools, cfg, runtime_info, profile);
+    mark(TranslatePhase::Translate);
 
     // On NVIDIA GPUs HW interpolation of clip distance values seems broken, and we need to emulate
     // it with expensive discard in PS.
@@ -106,11 +155,15 @@ IR::Program TranslateProgram(const std::span<const u32>& code, Pools& pools, Inf
     }
     Shader::Optimization::RingAccessElimination(program, runtime_info);
     Shader::IR::DumpProgram(program, info, "pre-res-discover.");
+    mark(TranslatePhase::EarlyPasses);
     auto resources = Shader::Optimization::ResourceDiscoverPass(program, profile);
     Shader::Optimization::FlattenExtendedUserdataPass(program);
     Shader::IR::DumpProgram(program, info, "pre-res-patch.");
+    mark(TranslatePhase::ResourceDiscover);
     Shader::Optimization::ResourcePatchingPass(program.info, resources, profile);
+    mark(TranslatePhase::ResourcePatch);
     Shader::Optimization::LowerBufferFormatToRaw(program, profile);
+    mark(TranslatePhase::BufferLowering);
     Shader::Optimization::SharedMemorySimplifyPass(program, profile);
     Shader::Optimization::SharedMemoryToStoragePass(program, runtime_info, profile);
     Shader::Optimization::LowerUserClipPlanes(program, runtime_info);
@@ -125,23 +178,28 @@ IR::Program TranslateProgram(const std::span<const u32>& code, Pools& pools, Inf
         ir_block->ssa_state.Reset();
     }
     Shader::Optimization::LowerPhisToRegsPass(program);
+    mark(TranslatePhase::MiddlePasses);
 
     // Structurize control flow graph and create program.
     program.syntax_list = Shader::Gcn::BuildASL(pools, cfg, info);
     program.blocks = GenerateBlocks(program.syntax_list);
     program.post_order_blocks = Shader::IR::PostOrder(program.syntax_list.front().data.block);
+    mark(TranslatePhase::Structurize);
 
     // Run optimization passes on structured graph
     Shader::Optimization::SsaRepairPass(program);
     Shader::Optimization::SsaRewritePass(program);
+    mark(TranslatePhase::SsaRepair);
     Shader::Optimization::SharedMemoryBarrierPass(program, runtime_info, profile);
     Shader::Optimization::DeadCodeEliminationPass(program);
     Shader::Optimization::LowerWave64BallotPass(program, runtime_info, profile);
     Shader::Optimization::LowerHardwareIntrinsics(program);
     Shader::Optimization::ConstantPropagationPass(program.post_order_blocks);
     Shader::Optimization::DeadCodeEliminationPass(program);
+    mark(TranslatePhase::LatePasses);
     Shader::Optimization::CollectShaderInfoPass(program, profile);
     Shader::IR::DumpProgram(program, info);
+    mark(TranslatePhase::CollectInfo);
 
     return program;
 }

@@ -209,6 +209,12 @@ private:
         /// Of those, ones that only differ in where their bindings start.
         u64 binding_permutations{};
         u64 recompile_ns{};
+        /// Where the GPU thread's recompile time went: translation phase by phase, then
+        /// SPIR-V emission, shader module creation and the rest (hashing, registering).
+        Shader::TranslateTimes translate{};
+        u64 emit_ns{};
+        u64 module_ns{};
+        u64 code_dwords{};
         /// Driver time on the GPU thread, so not counting background creations.
         u64 driver_ns{};
         /// Longest the GPU thread spent on one pipeline.
