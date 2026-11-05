@@ -276,8 +276,11 @@ bool ShaderScanner::TryAdd(u64 info_addr) {
         return false;
     }
     {
+        // A copy found again is only of use if the first had no shader struct in front: games
+        // copy the code alone into GPU memory, and that copy can be found before the file's.
         std::scoped_lock lock{mutex};
-        if (shaders.contains(info.shader_hash)) {
+        if (const auto it = shaders.find(info.shader_hash);
+            it != shaders.end() && !it->second.header.empty()) {
             return false;
         }
     }
@@ -309,6 +312,15 @@ bool ShaderScanner::TryAdd(u64 info_addr) {
         };
         const bool has_header = !shader.header.empty();
         std::scoped_lock lock{mutex};
+        if (const auto it = shaders.find(info.shader_hash); it != shaders.end()) {
+            if (!has_header || !it.value().header.empty()) {
+                return false;
+            }
+            it.value().header = std::move(shader.header);
+            ++with_registers;
+            found_order.push_back(info.shader_hash);
+            return false;
+        }
         if (shaders.try_emplace(info.shader_hash, std::move(shader)).second) {
             ++pass_new;
             if (has_header) {
