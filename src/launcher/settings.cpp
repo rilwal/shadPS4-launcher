@@ -466,8 +466,8 @@ const std::vector<Entry>& Entries() {
             [](bool v) { EmulatorSettings.SetCompileLookahead(v, G); }));
         e.push_back(Toggle(
             "shader-prescan", "Find shaders early", "Accuracy",
-            "Look for the game's shaders in memory as it loads them, before their first draw. "
-            "Experimental, Linux only.",
+            "Look for the game's shaders in memory as it loads them, before their first draw, "
+            "and remember them for the next launch. Experimental, Linux only.",
             [] { return EmulatorSettings.IsShaderPrescan(); },
             [](bool v) { EmulatorSettings.SetShaderPrescan(v, G); }));
         e.push_back(Toggle(

@@ -7,13 +7,19 @@
 #include <condition_variable>
 #include <cstdlib>
 #include <cstring>
+#include <fstream>
+#include <span>
 
 #ifdef __linux__
 #include <fcntl.h>
 #include <unistd.h>
 #endif
 
+#include <zstd.h>
+
+#include "common/elf_info.h"
 #include "common/logging/log.h"
+#include "common/path_util.h"
 #include "common/thread.h"
 #include "core/memory.h"
 #include "video_core/amdgpu/regs_shader.h"
@@ -42,6 +48,12 @@ constexpr size_t MaxPending = 64 * 1024;
 constexpr u64 MaxHeaderLength = 2_KB;
 /// The common word, then the embedded constant buffer and scratch sizes, then PgmLo.
 constexpr u64 HeaderPgmLoOffset = 8;
+/// The saved list: magic, version, the uncompressed size, then the entries compressed.
+constexpr u32 SaveMagic = 0x4e435353; // "SSCN"
+constexpr u32 SaveVersion = 1;
+constexpr u64 SaveInterval = 30'000'000'000ULL;
+/// Bigger than any real list, so a corrupt size can't ask for a huge allocation.
+constexpr u64 MaxSaveSize = 1_GB;
 
 /// What file reads and loads queued for the scanner. Static, so a game thread can queue while
 /// the scanner is being destroyed.
@@ -105,6 +117,10 @@ ShaderScanner::ShaderScanner() {
     }
     pending.enabled = true;
     start_ns = PerfStats::NowNs();
+    if (const auto serial = Common::ElfInfo::Instance().GameSerial(); !serial.empty()) {
+        save_path = Common::FS::GetUserPath(Common::FS::PathType::CacheDir) /
+                    (std::string{serial} + "_shaders.bin");
+    }
     thread = std::jthread([this](std::stop_token stop) { Run(stop); });
 #else
     LOG_INFO(Render, "Shader scan is only available on Linux for now");
@@ -116,6 +132,7 @@ ShaderScanner::~ShaderScanner() {
     if (thread.joinable()) {
         thread.request_stop();
         thread.join();
+        Save();
     }
 #ifdef __linux__
     if (fd >= 0) {
@@ -145,12 +162,17 @@ bool ShaderScanner::Read(u64 addr, void* dst, u64 size) const {
 void ShaderScanner::Run(std::stop_token stop) {
     Common::SetCurrentThreadName("shadPS4:ShaderScan");
     Common::SetCurrentThreadPriority(Common::ThreadPriority::Low);
+    Load();
+    last_save_ns = PerfStats::NowNs();
     auto next_pass = std::chrono::steady_clock::now();
     while (!stop.stop_requested()) {
         ScanPending();
         if (std::chrono::steady_clock::now() >= next_pass) {
             ScanOnce();
             next_pass = std::chrono::steady_clock::now() + ScanInterval;
+            if (PerfStats::NowNs() - last_save_ns >= SaveInterval) {
+                Save();
+            }
         }
         std::unique_lock lock{pending.mutex};
         pending.cv.wait_until(lock, stop, next_pass,
@@ -319,10 +341,12 @@ bool ShaderScanner::TryAdd(u64 info_addr) {
             it.value().header = std::move(shader.header);
             ++with_registers;
             found_order.push_back(info.shader_hash);
+            dirty = true;
             return false;
         }
         if (shaders.try_emplace(info.shader_hash, std::move(shader)).second) {
             ++pass_new;
+            dirty = true;
             if (has_header) {
                 ++with_registers;
                 found_order.push_back(info.shader_hash);
@@ -351,6 +375,147 @@ std::vector<u8> ShaderScanner::ReadHeader(u64 code_addr) const {
         }
     }
     return {};
+}
+
+namespace {
+
+template <typename T>
+void Put(std::vector<u8>& out, const T& value) {
+    const auto* bytes = reinterpret_cast<const u8*>(&value);
+    out.insert(out.end(), bytes, bytes + sizeof(T));
+}
+
+template <typename T>
+bool Get(std::span<const u8>& in, T& value) {
+    if (in.size() < sizeof(T)) {
+        return false;
+    }
+    std::memcpy(&value, in.data(), sizeof(T));
+    in = in.subspan(sizeof(T));
+    return true;
+}
+
+} // Anonymous namespace
+
+void ShaderScanner::Load() {
+    if (save_path.empty()) {
+        return;
+    }
+    std::ifstream file{save_path, std::ios::binary};
+    if (!file) {
+        return;
+    }
+    u32 magic{};
+    u32 version{};
+    u64 raw_size{};
+    file.read(reinterpret_cast<char*>(&magic), sizeof(magic));
+    file.read(reinterpret_cast<char*>(&version), sizeof(version));
+    file.read(reinterpret_cast<char*>(&raw_size), sizeof(raw_size));
+    if (!file || magic != SaveMagic || version != SaveVersion || raw_size > MaxSaveSize) {
+        LOG_WARNING(Render, "Ignoring the saved shader list {}: unknown format",
+                    save_path.string());
+        return;
+    }
+    const std::vector<char> packed((std::istreambuf_iterator<char>(file)),
+                                   std::istreambuf_iterator<char>());
+    std::vector<u8> raw(raw_size);
+    const size_t got = ZSTD_decompress(raw.data(), raw.size(), packed.data(), packed.size());
+    if (ZSTD_isError(got) || got != raw_size) {
+        LOG_WARNING(Render, "Ignoring the saved shader list {}: corrupt", save_path.string());
+        return;
+    }
+    std::span<const u8> in{raw};
+    u32 count{};
+    if (!Get(in, count)) {
+        return;
+    }
+    const u64 now = PerfStats::NowNs();
+    std::scoped_lock lock{mutex};
+    for (u32 i = 0; i < count; ++i) {
+        u64 hash{};
+        u8 type{};
+        u32 code_dwords{};
+        u32 header_bytes{};
+        if (!Get(in, hash) || !Get(in, type) || !Get(in, code_dwords) || !Get(in, header_bytes) ||
+            code_dwords > MaxCodeLength / sizeof(u32) || header_bytes > MaxHeaderLength ||
+            in.size() < code_dwords * sizeof(u32) + header_bytes) {
+            LOG_WARNING(Render, "Saved shader list {} is cut short after {} shaders",
+                        save_path.string(), i);
+            break;
+        }
+        Shader shader{.type = type, .found_ns = now};
+        shader.code.resize(code_dwords);
+        std::memcpy(shader.code.data(), in.data(), code_dwords * sizeof(u32));
+        in = in.subspan(code_dwords * sizeof(u32));
+        shader.header.assign(in.begin(), in.begin() + header_bytes);
+        in = in.subspan(header_bytes);
+        const bool has_header = !shader.header.empty();
+        if (shaders.try_emplace(hash, std::move(shader)).second) {
+            ++loaded;
+            if (has_header) {
+                ++with_registers;
+                found_order.push_back(hash);
+            }
+        }
+    }
+    LOG_INFO(Render, "Shader scan: {} shaders from earlier runs ({} with stage registers)",
+             loaded, with_registers);
+}
+
+void ShaderScanner::Save() {
+    if (save_path.empty()) {
+        return;
+    }
+    std::vector<u8> raw;
+    u32 count{};
+    {
+        std::scoped_lock lock{mutex};
+        if (!dirty) {
+            return;
+        }
+        dirty = false;
+        count = static_cast<u32>(shaders.size());
+        Put(raw, count);
+        for (const auto& [hash, shader] : shaders) {
+            Put(raw, hash);
+            Put(raw, shader.type);
+            Put(raw, static_cast<u32>(shader.code.size()));
+            Put(raw, static_cast<u32>(shader.header.size()));
+            const auto* code = reinterpret_cast<const u8*>(shader.code.data());
+            raw.insert(raw.end(), code, code + shader.code.size() * sizeof(u32));
+            raw.insert(raw.end(), shader.header.begin(), shader.header.end());
+        }
+    }
+    last_save_ns = PerfStats::NowNs();
+    std::vector<char> packed(ZSTD_compressBound(raw.size()));
+    const size_t size = ZSTD_compress(packed.data(), packed.size(), raw.data(), raw.size(), 3);
+    if (ZSTD_isError(size)) {
+        return;
+    }
+    // Written aside and renamed over, so a run stopped mid-write keeps the last good list.
+    auto temp = save_path;
+    temp += ".tmp";
+    {
+        std::ofstream file{temp, std::ios::binary | std::ios::trunc};
+        const u64 raw_size = raw.size();
+        file.write(reinterpret_cast<const char*>(&SaveMagic), sizeof(SaveMagic));
+        file.write(reinterpret_cast<const char*>(&SaveVersion), sizeof(SaveVersion));
+        file.write(reinterpret_cast<const char*>(&raw_size), sizeof(raw_size));
+        file.write(packed.data(), static_cast<std::streamsize>(size));
+        if (!file) {
+            LOG_WARNING(Render, "Can't save the shader list to {}", temp.string());
+            return;
+        }
+    }
+    std::error_code ec;
+    std::filesystem::rename(temp, save_path, ec);
+    if (ec) {
+        LOG_WARNING(Render, "Can't save the shader list to {}: {}", save_path.string(),
+                    ec.message());
+        return;
+    }
+    LOG_INFO(Render, "Shader scan: saved {} shaders ({} KB) to {}", count, size >> 10,
+             save_path.string());
 }
 
 std::optional<ShaderScanner::Shader> ShaderScanner::Find(u64 hash) {

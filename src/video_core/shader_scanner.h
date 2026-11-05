@@ -5,6 +5,7 @@
 
 #include <atomic>
 #include <condition_variable>
+#include <filesystem>
 #include <mutex>
 #include <optional>
 #include <thread>
@@ -93,6 +94,16 @@ private:
     /// distance from the struct to the code and its PgmHi is all ones.
     std::vector<u8> ReadHeader(u64 code_addr) const;
     bool Read(u64 addr, void* dst, u64 size) const;
+    /// The shaders found in earlier runs of this game, saved so that the next launch knows them
+    /// from the start instead of waiting for the scan to find them again.
+    void Load();
+    void Save();
+
+    std::filesystem::path save_path;
+    /// Whether shaders were found since the last save. Guarded by `mutex`.
+    bool dirty{};
+    u64 last_save_ns{};
+    u32 loaded{};
 
     int fd{-1};
     std::mutex mutex;
