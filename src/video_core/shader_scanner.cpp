@@ -50,7 +50,7 @@ constexpr u64 MaxHeaderLength = 2_KB;
 constexpr u64 HeaderPgmLoOffset = 8;
 /// The saved list: magic, version, the uncompressed size, then the entries compressed.
 constexpr u32 SaveMagic = 0x4e435353; // "SSCN"
-constexpr u32 SaveVersion = 1;
+constexpr u32 SaveVersion = 2;
 constexpr u64 SaveInterval = 30'000'000'000ULL;
 /// Bigger than any real list, so a corrupt size can't ask for a huge allocation.
 constexpr u64 MaxSaveSize = 1_GB;
@@ -163,6 +163,8 @@ void ShaderScanner::Run(std::stop_token stop) {
     Common::SetCurrentThreadName("shadPS4:ShaderScan");
     Common::SetCurrentThreadPriority(Common::ThreadPriority::Low);
     Load();
+    load_done = true;
+    load_done.notify_all();
     last_save_ns = PerfStats::NowNs();
     auto next_pass = std::chrono::steady_clock::now();
     while (!stop.stop_requested()) {
@@ -434,16 +436,18 @@ void ShaderScanner::Load() {
     for (u32 i = 0; i < count; ++i) {
         u64 hash{};
         u8 type{};
+        u8 stage{};
         u32 code_dwords{};
         u32 header_bytes{};
-        if (!Get(in, hash) || !Get(in, type) || !Get(in, code_dwords) || !Get(in, header_bytes) ||
+        if (!Get(in, hash) || !Get(in, type) || !Get(in, stage) || !Get(in, code_dwords) ||
+            !Get(in, header_bytes) ||
             code_dwords > MaxCodeLength / sizeof(u32) || header_bytes > MaxHeaderLength ||
             in.size() < code_dwords * sizeof(u32) + header_bytes) {
             LOG_WARNING(Render, "Saved shader list {} is cut short after {} shaders",
                         save_path.string(), i);
             break;
         }
-        Shader shader{.type = type, .found_ns = now};
+        Shader shader{.type = type, .found_ns = now, .stage = stage};
         shader.code.resize(code_dwords);
         std::memcpy(shader.code.data(), in.data(), code_dwords * sizeof(u32));
         in = in.subspan(code_dwords * sizeof(u32));
@@ -479,6 +483,7 @@ void ShaderScanner::Save() {
         for (const auto& [hash, shader] : shaders) {
             Put(raw, hash);
             Put(raw, shader.type);
+            Put(raw, shader.stage);
             Put(raw, static_cast<u32>(shader.code.size()));
             Put(raw, static_cast<u32>(shader.header.size()));
             const auto* code = reinterpret_cast<const u8*>(shader.code.data());
@@ -527,6 +532,33 @@ std::optional<ShaderScanner::Shader> ShaderScanner::Find(u64 hash) {
     return it->second;
 }
 
+std::optional<u8> ShaderScanner::StageOf(u64 hash) {
+    std::scoped_lock lock{mutex};
+    const auto it = shaders.find(hash);
+    if (it == shaders.end() || it->second.stage == NoStage) {
+        return std::nullopt;
+    }
+    return it->second.stage;
+}
+
+void ShaderScanner::WaitUntilLoaded() const {
+    if (fd >= 0) {
+        load_done.wait(false);
+    }
+}
+
+std::vector<u64> ShaderScanner::KnownWithStage() {
+    std::scoped_lock lock{mutex};
+    std::vector<u64> hashes;
+    for (const auto& [hash, shader] : shaders) {
+        if (shader.stage != NoStage && !shader.header.empty()) {
+            hashes.push_back(hash);
+        }
+    }
+    std::ranges::sort(hashes);
+    return hashes;
+}
+
 std::optional<u8> ShaderScanner::TypeOf(u64 hash) {
     std::scoped_lock lock{mutex};
     const auto it = shaders.find(hash);
@@ -546,7 +578,7 @@ std::vector<u64> ShaderScanner::TakeFound(size_t& cursor) {
     return found;
 }
 
-void ShaderScanner::NoteFirstUse(u64 hash) {
+void ShaderScanner::NoteFirstUse(u64 hash, u8 stage) {
     const u64 now = PerfStats::NowNs();
     std::scoped_lock lock{mutex};
     ++first_uses;
@@ -554,6 +586,10 @@ void ShaderScanner::NoteFirstUse(u64 hash) {
     if (it != shaders.end()) {
         ++found_ahead;
         leads.push_back((now - it->second.found_ns) / 1e9);
+        if (it->second.stage == NoStage) {
+            it.value().stage = stage;
+            dirty = true;
+        }
     } else {
         LOG_INFO(Render, "Shader scan hadn't found program {:#x} before its first use", hash);
     }

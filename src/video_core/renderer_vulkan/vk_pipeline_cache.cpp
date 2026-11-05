@@ -504,6 +504,11 @@ PipelineCache::PipelineCache(const Instance& instance_, Scheduler& scheduler_,
         // Temporary, for measuring guessed translation.
         const char* check = std::getenv("SHADPS4_GUESS_CHECK");
         guess_check = check && check[0] == '1';
+        // Measurement: translates the shaders saved by earlier runs, to time translation alone.
+        if (const char* bench = std::getenv("SHADPS4_TRANSLATE_BENCH")) {
+            const u32 rounds = std::max<u32>(1, std::strtoul(bench, nullptr, 10));
+            bench_thread = std::jthread([this, rounds] { RunTranslateBench(rounds); });
+        }
     }
     LOG_INFO(Render_Vulkan, "{} pipeline compile threads", compile_threads);
     WarmUp();
@@ -523,8 +528,129 @@ PipelineCache::PipelineCache(const Instance& instance_, Scheduler& scheduler_,
     }
 }
 
+/// The stages whose register state a shader's struct gives.
+static bool PrecompilesStage(HwStage stage) {
+    return stage == HwStage::Fragment || stage == HwStage::Compute || stage == HwStage::Vertex;
+}
+
 PipelineCache::~PipelineCache() {
     StopPrecompile();
+    if (bench_thread.joinable()) {
+        bench_thread.join();
+    }
+}
+
+void PipelineCache::RunTranslateBench(u32 rounds) {
+    Common::SetCurrentThreadName("shadPS4:TranslateBench");
+    shader_scanner->WaitUntilLoaded();
+    const auto hashes = shader_scanner->KnownWithStage();
+    LOG_INFO(Render_Vulkan, "Translation bench: {} saved shaders with a known stage, {} rounds",
+             hashes.size(), rounds);
+    struct Timed {
+        u64 ns;
+        u64 hash;
+        HwStage stage;
+        size_t dwords;
+    };
+    std::vector<Timed> timed;
+    tsl::robin_map<u64, size_t> timed_index;
+    std::array<u64, 7> stage_ns{};
+    std::array<u32, 7> stage_count{};
+    Shader::Pools bench_pools;
+    Shader::TranslateTimes phases{};
+    u64 emit_ns = 0;
+    u64 total_ns = 0;
+    u64 dwords = 0;
+    u32 translated = 0;
+    u32 unguessable = 0;
+    static constexpr std::array<u32, Shader::ShaderParams::NumShaderUserData> NoUserData{};
+    for (u32 round = 0; round < rounds; ++round) {
+        for (const u64 hash : hashes) {
+            const auto found = shader_scanner->Find(hash);
+            if (!found) {
+                continue;
+            }
+            const auto hw_stage = static_cast<HwStage>(found->stage);
+            if (!PrecompilesStage(hw_stage)) {
+                continue;
+            }
+            const auto sw_stage = hw_stage == HwStage::Compute  ? SwStage::Compute
+                                  : hw_stage == HwStage::Vertex ? SwStage::Vertex
+                                                                : SwStage::Fragment;
+            auto runtime_info = GuessRuntimeInfo(hw_stage, sw_stage, found->header);
+            std::optional<Shader::Gcn::FetchShaderData> fetch;
+            if (hw_stage == HwStage::Vertex) {
+                fetch = GuessFetchShader(found->header);
+            }
+            if (!runtime_info || (hw_stage == HwStage::Vertex && !fetch)) {
+                unguessable += round == 0 ? 1 : 0;
+                continue;
+            }
+            const Shader::ShaderParams params{
+                .user_data = NoUserData,
+                .code = found->code,
+                .hash = hash,
+            };
+            Shader::Info info(hw_stage, sw_stage, params);
+            info.guess_state = true;
+            info.guessed_fetch = fetch ? &*fetch : nullptr;
+            Shader::Backend::Bindings binding{};
+            const auto before = Shader::ThreadTranslateTimes();
+            const u64 start = VideoCore::PerfStats::NowNs();
+            const auto ir_program =
+                Shader::TranslateProgram(found->code, bench_pools, info, *runtime_info, profile);
+            const u64 emit_start = VideoCore::PerfStats::NowNs();
+            const auto spv =
+                Shader::Backend::SPIRV::EmitSPIRV(profile, *runtime_info, ir_program, binding);
+            const u64 end = VideoCore::PerfStats::NowNs();
+            const auto& after = Shader::ThreadTranslateTimes();
+            for (size_t i = 0; i < phases.ns.size(); ++i) {
+                phases.ns[i] += after.ns[i] - before.ns[i];
+            }
+            emit_ns += end - emit_start;
+            total_ns += end - start;
+            dwords += found->code.size();
+            ++translated;
+            const auto stage_index = static_cast<size_t>(hw_stage);
+            stage_ns[stage_index] += end - start;
+            ++stage_count[stage_index];
+            // Each shader's best round, for the slowest list.
+            if (const auto [it, added] = timed_index.try_emplace(hash, timed.size()); added) {
+                timed.push_back({end - start, hash, hw_stage, found->code.size()});
+            } else {
+                timed[it->second].ns = std::min(timed[it->second].ns, end - start);
+            }
+        }
+    }
+    std::vector<std::pair<u64, std::string_view>> parts;
+    for (size_t i = 0; i < phases.ns.size(); ++i) {
+        parts.emplace_back(phases.ns[i],
+                           Shader::TranslatePhaseName(static_cast<Shader::TranslatePhase>(i)));
+    }
+    parts.emplace_back(emit_ns, "SPIR-V emission");
+    std::ranges::sort(parts, std::greater{});
+    std::string list;
+    for (const auto& [ns, name] : parts) {
+        list += fmt::format("{}{} {:.1f} ms ({:.0f}%)", list.empty() ? "" : ", ", name, ns / 1e6,
+                            100.0 * double(ns) / double(std::max<u64>(total_ns, 1)));
+    }
+    std::string stages;
+    for (size_t i = 0; i < stage_ns.size(); ++i) {
+        if (stage_count[i] != 0) {
+            stages += fmt::format("{}{} {} in {:.1f} ms", stages.empty() ? "" : ", ",
+                                  static_cast<HwStage>(i), stage_count[i], stage_ns[i] / 1e6);
+        }
+    }
+    LOG_INFO(Render_Vulkan,
+             "Translation bench: {} translations in {:.1f} ms ({:.1f} us per shader, {:.0f} us "
+             "per 1000 code dwords), {} without a usable struct; by stage: {}; by phase: {}",
+             translated, total_ns / 1e6, translated != 0 ? total_ns / 1e3 / translated : 0.0,
+             dwords != 0 ? total_ns / 1e3 / (dwords / 1e3) : 0.0, unguessable, stages, list);
+    std::ranges::sort(timed, std::greater{}, &Timed::ns);
+    for (size_t i = 0; i < std::min<size_t>(timed.size(), 10); ++i) {
+        LOG_INFO(Render_Vulkan, "Translation bench: slowest {}: {} shader {:#x}, {} dwords, {:.2f} ms",
+                 i + 1, timed[i].stage, timed[i].hash, timed[i].dwords, timed[i].ns / 1e6);
+    }
 }
 
 void PipelineCache::TickCompileStats() {
@@ -1279,7 +1405,7 @@ PipelineCache::Result PipelineCache::GetProgram(HwStage hw_stage, SwStage sw_sta
     auto [it_pgm, new_program] = program_cache.try_emplace(params.hash);
     if (new_program) {
         if (shader_scanner) {
-            shader_scanner->NoteFirstUse(params.hash);
+            shader_scanner->NoteFirstUse(params.hash, static_cast<u8>(hw_stage));
         }
         if (precompile.active) {
             NotePrecompileType(params.hash, hw_stage);
@@ -1386,11 +1512,6 @@ PipelineCache::Result PipelineCache::GetProgram(HwStage hw_stage, SwStage sw_sta
 /// A binary type not yet seen as any stage.
 constexpr auto UnseenStage = static_cast<HwStage>(~0u);
 
-/// The stages whose register state a shader's struct gives.
-static bool PrecompilesStage(HwStage stage) {
-    return stage == HwStage::Fragment || stage == HwStage::Compute || stage == HwStage::Vertex;
-}
-
 void PipelineCache::StartPrecompile(u32 num_threads) {
     precompile.type_stage.fill(UnseenStage);
     precompile.active = true;
@@ -1433,6 +1554,14 @@ void PipelineCache::RunPrecompile(std::stop_token stop) {
             const auto take_found = [&] {
                 for (const u64 hash : shader_scanner->TakeFound(precompile.found_cursor)) {
                     if (!precompile.seen.insert(hash).second) {
+                        continue;
+                    }
+                    // A stage saved by an earlier run needs no learning.
+                    if (const auto saved = shader_scanner->StageOf(hash)) {
+                        if (const auto stage = static_cast<HwStage>(*saved);
+                            PrecompilesStage(stage)) {
+                            precompile.queue.emplace_back(hash, stage);
+                        }
                         continue;
                     }
                     const auto type = shader_scanner->TypeOf(hash).value_or(0) & 0xf;
@@ -1625,7 +1754,7 @@ void PipelineCache::NotePreparedUse(Program& program, u64 hash, bool served,
                                     const Shader::StageSpecialization& spec, u64 perm_hash) {
     program.prepared = false;
     if (shader_scanner) {
-        shader_scanner->NoteFirstUse(hash);
+        shader_scanner->NoteFirstUse(hash, static_cast<u8>(program.info.hw_stage));
     }
     if (served) {
         ++precompile.served;

@@ -32,7 +32,11 @@ public:
         u8 type;
         /// When the scan found it.
         u64 found_ns;
+        /// The hardware stage it was first used as (a Shader::Stage), NoStage until then.
+        /// Saved with it, so later launches know it before any draw.
+        u8 stage = NoStage;
     };
+    static constexpr u8 NoStage = 0xff;
 
     ShaderScanner();
     ~ShaderScanner();
@@ -64,8 +68,17 @@ public:
     std::vector<u64> TakeFound(size_t& cursor);
 
     /// Notes the first draw or dispatch with a program, for the summary: whether the scan had
-    /// found it, and how long before.
-    void NoteFirstUse(u64 hash);
+    /// found it, and how long before. Also remembers the stage it was used as.
+    void NoteFirstUse(u64 hash, u8 stage);
+
+    /// The stage a shader was first used as, in this run or an earlier one.
+    std::optional<u8> StageOf(u64 hash);
+
+    /// Waits until the shaders saved by earlier runs are loaded.
+    void WaitUntilLoaded() const;
+
+    /// Hashes of the known shaders with a stage struct and a known stage.
+    std::vector<u64> KnownWithStage();
 
     struct Counts {
         u32 first_uses{};
@@ -104,6 +117,7 @@ private:
     bool dirty{};
     u64 last_save_ns{};
     u32 loaded{};
+    std::atomic<bool> load_done{false};
 
     int fd{-1};
     std::mutex mutex;

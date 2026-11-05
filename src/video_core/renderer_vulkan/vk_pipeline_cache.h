@@ -369,6 +369,10 @@ private:
     /// Workers translate the newest found first, since a game tends to use what it just loaded;
     /// the GPU thread takes in the results before looking up a program.
     void StartPrecompile(u32 num_threads);
+    /// Measurement (SHADPS4_TRANSLATE_BENCH=rounds): translates every saved shader with a
+    /// known stage, from its struct, and logs where the time went. Its own thread.
+    void RunTranslateBench(u32 rounds);
+    std::jthread bench_thread;
     void StopPrecompile();
     void RunPrecompile(std::stop_token stop);
     void PrecompileOne(u64 hash, Shader::HwStage hw_stage);
