@@ -245,7 +245,7 @@ bool BufferCache::LandGpuModifiedMemory() {
     // Ranges above these sizes stay GPU-side and are read back by the fault path if the CPU
     // ever touches them, so a big GPU-only buffer isn't copied at every fence.
     constexpr u64 MaxRangeSize = 16_MB;
-    constexpr u64 MaxLandingSize = 64_MB;
+    constexpr u64 MaxLandingSize = LandingRingSize / 4;
     constexpr u64 CopyAlign = 64;
 
     struct ArenaCopies {
@@ -288,32 +288,49 @@ bool BufferCache::LandGpuModifiedMemory() {
     if (total_size_bytes == 0) {
         return false;
     }
+
+    // Staging space comes from a ring of host memory owned by the landings. Landings finish in
+    // order, so the ring frees from its tail. When it's full, this fence skips landing: its
+    // ranges stay protected and are read back by the fault path if the CPU touches them.
+    if (!landing_ring) {
+        landing_ring = std::make_unique<Buffer>(instance, 0, LandingRingSize,
+                                                MemoryType::HostCached, "Readback Landing Ring");
+    }
+    u64 ring_start = landing_ring_head;
+    if (ring_start % LandingRingSize + total_size_bytes > LandingRingSize) {
+        ring_start = Common::AlignUp(ring_start, LandingRingSize); // wrap past the ring's end
+    }
+    const u64 ring_end = ring_start + total_size_bytes;
+    if (ring_end - landing_ring_tail.load(std::memory_order_acquire) > LandingRingSize) {
+        return false;
+    }
+    landing_ring_head = ring_end;
+    const u64 ring_offset = ring_start % LandingRingSize;
+
     landing->ranges.ForEach(
         [&](VAddr start, VAddr end) { gpu_modified_ranges.Subtract(start, end - start); });
-
-    const auto download =
-        staging_pool.Request(total_size_bytes, VideoCore::MemoryType::HostCached, 16, true);
     scheduler.EndRendering();
     for (auto& [arena, copies] : arena_copies) {
         for (auto& copy : copies) {
-            copy.dstOffset += download.offset;
+            copy.dstOffset += ring_offset;
         }
-        runtime.CopyBuffer(arena, download.buffer, copies);
+        runtime.CopyBuffer(arena, landing_ring.get(), copies);
     }
     ++readback_stats.landings;
     readback_stats.landing_bytes += total_size_bytes;
     landings.push_back(landing);
-    scheduler.DeferPriorityOperation(
-        [this, download, landing = std::move(landing), writes = std::move(writes)] {
-            download.Invalidate();
-            for (const auto& write : writes) {
-                memory->TryWriteBacking(std::bit_cast<u8*>(write.address),
-                                        download.mapped + write.offset, write.size);
-            }
-            staging_pool.FreeDeferred(download);
-            landing->done.store(true, std::memory_order_release);
-            landing->done.notify_all();
-        });
+    scheduler.DeferPriorityOperation([this, ring_offset, total_size_bytes, ring_end,
+                                      landing = std::move(landing), writes = std::move(writes)] {
+        landing_ring->Invalidate(ring_offset, total_size_bytes);
+        const u8* mapped = landing_ring->mapped_data.data() + ring_offset;
+        for (const auto& write : writes) {
+            memory->TryWriteBacking(std::bit_cast<u8*>(write.address), mapped + write.offset,
+                                    write.size);
+        }
+        landing_ring_tail.store(ring_end, std::memory_order_release);
+        landing->done.store(true, std::memory_order_release);
+        landing->done.notify_all();
+    });
     return true;
 }
 
@@ -380,7 +397,7 @@ void BufferCache::FlushReadbackStats() {
         const bool switched = stats.ab_switches != Common::AbSwitch::Switches();
         const char* variant = Common::AbSwitch::Label();
         if (variant && switched) {
-            variant = Common::AbSwitch::IsB() ? "A" : "B";
+            variant = Common::AbSwitch::LabelOf(!Common::AbSwitch::IsB());
         }
         // Milliseconds of each second the GPU thread spent waiting.
         LOG_INFO(Render,

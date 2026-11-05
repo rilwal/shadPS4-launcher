@@ -434,6 +434,15 @@ bool Rasterizer::DeferFenceSignal(Common::UniqueFunction<void>&& signal, bool th
     if (!fenced && !pending) {
         return false;
     }
+    const auto now = std::chrono::steady_clock::now();
+
+    // Landing at every fence costs a copy and a submit each, and some games signal thousands of
+    // fences a second. Skipping one is always safe: what it would have landed stays protected,
+    // so a CPU read of it takes the fault path as with Precise. So buffers land only at the
+    // end-of-frame fences, and at most every MinLandingInterval at the others.
+    constexpr auto MinLandingInterval = std::chrono::milliseconds{1};
+    const bool land = fenced && (throttle || now - last_landing >= MinLandingInterval);
+
     // Priority operations run in order once the GPU reaches their tick, so the image and
     // buffer data queued here land in guest memory before the signal runs. Right after an
     // A/B switch away from Fenced, signals still queue behind the pending ones to stay in order.
@@ -441,7 +450,10 @@ bool Rasterizer::DeferFenceSignal(Common::UniqueFunction<void>&& signal, bool th
     bool buffers = false;
     if (fenced) {
         images = texture_cache.ProcessDownloadImages(true);
-        buffers = buffer_cache.LandGpuModifiedMemory();
+        if (land) {
+            buffers = buffer_cache.LandGpuModifiedMemory();
+            last_landing = now;
+        }
     } else {
         OnFence();
     }
@@ -464,8 +476,18 @@ bool Rasterizer::DeferFenceSignal(Common::UniqueFunction<void>&& signal, bool th
             throttled_fences_in_flight.notify_all();
         }
     });
-    // Submit now: the guest may wait on this fence before sending more work.
-    Flush();
+
+    // The signal runs once its tick is submitted and done. Submitting at every fence is costly,
+    // so it waits for the next submit, unless this is a frame's end or it has waited too long.
+    // The command processor also submits when it is about to wait (FlushFenceSignals).
+    if (unsubmitted_signal_tick != scheduler.CurrentTick()) {
+        unsubmitted_signal_tick = scheduler.CurrentTick();
+        unsubmitted_signal_since = now;
+    }
+    constexpr auto MaxSignalLatency = std::chrono::milliseconds{1};
+    if (throttle || now - unsubmitted_signal_since >= MaxSignalLatency) {
+        Flush();
+    }
 
     // The guest learns about GPU progress later than before, so it can queue more frames.
     // Some games assert when they're 3+ frames behind; keep the command processor close.
@@ -486,6 +508,13 @@ bool Rasterizer::DeferFenceSignal(Common::UniqueFunction<void>&& signal, bool th
     }
     buffer_cache.RecordFence(true, throttle_ns);
     return true;
+}
+
+void Rasterizer::FlushFenceSignals() {
+    if (unsubmitted_signal_tick == scheduler.CurrentTick() &&
+        deferred_signals_in_flight.load(std::memory_order_acquire) != 0) {
+        Flush();
+    }
 }
 
 bool Rasterizer::BindResources(const Pipeline* pipeline) {

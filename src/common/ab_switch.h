@@ -41,7 +41,12 @@ public:
         if (!IsRegistered()) {
             return nullptr;
         }
-        return IsB() ? b.load() : a.load();
+        return LabelOf(IsB());
+    }
+
+    /// Name of variant B (or A), or nullptr without an experiment.
+    [[nodiscard]] static const char* LabelOf(bool variant_b) {
+        return variant_b ? b.load() : a.load();
     }
 
     /// Counts switches, so a consumer can tell a window of measurements spans one.
