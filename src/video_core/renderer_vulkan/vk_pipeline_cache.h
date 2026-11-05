@@ -131,6 +131,8 @@ private:
                                                    size_t perm_idx,
                                                    Shader::Backend::Bindings& binding);
     const Shader::RuntimeInfo& BuildRuntimeInfo(Shader::HwStage stage, Shader::SwStage l_stage);
+    /// A render target as the fragment shader is specialized on it.
+    Shader::PsColorBuffer ShaderColorBuffer(const Shader::PsColorBuffer& target) const;
 
     [[nodiscard]] bool IsPipelineCacheDirty() const {
         return num_new_pipelines > 0;

@@ -346,7 +346,7 @@ const Shader::RuntimeInfo& PipelineCache::BuildRuntimeInfo(HwStage stage, SwStag
             };
         }
         for (u32 i = 0; i < Shader::MaxColorBuffers; i++) {
-            info.hw.fs.color_buffers[i] = graphics_key.color_buffers[i];
+            info.hw.fs.color_buffers[i] = ShaderColorBuffer(graphics_key.color_buffers[i]);
         }
         // Lowered user clip planes ride the same emulation path as guest-exported distances, so
         // the fragment side arms whenever the hardware vertex stage lowers them, keeping its input
@@ -1122,6 +1122,34 @@ std::pair<vk::ShaderModule, u64> PipelineCache::CompileModule(Shader::Info& info
                                  patch ? *patch : std::span<const u32>{}, is_patched);
     }
     return {module, hash};
+}
+
+/// The parts of a render target that change a fragment shader's code. The output type follows
+/// the number class, not the exact format, and a swizzle's unused components map to
+/// themselves, since the target drops them anyway. Keeping only these lets one shader serve
+/// targets of different formats.
+Shader::PsColorBuffer PipelineCache::ShaderColorBuffer(const Shader::PsColorBuffer& target) const {
+    Shader::PsColorBuffer buffer = target;
+    if (!profile.needs_unorm_fixup) {
+        // The fix-up is the only use of the exact format.
+        buffer.data_format = AmdGpu::DataFormat::FormatInvalid;
+        switch (AmdGpu::GetNumberClass(target.num_format)) {
+        case AmdGpu::NumberClass::Float:
+            buffer.num_format = AmdGpu::NumberFormat::Float;
+            break;
+        case AmdGpu::NumberClass::Sint:
+            buffer.num_format = AmdGpu::NumberFormat::Sint;
+            break;
+        case AmdGpu::NumberClass::Uint:
+            buffer.num_format = AmdGpu::NumberFormat::Uint;
+            break;
+        }
+    }
+    for (u32 i = 0; i < 4; ++i) {
+        buffer.swizzle.array[i] =
+            static_cast<AmdGpu::CompSwizzle>(u32(AmdGpu::CompSwizzle::Red) + target.swizzle.Map(i));
+    }
+    return buffer;
 }
 
 PipelineCache::Result PipelineCache::GetProgram(HwStage hw_stage, SwStage sw_stage,
