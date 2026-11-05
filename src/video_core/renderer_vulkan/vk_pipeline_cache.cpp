@@ -1645,17 +1645,26 @@ std::optional<Shader::Gcn::FetchShaderData> PipelineCache::GuessFetchShader(
     if (count == 0) {
         return fetch;
     }
+    u32 rsrc1;
+    std::memcpy(&rsrc1, header.data() + 16, sizeof(rsrc1));
+    const u32 num_vgprs = ((rsrc1 & 0x3f) + 1) * 4;
     std::optional<u8> table_sgpr;
     for (u32 i = 0; i < num_usage_slots; ++i) {
         if (header[slots + i * 4] == UsagePtrVertexBufferTable) {
             table_sgpr = header[slots + i * 4 + 2];
         }
     }
-    if (!table_sgpr) {
+    // A struct read wrong would have the translation write past its registers, so anything
+    // a real fetch shader couldn't do rules the guess out.
+    if (!table_sgpr || *table_sgpr + 1 >= Shader::ShaderParams::NumShaderUserData ||
+        count > Shader::IR::NumParams) {
         return std::nullopt;
     }
     for (u32 i = 0; i < count; ++i) {
         const u8* input = header.data() + inputs + i * 4;
+        if (input[2] == 0 || input[2] > 4 || u32(input[1]) + input[2] > num_vgprs) {
+            return std::nullopt;
+        }
         fetch.attributes.push_back({
             .dest_vgpr = input[1],
             .num_elements = input[2],
@@ -1739,6 +1748,9 @@ std::optional<Shader::RuntimeInfo> PipelineCache::GuessRuntimeInfo(
         fs.en_flags = std::bit_cast<AmdGpu::PsInput>(reg(6));
         fs.addr_flags = std::bit_cast<AmdGpu::PsInput>(reg(7));
         fs.num_inputs = reg(8) & 0x3f;
+        if (fs.num_inputs > fs.inputs.size()) {
+            return std::nullopt;
+        }
         fs.front_face_all_bits = (reg(9) >> 24) & 1;
         const auto db = std::bit_cast<AmdGpu::DepthShaderControl>(reg(10));
         fs.depth_before_shader = db.depth_before_shader;
@@ -1814,6 +1826,10 @@ std::optional<Shader::RuntimeInfo> PipelineCache::GuessRuntimeInfo(
         info.props.fp_round_mode16_64 = cs.fp_round_mode64;
         info.props.dx10_clamp = cs.dx10_clamp;
         info.hw.cs.workgroup_size = {reg(4) & 0xffff, reg(5) & 0xffff, reg(6) & 0xffff};
+        const auto& size = info.hw.cs.workgroup_size;
+        if (size[0] == 0 || size[1] == 0 || size[2] == 0 || size[0] * size[1] * size[2] > 1024) {
+            return std::nullopt;
+        }
         info.hw.cs.tgid_enable = {bool(cs.tgid_enable & 1), bool(cs.tgid_enable & 2),
                                   bool(cs.tgid_enable & 4)};
         info.hw.cs.shared_memory_size = cs.lds_dwords * 128 * 4;
