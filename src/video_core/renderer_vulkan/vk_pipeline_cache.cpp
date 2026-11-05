@@ -1668,6 +1668,31 @@ void PipelineCache::CheckGuess(HwStage hw_stage, SwStage sw_stage,
     guess_stats.changed = true;
     if (sw_stage != SwStage::Fragment && sw_stage != SwStage::Compute) {
         ++guess_stats.skipped;
+        // Vertex shaders need their fetch shader, which the game makes from the vertex shader's
+        // struct at run time. Logs a few structs next to the fetch shader the draw used, to see
+        // whether it can be made from the struct alone.
+        const auto found = shader_scanner->Find(params.hash);
+        if (sw_stage == SwStage::Vertex && found && !found->header.empty() &&
+            guess_stats.dumped_vertex < 30) {
+            ++guess_stats.dumped_vertex;
+            std::string bytes;
+            for (const u8 b : found->header) {
+                bytes += fmt::format("{:02x}", b);
+            }
+            std::string attributes;
+            for (const auto& a : spec.fetch_shader_data.attributes) {
+                attributes +=
+                    fmt::format(" [v{} n{} s{} +{} inst{} off{} fmt{}/{}]", a.dest_vgpr,
+                                a.num_elements, a.sgpr_base, a.dword_offset, a.instance_data,
+                                a.inst_offset, a.data_format, a.num_format);
+            }
+            LOG_INFO(Render_Vulkan,
+                     "Shader struct of {} shader {:#x} ({} bytes): {}; fetch shader: vertex "
+                     "offset s{}, instance offset s{},{}",
+                     hw_stage, params.hash, found->header.size(), bytes,
+                     spec.fetch_shader_data.vertex_offset_sgpr,
+                     spec.fetch_shader_data.instance_offset_sgpr, attributes);
+        }
         return;
     }
     ++guess_stats.checked;

@@ -316,6 +316,7 @@ private:
         std::map<std::string, u32> registers_wrong;
         /// Raw structs logged so far.
         u32 dumped{};
+        u32 dumped_vertex{};
         bool changed{};
     } guess_stats;
     vk::UniquePipelineLayout pipeline_layout;
