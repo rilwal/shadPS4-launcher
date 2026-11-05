@@ -3,6 +3,7 @@
 
 #include <boost/preprocessor/stringize.hpp>
 
+#include "common/ab_switch.h"
 #include "common/assert.h"
 #include "common/debug.h"
 #include "common/polyfill_thread.h"
@@ -182,6 +183,7 @@ void Liverpool::Process(std::stop_token stoken) {
                 rasterizer->OnSubmit();
                 rasterizer->Flush();
             }
+            LogWaitStats();
             submit_done = false;
         } else if (rasterizer) {
             // Going idle: the guest may be waiting on a deferred fence signal.
@@ -190,6 +192,94 @@ void Liverpool::Process(std::stop_token stoken) {
 
         Platform::IrqC::Instance()->Signal(Platform::InterruptId::GpuIdle);
     }
+}
+
+void Liverpool::RecordLabelWrite(LabelWrites& writes, void* address, u64 data, u32 num_bytes) {
+    const auto addr = std::bit_cast<VAddr>(address);
+    writes.emplace_back(addr, static_cast<u32>(data));
+    if (num_bytes == sizeof(u64)) {
+        writes.emplace_back(addr + sizeof(u32), static_cast<u32>(data >> 32));
+    }
+}
+
+bool Liverpool::DeferFenceSignal(Common::UniqueFunction<void>&& signal, bool throttle,
+                                 const LabelWrites& writes) {
+    if (!rasterizer) {
+        return false;
+    }
+    const u64 seq = ++deferred_label_seq;
+    const bool deferred = rasterizer->DeferFenceSignal(
+        [this, seq, signal = std::move(signal)] {
+            signal();
+            // Deferred signals run in order, so this one landing means all before it have.
+            landed_label_seq.store(seq, std::memory_order_release);
+        },
+        throttle);
+    if (!deferred || landed_label_seq.load(std::memory_order_acquire) >= seq) {
+        return deferred;
+    }
+    for (const auto& [address, value] : writes) {
+        deferred_labels.insert_or_assign(address, DeferredLabel{value, seq});
+    }
+    // A label normally lives at a fixed address, so this rarely grows. Drop landed ones if not.
+    if (deferred_labels.size() > 256) {
+        const u64 landed = landed_label_seq.load(std::memory_order_acquire);
+        std::erase_if(deferred_labels,
+                      [landed](const auto& entry) { return entry.second.seq <= landed; });
+    }
+    return true;
+}
+
+bool Liverpool::TestWait(const PM4CmdWaitRegMem* wait) {
+    if (wait->mem_space.Value() == PM4CmdWaitRegMem::MemSpace::Memory && !deferred_labels.empty()) {
+        const auto it = deferred_labels.find(wait->Address<VAddr>());
+        if (it != deferred_labels.end()) {
+            if (it->second.seq > landed_label_seq.load(std::memory_order_acquire)) {
+                ++wait_stats.deferred_label_hits;
+                if (wait->TestValue(it->second.value)) {
+                    return true;
+                }
+                ++wait_stats.failed_polls;
+                return false;
+            }
+            deferred_labels.erase(it);
+        }
+    }
+    if (wait->Test(regs.reg_array)) {
+        return true;
+    }
+    ++wait_stats.failed_polls;
+    return false;
+}
+
+void Liverpool::LogWaitStats() {
+    constexpr u64 IntervalNs = 5'000'000'000ULL;
+    const u64 now = std::chrono::duration_cast<std::chrono::nanoseconds>(
+                        std::chrono::steady_clock::now().time_since_epoch())
+                        .count();
+    const u64 switches = Common::AbSwitch::Switches();
+    if (wait_stats.last_log_ns == 0) {
+        wait_stats = WaitStats{.last_log_ns = now, .ab_switches = switches};
+        return;
+    }
+    // As with the readback stats, a window that spans an A/B switch logs what came before it.
+    const bool switched = wait_stats.ab_switches != switches;
+    if (now - wait_stats.last_log_ns < IntervalNs && !switched) {
+        return;
+    }
+    const double seconds = double(now - wait_stats.last_log_ns) / 1e9;
+    if (seconds > 0.5 && (wait_stats.failed_polls != 0 || wait_stats.deferred_label_hits != 0)) {
+        const char* variant = Common::AbSwitch::Label();
+        if (variant && switched) {
+            variant = Common::AbSwitch::LabelOf(!Common::AbSwitch::IsB());
+        }
+        LOG_INFO(Render,
+                 "Queue waits per second [{}] over {:.1f} s: {:.0f} polls failed, {:.0f} read a "
+                 "deferred label",
+                 variant ? variant : "-", seconds, wait_stats.failed_polls / seconds,
+                 wait_stats.deferred_label_hits / seconds);
+    }
+    wait_stats = WaitStats{.last_log_ns = now, .ab_switches = switches};
 }
 
 Liverpool::Task Liverpool::ProcessCeUpdate(std::span<const u32> ccb) {
@@ -734,9 +824,13 @@ Liverpool::Task Liverpool::ProcessGraphics(std::span<const u32> dcb) {
                         ASSERT(memory->TryWriteBacking(address, &data, num_bytes));
                     });
                 };
+                LabelWrites writes;
+                event_eos->SignalFence([&writes](void* address, u64 data, u32 num_bytes) {
+                    RecordLabelWrite(writes, address, data, num_bytes);
+                });
                 const bool deferred =
-                    rasterizer && event_eos->command == PM4CmdEventWriteEos::Command::SignalFence &&
-                    rasterizer->DeferFenceSignal(auto{signal}, false);
+                    event_eos->command == PM4CmdEventWriteEos::Command::SignalFence &&
+                    DeferFenceSignal(auto{signal}, false, writes);
                 if (!deferred) {
                     if (rasterizer) {
                         rasterizer->OnFence();
@@ -765,7 +859,13 @@ Liverpool::Task Liverpool::ProcessGraphics(std::span<const u32> dcb) {
                 };
                 // Throttle on the end-of-frame style fences that raise an interrupt.
                 const bool throttle = event_eop->int_sel != InterruptSelect::None;
-                if (!rasterizer || !rasterizer->DeferFenceSignal(auto{signal}, throttle)) {
+                LabelWrites writes;
+                event_eop->SignalFence(
+                    [&writes](void* address, u64 data, u32 num_bytes) {
+                        RecordLabelWrite(writes, address, data, num_bytes);
+                    },
+                    [] {});
+                if (!DeferFenceSignal(auto{signal}, throttle, writes)) {
                     if (rasterizer) {
                         rasterizer->OnFence();
                     }
@@ -874,7 +974,7 @@ Liverpool::Task Liverpool::ProcessGraphics(std::span<const u32> dcb) {
                     vo_port->WaitVoLabel([&] { return wait_reg_mem->Test(regs.reg_array); });
                     break;
                 }
-                while (!wait_reg_mem->Test(regs.reg_array)) {
+                while (!TestWait(wait_reg_mem)) {
                     YIELD_GFX();
                 }
                 break;
@@ -1230,7 +1330,7 @@ Liverpool::Task Liverpool::ProcessCompute(std::span<const u32> acb, u32 vqid) {
         case PM4ItOpcode::WaitRegMem: {
             const auto* wait_reg_mem = reinterpret_cast<const PM4CmdWaitRegMem*>(header);
             ASSERT(wait_reg_mem->engine.Value() == PM4CmdWaitRegMem::Engine::Me);
-            while (!wait_reg_mem->Test(regs.reg_array)) {
+            while (!TestWait(wait_reg_mem)) {
                 YIELD_ASC(vqid);
             }
             break;
@@ -1242,9 +1342,17 @@ Liverpool::Task Liverpool::ProcessCompute(std::span<const u32> acb, u32 vqid) {
             };
             // A GDS store is a GPU copy recorded right here, so it can't be deferred.
             const bool deferrable = rasterizer && release_mem->data_sel != DataSelect::GdsMemStore;
+            LabelWrites writes;
+            if (deferrable) {
+                release_mem->SignalFence(
+                    [&writes](void* address, u64 data, u32 num_bytes) {
+                        RecordLabelWrite(writes, address, data, num_bytes);
+                    },
+                    [] {}, [](VAddr, u16, u16) {});
+            }
             const bool deferred =
                 deferrable &&
-                rasterizer->DeferFenceSignal(
+                DeferFenceSignal(
                     [rel = *release_mem, signal_irq] {
                         rel.SignalFence(
                             [](void* address, u64 data, u32 num_bytes) {
@@ -1253,7 +1361,7 @@ Liverpool::Task Liverpool::ProcessCompute(std::span<const u32> acb, u32 vqid) {
                             },
                             signal_irq, [](VAddr, u16, u16) { UNREACHABLE(); });
                     },
-                    false);
+                    false, writes);
             if (!deferred) {
                 if (rasterizer) {
                     rasterizer->OnFence();

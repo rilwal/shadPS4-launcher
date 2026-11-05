@@ -143,6 +143,12 @@ void BufferCache::UnmarkRegionAsGpuModified(VAddr device_addr, u64 size, bool is
 void BufferCache::ReadMemory(VAddr device_addr, u64 size, bool is_write, bool async,
                              bool assume_locks) {
     const auto flush_request = [this, device_addr, size, is_write, async] {
+        if (tracks_gpu_pages) {
+            // Remembered so fenced readbacks land this memory early from now on.
+            const VAddr page_start = Common::AlignDown(device_addr, BYTES_PER_PAGE);
+            cpu_read_ranges.Add(page_start,
+                                Common::AlignUp(device_addr + size, BYTES_PER_PAGE) - page_start);
+        }
         const u32 first_block = device_addr >> block_shift;
         const u32 last_block = (device_addr + size - 1) >> block_shift;
         const auto* arena = GetArena(first_block, last_block);
@@ -261,7 +267,7 @@ bool BufferCache::LandGpuModifiedMemory() {
     std::vector<Write> writes;
     auto landing = std::make_shared<Landing>();
     u64 total_size_bytes = 0;
-    gpu_modified_ranges.ForEach([&](VAddr start, VAddr end) {
+    const auto add_range = [&](VAddr start, VAddr end) {
         while (start < end) {
             const Buffer* arena = address_space[start >> ARENA_PAGE_BITS];
             if (!arena) {
@@ -284,6 +290,11 @@ bool BufferCache::LandGpuModifiedMemory() {
             }
             start = chunk_end;
         }
+    };
+    // Only memory the CPU has read before lands early: most of what the GPU writes is never
+    // read back, and copying it all costs more than the occasional fault on the rest.
+    cpu_read_ranges.ForEach([&](VAddr start, VAddr end) {
+        gpu_modified_ranges.ForEachInRange(start, end - start, add_range);
     });
     if (total_size_bytes == 0) {
         return false;
