@@ -137,9 +137,19 @@ struct ImageResource {
     u8 constant_mip_index{};
     MipStorageFallbackMode mip_fallback_mode{};
     SharpFetchPostOp post_op{};
+    /// What a translation without the draw's T# takes the image to be, from how the shader
+    /// addresses it.
+    AmdGpu::ImageType guess_type{AmdGpu::ImageType::Color2D};
 
     constexpr AmdGpu::Image GetSharp(const auto& info) const noexcept {
         AmdGpu::Image image{};
+        if (info.guess_state) {
+            image = AmdGpu::Image::Null(is_depth);
+            image.type = u64(post_op == SharpFetchPostOp::ConvertCubeTo2DArray
+                                 ? AmdGpu::ImageType::Color2DArray
+                                 : guess_type);
+            return image;
+        }
         if (!Fetch(info.flattened_ud_buf.data(), &image)) {
             return AmdGpu::Image::Null(is_depth);
         }

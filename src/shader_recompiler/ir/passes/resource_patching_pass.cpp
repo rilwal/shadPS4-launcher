@@ -228,6 +228,38 @@ void PatchBufferSharp(const ResourceDiscovery& resource, Info& info, Descriptors
     inst.SetArg(0, ir.Imm32(buffer_binding));
 }
 
+/// Whether a sample's coordinates come from the cube face instructions, which only cube maps
+/// need. The PSSL compiler leaves DA clear on cube samples, so the flag alone doesn't tell.
+static bool UsesCubeCoordinates(const IR::Inst& inst) {
+    if (inst.GetOpcode() != IR::Opcode::ImageSampleRaw) {
+        return false;
+    }
+    const auto from_cube = [](this auto&& self, const IR::Value& value, u32 depth) -> bool {
+        const IR::Inst* producer = value.TryInst();
+        if (!producer) {
+            return false;
+        }
+        if (producer->GetOpcode() == IR::Opcode::CubeFaceIndex) {
+            return true;
+        }
+        if (depth == 0) {
+            return false;
+        }
+        for (size_t i = 0; i < producer->NumArgs(); ++i) {
+            if (self(producer->Arg(i), depth - 1)) {
+                return true;
+            }
+        }
+        return false;
+    };
+    for (u32 arg = 2; arg <= 5; ++arg) {
+        if (from_cube(inst.Arg(arg), 3)) {
+            return true;
+        }
+    }
+    return false;
+}
+
 void PatchImageSharp(const ResourceDiscovery& resource, Info& info, Descriptors& descriptors,
                      const Profile& profile) {
     IR::Inst& inst = *resource.user;
@@ -248,6 +280,9 @@ void PatchImageSharp(const ResourceDiscovery& resource, Info& info, Descriptors&
         .is_written = is_written,
         .is_r128 = bool(inst_info.is_r128),
         .post_op = resource.sharps[0].post_op,
+        .guess_type = inst_info.is_array          ? AmdGpu::ImageType::Color2DArray
+                      : UsesCubeCoordinates(inst) ? AmdGpu::ImageType::Cube
+                                                  : AmdGpu::ImageType::Color2D,
     };
 
     auto image = image_res.GetSharp(info);
