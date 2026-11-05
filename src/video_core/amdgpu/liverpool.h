@@ -204,6 +204,9 @@ private:
     bool DeferFenceSignal(Common::UniqueFunction<void>&& signal, bool throttle,
                           const LabelWrites& writes);
 
+    /// Drops deferred label values the command processor itself overwrites.
+    void ForgetDeferredLabels(VAddr address, u64 size);
+
     /// Tests a WAIT_REG_MEM condition. A label whose signal is deferred reads as its new value.
     bool TestWait(const PM4CmdWaitRegMem* wait);
 

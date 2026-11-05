@@ -54,16 +54,31 @@ public:
         return switches.load(std::memory_order_acquire);
     }
 
+    /// Callable from any thread (hotkey, launcher settings, the auto switch).
     static void Toggle() {
         if (!IsRegistered()) {
             return;
         }
-        is_b.store(!is_b.load());
-        switches.fetch_add(1, std::memory_order_release);
-        LOG_INFO(Common, "A/B switch: now {}", Label());
+        bool current = is_b.load();
+        while (!is_b.compare_exchange_weak(current, !current)) {
+        }
+        Switched(!current);
+    }
+
+    /// Selects a variant; counts as a switch only if it changes.
+    static void Set(bool variant_b) {
+        if (!IsRegistered() || is_b.exchange(variant_b) == variant_b) {
+            return;
+        }
+        Switched(variant_b);
     }
 
 private:
+    static void Switched(bool variant_b) {
+        switches.fetch_add(1, std::memory_order_release);
+        LOG_INFO(Common, "A/B switch: now {}", LabelOf(variant_b));
+    }
+
     static inline std::atomic<const char*> a{nullptr};
     static inline std::atomic<const char*> b{nullptr};
     static inline std::atomic<bool> is_b{false};
