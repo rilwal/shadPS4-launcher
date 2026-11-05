@@ -464,6 +464,12 @@ const std::vector<Entry>& Entries() {
             "background shader compiling mode.",
             [] { return EmulatorSettings.IsCompileLookahead(); },
             [](bool v) { EmulatorSettings.SetCompileLookahead(v, G); }));
+        e.push_back(Toggle(
+            "shader-prescan", "Find shaders early", "Accuracy",
+            "Look for the game's shaders in memory as it loads them, before their first draw. "
+            "Experimental, Linux only.",
+            [] { return EmulatorSettings.IsShaderPrescan(); },
+            [](bool v) { EmulatorSettings.SetShaderPrescan(v, G); }));
 
         // System
         e.push_back(Toggle(
@@ -534,10 +540,11 @@ const std::vector<Entry>& Entries() {
             "Japanese-style buttons: Circle confirms and Cross cancels, in games that ask.",
             [] { return EmulatorSettings.IsCircleEnter(); },
             [](bool v) { EmulatorSettings.SetCircleEnter(v, G); }));
-        e.push_back(Toggle("motion-controls", "Motion controls", "Controls",
-                           "Pass the controller's gyro and accelerometer to games.",
-                           [] { return EmulatorSettings.IsMotionControlsEnabled(); },
-                           [](bool v) { EmulatorSettings.SetMotionControlsEnabled(v, G); }));
+        e.push_back(Toggle(
+            "motion-controls", "Motion controls", "Controls",
+            "Pass the controller's gyro and accelerometer to games.",
+            [] { return EmulatorSettings.IsMotionControlsEnabled(); },
+            [](bool v) { EmulatorSettings.SetMotionControlsEnabled(v, G); }));
         e.push_back(Live(Toggle(
                              "background-input", "Input in the background", "Controls",
                              "Keep reading the controller while the game window isn't focused.",

@@ -14,6 +14,7 @@
 #include "video_core/renderer_vulkan/vk_pipeline_compiler.h"
 #include "video_core/renderer_vulkan/vk_resource_pool.h"
 #include "video_core/renderer_vulkan/vk_shader_objects.h"
+#include "video_core/shader_scanner.h"
 #include "vulkan/vulkan.hpp"
 
 template <>
@@ -257,6 +258,7 @@ private:
     vk::UniquePipelineCache pipeline_cache;
     /// With shader objects: every guest shader compiled once, shared by the draws that use it.
     std::unique_ptr<ShaderObjects> shader_objects;
+    std::unique_ptr<VideoCore::ShaderScanner> shader_scanner;
     vk::UniquePipelineLayout pipeline_layout;
     Shader::Profile profile{};
     Shader::Pools pools;

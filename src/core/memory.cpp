@@ -1692,4 +1692,22 @@ MemoryManager::PhysHandle MemoryManager::Split(PhysMap& map, PhysHandle phys_han
     return map.emplace_hint(std::next(phys_handle), new_area.base, new_area);
 }
 
+std::vector<MemoryManager::ShaderRange> MemoryManager::ShaderCodeRanges() {
+    std::shared_lock lk{mutex};
+    std::vector<ShaderRange> ranges;
+    for (const auto& [base, vma] : vma_map) {
+        const bool is_code = vma.type == VMAType::Code;
+        if (!vma.IsMapped() || (!is_code && !True(vma.prot & MemoryProt::GpuRead))) {
+            continue;
+        }
+        if (!ranges.empty() && ranges.back().base + ranges.back().size == base &&
+            ranges.back().is_code == is_code) {
+            ranges.back().size += vma.size;
+        } else {
+            ranges.push_back({base, vma.size, is_code});
+        }
+    }
+    return ranges;
+}
+
 } // namespace Core

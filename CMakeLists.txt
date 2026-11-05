@@ -1204,6 +1204,8 @@ set(VIDEO_CORE src/video_core/amdgpu/cb_db_extent.h
                src/video_core/renderer_vulkan/vk_resource_heaps.cpp
                src/video_core/renderer_vulkan/vk_resource_heaps.h
                src/video_core/renderer_vulkan/vk_shader_objects.cpp
+               src/video_core/shader_scanner.cpp
+               src/video_core/shader_scanner.h
                src/video_core/renderer_vulkan/vk_shader_objects.h
                src/video_core/renderer_vulkan/vk_runtime.cpp
                src/video_core/renderer_vulkan/vk_runtime.h

@@ -127,7 +127,7 @@ struct OverrideItem {
 };
 
 template <typename Struct, typename T>
-inline OverrideItem make_override(const char* key, Setting<T> Struct::* member) {
+inline OverrideItem make_override(const char* key, Setting<T> Struct::*member) {
     return OverrideItem{
         key,
         [member, key](void* base, const nlohmann::json& entry, std::vector<std::string>& changed) {
@@ -454,6 +454,9 @@ struct GPUSettings {
     /// starts compiling the pipelines of later draws and dispatches on the workers. Only with
     /// the async_pipelines modes that skip draws.
     Setting<bool> compile_lookahead{false};
+    /// Looks through the game's GPU-visible memory for shaders as it loads them, ahead of
+    /// their first draw. Linux only for now.
+    Setting<bool> shader_prescan{false};
 
     std::vector<OverrideItem> GetOverrideableFields() const {
         return std::vector<OverrideItem>{
@@ -489,19 +492,18 @@ struct GPUSettings {
             make_override<GPUSettings>("descriptor_heap", &GPUSettings::descriptor_heap),
             make_override<GPUSettings>("shader_objects", &GPUSettings::shader_objects),
             make_override<GPUSettings>("compile_lookahead", &GPUSettings::compile_lookahead),
+            make_override<GPUSettings>("shader_prescan", &GPUSettings::shader_prescan),
         };
     }
 };
-NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE(GPUSettings, window_width, window_height, internal_screen_width,
-                                   internal_screen_height, null_gpu, copy_gpu_buffers,
-                                   readbacks_mode, readback_linear_images_enabled,
-                                   direct_memory_access_enabled, dump_shaders, patch_shaders,
-                                   vblank_frequency, full_screen, full_screen_mode, present_mode,
-                                   hdr_allowed, fsr_enabled, rcas_enabled, rcas_attenuation,
-                                   userfaultfd, inline_fetch_shader, fast_shader_math,
-                                   async_pipelines, async_pipeline_wait_ms,
-                                   async_pipelines_ab_seconds, pipeline_compile_probe,
-                                   descriptor_heap, shader_objects, compile_lookahead)
+NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE(
+    GPUSettings, window_width, window_height, internal_screen_width, internal_screen_height,
+    null_gpu, copy_gpu_buffers, readbacks_mode, readback_linear_images_enabled,
+    direct_memory_access_enabled, dump_shaders, patch_shaders, vblank_frequency, full_screen,
+    full_screen_mode, present_mode, hdr_allowed, fsr_enabled, rcas_enabled, rcas_attenuation,
+    userfaultfd, inline_fetch_shader, fast_shader_math, async_pipelines, async_pipeline_wait_ms,
+    async_pipelines_ab_seconds, pipeline_compile_probe, descriptor_heap, shader_objects,
+    compile_lookahead, shader_prescan)
 
 // -------------------------------
 // Vulkan settings
@@ -816,6 +818,7 @@ public:
     SETTING_FORWARD_BOOL(m_gpu, DescriptorHeap, descriptor_heap)
     SETTING_FORWARD_BOOL(m_gpu, ShaderObjects, shader_objects)
     SETTING_FORWARD_BOOL(m_gpu, CompileLookahead, compile_lookahead)
+    SETTING_FORWARD_BOOL(m_gpu, ShaderPrescan, shader_prescan)
 
     u32 GetVblankFrequency() {
         if (m_gpu.vblank_frequency.value < 30) {

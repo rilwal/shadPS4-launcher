@@ -7,6 +7,7 @@
 #include <mutex>
 #include <string>
 #include <string_view>
+#include <vector>
 #include "common/enum.h"
 #include "common/shared_first_mutex.h"
 #include "common/singleton.h"
@@ -305,6 +306,15 @@ public:
     s32 GetMemoryPoolStats(::Libraries::Kernel::OrbisKernelMemoryPoolBlockStats* stats);
 
     void InvalidateMemory(VAddr addr, u64 size) const;
+
+    /// Mapped ranges that can hold shader code: memory the GPU can read, and the game's own
+    /// code segments. Only a snapshot: ranges may be unmapped right after.
+    struct ShaderRange {
+        VAddr base;
+        u64 size;
+        bool is_code;
+    };
+    std::vector<ShaderRange> ShaderCodeRanges();
 
 private:
     VMAHandle FindVMA(VAddr target) {

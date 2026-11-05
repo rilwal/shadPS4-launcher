@@ -478,6 +478,9 @@ PipelineCache::PipelineCache(const Instance& instance_, Scheduler& scheduler_,
     if (instance.UsesShaderObjects()) {
         shader_objects = std::make_unique<ShaderObjects>(instance);
     }
+    if (EmulatorSettings.IsShaderPrescan()) {
+        shader_scanner = std::make_unique<VideoCore::ShaderScanner>();
+    }
     LOG_INFO(Render_Vulkan, "{} pipeline compile threads", compile_threads);
     WarmUp();
 
@@ -551,6 +554,15 @@ void PipelineCache::FlushCompileStats(u64 now_ns) {
         if (objects.created != 0 || objects.reused != 0) {
             LOG_INFO(Render_Vulkan, "Shader objects over {:.1f} s: {} created, {} reused", seconds,
                      objects.created, objects.reused);
+        }
+    }
+    if (shader_scanner) {
+        const auto scan = shader_scanner->TakeCounts();
+        if (scan.first_uses != 0) {
+            LOG_INFO(Render_Vulkan,
+                     "Shader scan over {:.1f} s: {} of {} new programs found ahead (median "
+                     "{:.1f} s ahead), {} known",
+                     seconds, scan.found_ahead, scan.first_uses, scan.median_lead_s, scan.known);
         }
     }
     const u64 probes = bg.probes.exchange(0, std::memory_order_relaxed);
@@ -1158,6 +1170,9 @@ PipelineCache::Result PipelineCache::GetProgram(HwStage hw_stage, SwStage sw_sta
     auto runtime_info = BuildRuntimeInfo(hw_stage, sw_stage);
     auto [it_pgm, new_program] = program_cache.try_emplace(params.hash);
     if (new_program) {
+        if (shader_scanner) {
+            shader_scanner->NoteFirstUse(params.hash);
+        }
         it_pgm.value() = std::make_unique<Program>(hw_stage, sw_stage, params);
         auto& program = it_pgm.value();
         auto start = binding;
