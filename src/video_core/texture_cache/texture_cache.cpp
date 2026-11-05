@@ -93,12 +93,17 @@ TextureCache::TextureCache(const Vulkan::Instance& instance_, Vulkan::Scheduler&
 
 TextureCache::~TextureCache() = default;
 
-void TextureCache::ProcessDownloadImages() {
+bool TextureCache::ProcessDownloadImages(bool priority) {
     std::unique_lock lk{download_images_mutex};
+    if (download_images.empty()) {
+        return false;
+    }
+    const auto flags = priority ? DownloadMemoryFlags::Priority : DownloadMemoryFlags::Sync;
     for (const ImageId image_id : download_images) {
-        DownloadImageMemory(image_id, DownloadMemoryFlags::Sync);
+        DownloadImageMemory(image_id, flags);
     }
     download_images.clear();
+    return true;
 }
 
 void TextureCache::DownloadImageMemory(ImageId image_id, DownloadMemoryFlags flags) {

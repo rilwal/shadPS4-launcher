@@ -34,6 +34,9 @@ enum GpuReadbacksMode : int {
     Disabled,
     Relaxed,
     Precise,
+    /// Like Precise, but GPU writes are copied back at each fence and the fence's label and
+    /// interrupt are only delivered once the data has landed in guest memory.
+    Fenced,
 };
 
 enum class ConfigMode {
@@ -127,7 +130,7 @@ struct OverrideItem {
 };
 
 template <typename Struct, typename T>
-inline OverrideItem make_override(const char* key, Setting<T> Struct::* member) {
+inline OverrideItem make_override(const char* key, Setting<T> Struct::*member) {
     return OverrideItem{
         key,
         [member, key](void* base, const nlohmann::json& entry, std::vector<std::string>& changed) {

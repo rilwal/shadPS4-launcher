@@ -389,7 +389,7 @@ const std::vector<Entry>& Entries() {
         e.push_back(Choice(
             "readbacks", "GPU readbacks", "Accuracy",
             "Copy what the GPU writes back to the game's memory. Some games need it; it's slower.",
-            {{"0", "Off"}, {"1", "Relaxed"}, {"2", "Precise"}},
+            {{"0", "Off"}, {"1", "Relaxed"}, {"2", "Precise"}, {"3", "Fenced"}},
             [] { return std::to_string(EmulatorSettings.GetReadbacksMode()); },
             [](const std::string& value) {
                 EmulatorSettings.SetReadbacksMode(static_cast<u32>(std::stoi(value)), G);
@@ -484,10 +484,11 @@ const std::vector<Entry>& Entries() {
             "Japanese-style buttons: Circle confirms and Cross cancels, in games that ask.",
             [] { return EmulatorSettings.IsCircleEnter(); },
             [](bool v) { EmulatorSettings.SetCircleEnter(v, G); }));
-        e.push_back(Toggle("motion-controls", "Motion controls", "Controls",
-                           "Pass the controller's gyro and accelerometer to games.",
-                           [] { return EmulatorSettings.IsMotionControlsEnabled(); },
-                           [](bool v) { EmulatorSettings.SetMotionControlsEnabled(v, G); }));
+        e.push_back(Toggle(
+            "motion-controls", "Motion controls", "Controls",
+            "Pass the controller's gyro and accelerometer to games.",
+            [] { return EmulatorSettings.IsMotionControlsEnabled(); },
+            [](bool v) { EmulatorSettings.SetMotionControlsEnabled(v, G); }));
         e.push_back(Live(Toggle(
                              "background-input", "Input in the background", "Controls",
                              "Keep reading the controller while the game window isn't focused.",
