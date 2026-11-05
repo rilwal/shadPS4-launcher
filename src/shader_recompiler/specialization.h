@@ -100,11 +100,14 @@ struct StageSpecialization {
         : info{&info_}, runtime_info{runtime_info_}, start{start_} {
         if (info_.sw_stage == SwStage::Vertex && Gcn::ParseFetchShader(info_, fetch_shader_data)) {
             // Specialize shader on VS input number types to follow spec.
+            // The divisor isn't in the code (the vertex input applies it), so with fewer
+            // variants it's left out.
+            const bool keep_divisor = !profile_.fewer_shader_variants;
             ForEachSharp(vs_attribs, fetch_shader_data.attributes,
-                         [this](auto& spec, const auto& desc, AmdGpu::Buffer sharp) {
+                         [this, keep_divisor](auto& spec, const auto& desc, AmdGpu::Buffer sharp) {
                              using InstanceIdType = Shader::Gcn::VertexAttribute::InstanceIdType;
                              if (const auto step_rate = desc.GetStepRate();
-                                 step_rate != InstanceIdType::None) {
+                                 keep_divisor && step_rate != InstanceIdType::None) {
                                  spec.divisor = step_rate == InstanceIdType::OverStepRate0
                                                     ? runtime_info.sw.vs.step_rate_0
                                                     : (step_rate == InstanceIdType::OverStepRate1

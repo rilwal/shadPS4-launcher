@@ -396,6 +396,17 @@ const Shader::RuntimeInfo& PipelineCache::BuildRuntimeInfo(HwStage stage, SwStag
     case SwStage::Vertex:
         info.sw.vs.step_rate_0 = regs.vgt_instance_step_rate_0;
         info.sw.vs.step_rate_1 = regs.vgt_instance_step_rate_1;
+        // A step rate only reaches the code through the instance ID VGPR it divides, so a
+        // shader that doesn't take that VGPR is the same code at any rate. Pipelines only take
+        // the rates from here without dynamic vertex input.
+        if (profile.fewer_shader_variants && instance.IsVertexInputDynamicState()) {
+            if (info.props.num_input_vgprs < 1) {
+                info.sw.vs.step_rate_0 = 0;
+            }
+            if (info.props.num_input_vgprs < 2) {
+                info.sw.vs.step_rate_1 = 0;
+            }
+        }
         info.sw.vs.vertex_sgpr_offset = draw_indirect_params.vertex_sgpr_offset;
         info.sw.vs.instance_sgpr_offset = draw_indirect_params.instance_sgpr_offset;
         info.sw.vs.is_indirect = draw_indirect_params.is_indirect;
