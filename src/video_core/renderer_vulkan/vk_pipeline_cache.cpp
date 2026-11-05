@@ -1,6 +1,7 @@
 // SPDX-FileCopyrightText: Copyright 2024-2026 shadPS4 Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+#include <algorithm>
 #include <ranges>
 
 #include "common/hash.h"
@@ -332,6 +333,10 @@ PipelineCache::PipelineCache(const Instance& instance_, Scheduler& scheduler_,
         .fast_shader_math = EmulatorSettings.IsFastShaderMath(),
         .support_bda = instance_.IsBufferDeviceAddressSupported(),
     };
+    // A quarter of the cores: the game's own threads and the GPU thread need the rest.
+    const u32 compile_threads = std::clamp(std::thread::hardware_concurrency() / 4, 1u, 4u);
+    compiler = std::make_unique<PipelineCompiler>(compile_threads);
+    LOG_INFO(Render_Vulkan, "{} pipeline compile threads", compile_threads);
     WarmUp();
 
     auto [cache_result, cache] = instance.GetDevice().createPipelineCacheUnique({});
@@ -347,7 +352,18 @@ void PipelineCache::TickCompileStats() {
     const u64 now = VideoCore::PerfStats::NowNs();
     if (compile_stats.last_log_ns == 0) {
         compile_stats.last_log_ns = now;
+        ab_switched_ns = now;
         VideoCore::PerfStats::frames.Take();
+        return;
+    }
+    // The A/B timer flips sync and async creation in one run; each switch ends a stats window
+    // so that no line mixes the two.
+    const u64 ab_ns = u64(EmulatorSettings.GetAsyncPipelinesAbSeconds()) * 1'000'000'000;
+    if (ab_ns != 0 && now - ab_switched_ns >= ab_ns) {
+        FlushCompileStats(now);
+        ab_async = !ab_async;
+        ab_switched_ns = now;
+        LOG_INFO(Render_Vulkan, "Async pipelines A/B: now {}", ab_async ? "on" : "off");
         return;
     }
     if (now - compile_stats.last_log_ns >= IntervalNs) {
@@ -357,18 +373,118 @@ void PipelineCache::TickCompileStats() {
 
 void PipelineCache::FlushCompileStats(u64 now_ns) {
     auto& stats = compile_stats;
+    auto& bg = background_stats;
     const auto frames = VideoCore::PerfStats::frames.Take();
     const double seconds = double(now_ns - stats.last_log_ns) / 1e9;
-    if (frames.count != 0 || stats.graphics != 0 || stats.compute != 0) {
+    const u64 bg_created = bg.created.exchange(0, std::memory_order_relaxed);
+    const u64 bg_driver_ns = bg.driver_ns.exchange(0, std::memory_order_relaxed);
+    const u64 bg_worst_driver_ns = bg.worst_driver_ns.exchange(0, std::memory_order_relaxed);
+    const u64 bg_worst_latency_ns = bg.worst_latency_ns.exchange(0, std::memory_order_relaxed);
+    if (frames.count != 0 || stats.graphics != 0 || stats.compute != 0 || bg_created != 0) {
         LOG_INFO(Render_Vulkan,
                  "Frames over {:.1f} s: {} ({:.1f} FPS), {} over 33 ms, worst {:.1f} ms. "
                  "Compiled {} graphics + {} compute pipelines from {} shaders: recompile "
-                 "{:.1f} ms, driver {:.1f} ms, worst pipeline {:.1f} ms",
+                 "{:.1f} ms, driver {:.1f} ms, worst pipeline {:.1f} ms. "
+                 "Async {}: {} sent to workers, {} created there (driver {:.1f} ms, worst "
+                 "{:.1f} ms, ready at worst {:.1f} ms after the draw), {} draws skipped, "
+                 "waited {:.1f} ms, {} pending",
                  seconds, frames.count, frames.count / seconds, frames.hitches,
                  frames.worst_ns / 1e6, stats.graphics, stats.compute, stats.shaders,
-                 stats.recompile_ns / 1e6, stats.driver_ns / 1e6, stats.worst_ns / 1e6);
+                 stats.recompile_ns / 1e6, stats.driver_ns / 1e6, stats.worst_ns / 1e6,
+                 UseAsyncPipelines() ? "on" : "off", stats.background, bg_created,
+                 bg_driver_ns / 1e6, bg_worst_driver_ns / 1e6, bg_worst_latency_ns / 1e6,
+                 stats.skipped_draws, stats.waited_ns / 1e6, compiler->Pending());
+    }
+    const u64 probes = bg.probes.exchange(0, std::memory_order_relaxed);
+    const u64 probe_optimized_ns = bg.probe_optimized_ns.exchange(0, std::memory_order_relaxed);
+    const u64 probe_unoptimized_ns = bg.probe_unoptimized_ns.exchange(0, std::memory_order_relaxed);
+    if (probes != 0) {
+        LOG_INFO(Render_Vulkan,
+                 "Pipeline probes over {:.1f} s: {} pipelines, optimized {:.1f} ms, "
+                 "unoptimized {:.1f} ms ({:.0f}%)",
+                 seconds, probes, probe_optimized_ns / 1e6, probe_unoptimized_ns / 1e6,
+                 100.0 * double(probe_unoptimized_ns) /
+                     double(std::max<u64>(probe_optimized_ns, 1)));
     }
     stats = CompileStats{.last_log_ns = now_ns};
+}
+
+bool PipelineCache::UseAsyncPipelines() const {
+    if (EmulatorSettings.GetAsyncPipelinesAbSeconds() != 0) {
+        return ab_async;
+    }
+    return EmulatorSettings.GetAsyncPipelines() != 0;
+}
+
+static void AtomicMax(std::atomic<u64>& value, u64 candidate) {
+    u64 current = value.load(std::memory_order_relaxed);
+    while (candidate > current &&
+           !value.compare_exchange_weak(current, candidate, std::memory_order_relaxed)) {
+    }
+}
+
+PipelineCompileOptions PipelineCache::MakeCompileOptions(u64 pipeline_hash, u64 recompile_ns,
+                                                         bool async) {
+    PipelineCompileOptions options{};
+    if (async) {
+        options.compiler = compiler.get();
+    }
+    if (EmulatorSettings.IsPipelineCompileProbe()) {
+        options.prober = compiler.get();
+    }
+    auto* bg = &background_stats;
+    const u64 asked_ns = VideoCore::PerfStats::NowNs();
+    options.on_created = [bg, pipeline_hash, recompile_ns, async, asked_ns](u64 driver_ns) {
+        if (!async) {
+            LOG_INFO(Render_Vulkan,
+                     "Graphics pipeline {:#x}: recompile {:.2f} ms, driver {:.2f} ms",
+                     pipeline_hash, recompile_ns / 1e6, driver_ns / 1e6);
+            return;
+        }
+        const u64 latency_ns = VideoCore::PerfStats::NowNs() - asked_ns;
+        bg->created.fetch_add(1, std::memory_order_relaxed);
+        bg->driver_ns.fetch_add(driver_ns, std::memory_order_relaxed);
+        AtomicMax(bg->worst_driver_ns, driver_ns);
+        AtomicMax(bg->worst_latency_ns, latency_ns);
+        LOG_INFO(Render_Vulkan,
+                 "Graphics pipeline {:#x}: recompile {:.2f} ms, driver {:.2f} ms, in the "
+                 "background, ready {:.2f} ms after the draw",
+                 pipeline_hash, recompile_ns / 1e6, driver_ns / 1e6, latency_ns / 1e6);
+    };
+    if (options.prober) {
+        options.on_probed = [bg, pipeline_hash](u64 optimized_ns, u64 unoptimized_ns) {
+            bg->probes.fetch_add(1, std::memory_order_relaxed);
+            bg->probe_optimized_ns.fetch_add(optimized_ns, std::memory_order_relaxed);
+            bg->probe_unoptimized_ns.fetch_add(unoptimized_ns, std::memory_order_relaxed);
+            LOG_INFO(Render_Vulkan,
+                     "Graphics pipeline {:#x} probe: optimized {:.2f} ms, unoptimized {:.2f} ms",
+                     pipeline_hash, optimized_ns / 1e6, unoptimized_ns / 1e6);
+        };
+    }
+    return options;
+}
+
+u64 PipelineCache::WaitForPipeline(const GraphicsPipeline& pipeline) {
+    // Refills at budget per 60 Hz frame, up to one budget, so a burst of new pipelines can't
+    // stall a frame by more than about the budget.
+    constexpr u64 FrameNs = 16'666'667;
+    const u64 budget_ns = u64(EmulatorSettings.GetAsyncPipelineWaitMs()) * 1'000'000;
+    if (budget_ns == 0) {
+        return 0;
+    }
+    const u64 now = VideoCore::PerfStats::NowNs();
+    const u64 elapsed = std::min<u64>(now - wait_credit_ns_at, 1'000'000'000);
+    wait_credit_ns = std::min(budget_ns, wait_credit_ns + elapsed * budget_ns / FrameNs);
+    wait_credit_ns_at = now;
+    if (wait_credit_ns == 0) {
+        return 0;
+    }
+    compiler->WaitFor([&pipeline] { return pipeline.IsReady(); },
+                      std::chrono::nanoseconds{wait_credit_ns});
+    const u64 waited = VideoCore::PerfStats::NowNs() - now;
+    wait_credit_ns -= std::min(wait_credit_ns, waited);
+    compile_stats.waited_ns += waited;
+    return waited;
 }
 
 const GraphicsPipeline* PipelineCache::GetGraphicsPipeline(const DrawIndirectParams params) {
@@ -382,17 +498,24 @@ const GraphicsPipeline* PipelineCache::GetGraphicsPipeline(const DrawIndirectPar
         LOG_INFO(Render_Vulkan, "Compiling graphics pipeline {:#x}", pipeline_hash);
 
         GraphicsPipeline::SerializationSupport sdata{};
+        const u64 recompile_ns = std::exchange(pending_recompile_ns, 0);
+        const bool async = UseAsyncPipelines();
         const u64 start = VideoCore::PerfStats::NowNs();
         it.value() = std::make_unique<GraphicsPipeline>(
             instance, scheduler, desc_heap, profile, graphics_key, *pipeline_cache, infos,
-            runtime_infos, fetch_shader, modules, sdata, false);
-        const u64 driver_ns = VideoCore::PerfStats::NowNs() - start;
-        const u64 recompile_ns = std::exchange(pending_recompile_ns, 0);
+            runtime_infos, fetch_shader, modules, sdata, false,
+            MakeCompileOptions(pipeline_hash, recompile_ns, async));
+        // When async this is only the setup, as the workers time the driver.
+        const u64 gpu_thread_ns = VideoCore::PerfStats::NowNs() - start;
         ++compile_stats.graphics;
-        compile_stats.driver_ns += driver_ns;
-        compile_stats.worst_ns = std::max(compile_stats.worst_ns, recompile_ns + driver_ns);
-        LOG_INFO(Render_Vulkan, "Graphics pipeline {:#x}: recompile {:.2f} ms, driver {:.2f} ms",
-                 pipeline_hash, recompile_ns / 1e6, driver_ns / 1e6);
+        if (async) {
+            ++compile_stats.background;
+        } else {
+            compile_stats.driver_ns += gpu_thread_ns;
+        }
+        const u64 waited_ns = async ? WaitForPipeline(*it.value()) : 0;
+        compile_stats.worst_ns =
+            std::max(compile_stats.worst_ns, recompile_ns + gpu_thread_ns + waited_ns);
 
         RegisterPipelineData(graphics_key, pipeline_hash, sdata);
         ++num_new_pipelines;
@@ -765,6 +888,8 @@ PipelineCache::Result PipelineCache::GetProgram(HwStage hw_stage, SwStage sw_sta
 
 std::optional<vk::ShaderModule> PipelineCache::ReplaceShader(vk::ShaderModule module,
                                                              std::span<const u32> spv_code) {
+    // Background creations may still use the module destroyed below.
+    compiler->WaitIdle();
     std::optional<vk::ShaderModule> new_module{};
     for (const auto& [_, program] : program_cache) {
         for (auto& m : program->modules) {

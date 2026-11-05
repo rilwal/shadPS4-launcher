@@ -7,6 +7,7 @@
 #include "shader_recompiler/frontend/fetch_shader.h"
 #include "shader_recompiler/info.h"
 #include "video_core/cache_storage.h"
+#include "video_core/perf_stats.h"
 #include "video_core/renderer_vulkan/vk_instance.h"
 #include "video_core/renderer_vulkan/vk_pipeline_cache.h"
 #include "video_core/renderer_vulkan/vk_shader_util.h"
@@ -235,9 +236,14 @@ bool PipelineCache::LoadGraphicsPipeline(Serialization::Archive& ar) {
     const auto [it, is_new] = graphics_pipelines.try_emplace(graphics_key);
     ASSERT(is_new);
 
+    // With async pipelines, the cache is replayed on all the compile threads at once.
+    PipelineCompileOptions options{};
+    if (UseAsyncPipelines()) {
+        options.compiler = compiler.get();
+    }
     it.value() = std::make_unique<GraphicsPipeline>(
         instance, scheduler, desc_heap, profile, graphics_key, *pipeline_cache, infos,
-        runtime_infos, fetch_shader, modules, sdata, true);
+        runtime_infos, fetch_shader, modules, sdata, true, std::move(options));
 
     infos.fill(nullptr);
     modules.fill(nullptr);
@@ -339,6 +345,7 @@ void PipelineCache::WarmUp() {
     }
 
     Launcher::Session::Booting("Compiling cached shaders");
+    const u64 start_ns = VideoCore::PerfStats::NowNs();
     u32 num_pipelines{};
     u32 num_total_pipelines{};
 
@@ -370,7 +377,11 @@ void PipelineCache::WarmUp() {
             }
         });
 
-    LOG_INFO(Render, "Preloaded {} pipelines", num_pipelines);
+    compiler->WaitIdle();
+    LOG_INFO(Render, "Preloaded {} pipelines in {:.1f} ms ({})", num_pipelines,
+             (VideoCore::PerfStats::NowNs() - start_ns) / 1e6,
+             UseAsyncPipelines() ? fmt::format("on {} threads", compiler->NumThreads())
+                                 : std::string{"one at a time"});
     if (num_total_pipelines > num_pipelines) {
         LOG_WARNING(Render, "{} stale pipelines were found. Consider re-generating the cache",
                     num_total_pipelines - num_pipelines);

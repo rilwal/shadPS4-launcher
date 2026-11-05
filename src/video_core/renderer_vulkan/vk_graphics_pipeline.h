@@ -11,6 +11,7 @@
 #include "video_core/amdgpu/regs_depth.h"
 #include "video_core/amdgpu/regs_primitive.h"
 #include "video_core/renderer_vulkan/vk_pipeline_common.h"
+#include "video_core/renderer_vulkan/vk_pipeline_compiler.h"
 
 namespace VideoCore {
 class BufferCache;
@@ -90,7 +91,7 @@ public:
                      std::span<const Shader::RuntimeInfo, MaxShaderStages> runtime_infos,
                      const Shader::Gcn::FetchShaderData* fetch_shader,
                      std::span<const vk::ShaderModule> modules, SerializationSupport& sdata,
-                     bool preloading);
+                     bool preloading, PipelineCompileOptions options = {});
     ~GraphicsPipeline();
 
     const Shader::Gcn::FetchShaderData& GetFetchShader() const noexcept {
@@ -109,7 +110,16 @@ public:
                          u32 step_rate_1) const;
 
 private:
+    struct Build;
+
     void BuildDescSetLayout(bool preloading);
+
+    /// Creates the pipeline in the driver.
+    void Create(const Build& build);
+
+    /// Times an unoptimized creation of the same pipeline, then throws it away.
+    static void Probe(const Build& build, u64 optimized_ns,
+                      const std::function<void(u64, u64)>& on_probed);
 
 private:
     GraphicsPipelineKey key;

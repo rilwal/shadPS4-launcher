@@ -10,6 +10,7 @@
 #include "shader_recompiler/specialization.h"
 #include "video_core/renderer_vulkan/vk_compute_pipeline.h"
 #include "video_core/renderer_vulkan/vk_graphics_pipeline.h"
+#include "video_core/renderer_vulkan/vk_pipeline_compiler.h"
 #include "video_core/renderer_vulkan/vk_resource_pool.h"
 #include "vulkan/vulkan.hpp"
 
@@ -122,6 +123,17 @@ private:
     /// Logs where pipeline compiles spent their time, with game frame hitches.
     void FlushCompileStats(u64 now_ns);
 
+    /// Whether new graphics pipelines are created on the workers (setting, or the A/B timer).
+    [[nodiscard]] bool UseAsyncPipelines() const;
+
+    /// How the next new graphics pipeline gets created, with its stats callbacks.
+    PipelineCompileOptions MakeCompileOptions(u64 pipeline_hash, u64 recompile_ns, bool async);
+
+    /// Waits a little for a background pipeline, within a budget per frame's worth of time, so
+    /// quick ones are drawn at once.
+    /// Returns the time waited.
+    u64 WaitForPipeline(const GraphicsPipeline& pipeline);
+
     /// Time spent compiling, split into our recompiler and the driver. Logged every few
     /// seconds (GPU thread only).
     struct CompileStats {
@@ -129,16 +141,44 @@ private:
         u64 compute{};
         u64 shaders{};
         u64 recompile_ns{};
+        /// Driver time on the GPU thread, so not counting background creations.
         u64 driver_ns{};
+        /// Longest the GPU thread spent on one pipeline.
         u64 worst_ns{};
+        u64 background{};
+        u64 skipped_draws{};
+        u64 waited_ns{};
         u64 last_log_ns{};
     } compile_stats;
     /// Recompile time of the shaders gathered for the pipeline being looked up.
     u64 pending_recompile_ns{};
 
+    /// Totals from the workers, taken by the stats window.
+    struct BackgroundStats {
+        std::atomic<u64> created{};
+        std::atomic<u64> driver_ns{};
+        std::atomic<u64> worst_driver_ns{};
+        /// From the draw that asked for a pipeline to the pipeline being ready.
+        std::atomic<u64> worst_latency_ns{};
+        std::atomic<u64> probes{};
+        std::atomic<u64> probe_optimized_ns{};
+        std::atomic<u64> probe_unoptimized_ns{};
+    };
+    BackgroundStats background_stats;
+
+    u64 wait_credit_ns{};
+    u64 wait_credit_ns_at{};
+    bool ab_async{};
+    u64 ab_switched_ns{};
+
 public:
     /// Called at submits: logs compile_stats every few seconds.
     void TickCompileStats();
+
+    /// Counts a draw skipped because its pipeline is still being created.
+    void CountSkippedDraw() {
+        ++compile_stats.skipped_draws;
+    }
 
 private:
     const Instance& instance;
@@ -165,6 +205,9 @@ private:
     tsl::robin_map<vk::ShaderModule,
                    std::vector<std::variant<GraphicsPipelineKey, ComputePipelineKey>>>
         module_related_pipelines;
+
+    /// Last, so its workers stop before the pipelines and the cache they use are destroyed.
+    std::unique_ptr<PipelineCompiler> compiler;
 };
 
 } // namespace Vulkan

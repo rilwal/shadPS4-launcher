@@ -434,6 +434,14 @@ struct GPUSettings {
     Setting<bool> userfaultfd{false};
     Setting<bool> inline_fetch_shader{false};
     Setting<bool> fast_shader_math{false};
+    /// 1 = create new graphics pipelines on compile threads and skip their draws until ready.
+    Setting<u32> async_pipelines{0};
+    /// Most the GPU thread waits for background pipelines per 60 Hz frame's worth of time.
+    Setting<u32> async_pipeline_wait_ms{2};
+    /// Seconds between flipping async pipelines on and off, for A/B runs (0 = no flipping).
+    Setting<u32> async_pipelines_ab_seconds{0};
+    /// Also time an unoptimized creation of every new graphics pipeline and log both.
+    Setting<bool> pipeline_compile_probe{false};
 
     std::vector<OverrideItem> GetOverrideableFields() const {
         return std::vector<OverrideItem>{
@@ -459,6 +467,13 @@ struct GPUSettings {
             make_override<GPUSettings>("userfaultfd", &GPUSettings::userfaultfd),
             make_override<GPUSettings>("inline_fetch_shader", &GPUSettings::inline_fetch_shader),
             make_override<GPUSettings>("fast_shader_math", &GPUSettings::fast_shader_math),
+            make_override<GPUSettings>("async_pipelines", &GPUSettings::async_pipelines),
+            make_override<GPUSettings>("async_pipeline_wait_ms",
+                                       &GPUSettings::async_pipeline_wait_ms),
+            make_override<GPUSettings>("async_pipelines_ab_seconds",
+                                       &GPUSettings::async_pipelines_ab_seconds),
+            make_override<GPUSettings>("pipeline_compile_probe",
+                                       &GPUSettings::pipeline_compile_probe),
         };
     }
 };
@@ -468,7 +483,9 @@ NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE(GPUSettings, window_width, window_height, int
                                    direct_memory_access_enabled, dump_shaders, patch_shaders,
                                    vblank_frequency, full_screen, full_screen_mode, present_mode,
                                    hdr_allowed, fsr_enabled, rcas_enabled, rcas_attenuation,
-                                   userfaultfd, inline_fetch_shader, fast_shader_math)
+                                   userfaultfd, inline_fetch_shader, fast_shader_math,
+                                   async_pipelines, async_pipeline_wait_ms,
+                                   async_pipelines_ab_seconds, pipeline_compile_probe)
 
 // -------------------------------
 // Vulkan settings
@@ -776,6 +793,10 @@ public:
     SETTING_FORWARD_BOOL(m_gpu, UserfaultfdTracking, userfaultfd)
     SETTING_FORWARD_BOOL_READONLY(m_gpu, InlineFetchShader, inline_fetch_shader)
     SETTING_FORWARD_BOOL_READONLY(m_gpu, FastShaderMath, fast_shader_math)
+    SETTING_FORWARD(m_gpu, AsyncPipelines, async_pipelines)
+    SETTING_FORWARD(m_gpu, AsyncPipelineWaitMs, async_pipeline_wait_ms)
+    SETTING_FORWARD(m_gpu, AsyncPipelinesAbSeconds, async_pipelines_ab_seconds)
+    SETTING_FORWARD_BOOL(m_gpu, PipelineCompileProbe, pipeline_compile_probe)
 
     u32 GetVblankFrequency() {
         if (m_gpu.vblank_frequency.value < 30) {

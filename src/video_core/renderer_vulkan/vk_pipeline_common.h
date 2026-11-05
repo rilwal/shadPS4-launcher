@@ -7,6 +7,7 @@
 #include "shader_recompiler/runtime_info.h"
 #include "video_core/renderer_vulkan/vk_common.h"
 
+#include <atomic>
 #include <boost/container/small_vector.hpp>
 
 namespace Shader {
@@ -36,6 +37,17 @@ public:
         return *pipeline;
     }
 
+    /// False while a worker still creates it (draws that use it are skipped until then), or if
+    /// that was dropped at shutdown.
+    [[nodiscard]] bool IsReady() const noexcept {
+        return state.load(std::memory_order_acquire) == State::Ready;
+    }
+
+    /// Time the driver took to create it, once it's ready.
+    [[nodiscard]] u64 DriverNs() const noexcept {
+        return driver_ns;
+    }
+
     vk::PipelineLayout GetLayout() const noexcept {
         return *pipeline_layout;
     }
@@ -61,7 +73,24 @@ public:
     void BindResources(DescriptorWrites& set_writes, const Shader::PushData& push_data) const;
 
 protected:
+    enum class State : u8 {
+        Ready,
+        Pending,
+        Dropped,
+    };
+
     [[nodiscard]] std::string GetDebugString() const;
+
+    /// Publishes the result of a background creation.
+    void Finish(State result) noexcept {
+        state.store(result, std::memory_order_release);
+        state.notify_all();
+    }
+
+    /// Waits for a background creation, so it never outlives the pipeline.
+    void WaitIdle() const noexcept {
+        state.wait(State::Pending, std::memory_order_acquire);
+    }
 
     const Instance& instance;
     Scheduler& scheduler;
@@ -73,6 +102,8 @@ protected:
     std::array<const Shader::Info*, Shader::MaxStageTypes> stages{};
     bool uses_push_descriptors{};
     bool is_compute;
+    std::atomic<State> state{State::Ready};
+    u64 driver_ns{};
 };
 
 } // namespace Vulkan

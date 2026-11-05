@@ -195,6 +195,11 @@ void Rasterizer::Draw(bool is_indexed, u32 index_offset) {
     if (!pipeline) {
         return;
     }
+    if (!pipeline->IsReady()) {
+        // Still being created on a compile thread: skip the draw instead of stalling.
+        pipeline_cache.CountSkippedDraw();
+        return;
+    }
 
     PrepareRenderState(pipeline);
     if (!BindResources(pipeline)) {
@@ -252,6 +257,10 @@ void Rasterizer::DrawIndirect(bool is_indexed, VAddr arg_address, u32 offset, u3
     };
     const GraphicsPipeline* pipeline = pipeline_cache.GetGraphicsPipeline(params);
     if (!pipeline) {
+        return;
+    }
+    if (!pipeline->IsReady()) {
+        pipeline_cache.CountSkippedDraw();
         return;
     }
 
