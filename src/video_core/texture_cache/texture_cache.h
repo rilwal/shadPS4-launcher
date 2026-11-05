@@ -120,8 +120,10 @@ public:
     /// Invalidates any image in the logical page range.
     void InvalidateMemory(VAddr addr, size_t size);
 
-    /// Marks an image as dirty if it exists at the provided address.
-    void InvalidateMemoryFromGPU(VAddr address, size_t max_size);
+    /// Marks images written by the GPU dirty. With whole_range the write covers exactly
+    /// [address, address + size) (a DMA copy), so every image overlapping it is dirty; otherwise
+    /// size is only an upper bound (a bound storage buffer) and images are followed from address.
+    void InvalidateMemoryFromGPU(VAddr address, size_t max_size, bool whole_range = false);
 
     /// Marks all images as maybe GPU dirty within the provided range.
     void MarkAsMaybeGpuDirty(VAddr addr, size_t size);

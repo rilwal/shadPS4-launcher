@@ -218,16 +218,29 @@ void TextureCache::InvalidateMemory(VAddr addr, size_t size) {
     }
 }
 
-void TextureCache::InvalidateMemoryFromGPU(VAddr address, size_t max_size) {
-    ForEachImageInRegion(address, max_size, [&](ImageId image_id, Image& image) {
-        // Only consider images that match base address.
-        // TODO: Maybe also consider subresources
-        if (image.info.guest_address != address) {
-            return;
-        }
-        // Ensure image is reuploaded when accessed again.
-        image.flags |= ImageFlagBits::GpuDirty;
-    });
+void TextureCache::InvalidateMemoryFromGPU(VAddr address, size_t max_size, bool whole_range) {
+    if (whole_range) {
+        ForEachImageInRegion(address, max_size, [&](ImageId image_id, Image& image) {
+            image.flags |= ImageFlagBits::GpuDirty;
+        });
+        return;
+    }
+    // Mark the image at the written address, then follow images stored right after it
+    // (e.g. the chroma planes after a luma plane).
+    const VAddr end = address + max_size;
+    VAddr next = address;
+    while (next < end) {
+        VAddr next_end = 0;
+        ForEachImageWithAddress(next, [&](ImageId image_id, Image& image) {
+            if (image.info.guest_address != next) {
+                return;
+            }
+            // Ensure image is reuploaded when accessed again.
+            image.flags |= ImageFlagBits::GpuDirty;
+            next_end = std::max<VAddr>(next_end, next + image.info.guest_size);
+        });
+        next = next_end > next ? next_end : end;
+    }
 }
 
 void TextureCache::MarkAsMaybeGpuDirty(VAddr addr, size_t size) {
@@ -627,17 +640,19 @@ ImageId TextureCache::FindImage(ImageDesc& desc, bool exact_fmt) {
     int view_slice{-1};
     if (!image_id) {
         for (const auto& cache_id : image_ids) {
-            view_mip = -1;
-            view_slice = -1;
-
             const auto& merged_info = image_id ? slot_images[image_id].info : info;
             auto [overlap_image_id, overlap_view_mip, overlap_view_slice] =
                 ResolveOverlap(merged_info, desc.type, cache_id, image_id);
-            if (overlap_image_id) {
-                image_id = overlap_image_id;
+            if (!overlap_image_id) {
+                continue;
+            }
+            // A later image that only overlaps by chance gives back the image already found,
+            // or none: it keeps the mip and slice found for that image.
+            if (overlap_image_id != image_id || overlap_view_mip >= 0 || overlap_view_slice >= 0) {
                 view_mip = overlap_view_mip;
                 view_slice = overlap_view_slice;
             }
+            image_id = overlap_image_id;
         }
     }
 
