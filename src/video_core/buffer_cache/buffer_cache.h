@@ -147,6 +147,8 @@ private:
     /// A set of GPU-modified ranges on their way back to guest memory (fenced readbacks).
     struct Landing {
         RangeSet ranges;
+        /// Scheduler tick the copy was recorded in; it may not be submitted yet.
+        u64 tick{};
         std::atomic<bool> done{false};
     };
 
