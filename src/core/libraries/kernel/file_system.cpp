@@ -43,6 +43,7 @@
 #include "core/libraries/net/net_kernel.h"
 #include "core/memory.h"
 #include "kernel.h"
+#include "video_core/shader_scanner.h"
 
 #ifdef _WIN32
 #include <io.h>
@@ -476,6 +477,8 @@ s64 ReadFile(Core::FileSys::File* file, void* buf, u64 nbytes) {
         return bytes;
     }
     std::memcpy(buf, file_buf.data(), bytes);
+    // Shaders the game loads from its files can be translated before their first draw.
+    VideoCore::ShaderScanner::NoteRead(file_buf.data(), reinterpret_cast<VAddr>(buf), bytes);
     return bytes;
 }
 

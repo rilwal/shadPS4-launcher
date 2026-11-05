@@ -4,6 +4,7 @@
 #pragma once
 
 #include <atomic>
+#include <condition_variable>
 #include <mutex>
 #include <optional>
 #include <thread>
@@ -38,6 +39,14 @@ public:
         return fd >= 0;
     }
 
+    /// Called after the game reads a file into memory, to look through what it read for
+    /// shaders at once instead of at the next pass. `data` is a host copy of the `size` bytes
+    /// now at guest address `addr`. Cheap, and does nothing while no scanner runs.
+    static void NoteRead(const void* data, u64 addr, u64 size);
+    /// Called when guest memory was filled some other way, such as a module loading: scans the
+    /// range at once.
+    static void NoteFilled(u64 addr, u64 size);
+
     /// The shader with this hash, if the scan found it.
     std::optional<Shader> Find(u64 hash);
 
@@ -62,7 +71,10 @@ private:
     void Run(std::stop_token stop);
     void ScanOnce();
     void ScanRange(u64 base, u64 size, std::vector<u8>& chunk);
-    void TryAdd(u64 info_addr);
+    /// Scans what NoteRead and NoteFilled queued.
+    void ScanPending();
+    /// Returns whether the shader was new.
+    bool TryAdd(u64 info_addr);
     bool Read(u64 addr, void* dst, u64 size) const;
 
     int fd{-1};
@@ -73,6 +85,8 @@ private:
     u32 found_ahead{};
     /// Scan totals, for the per-pass log.
     u32 pass_new{};
+    /// Shaders found through file reads and loads, between passes.
+    u32 pending_new{};
     u32 pass_index{};
     u64 pass_unreadable{};
     /// Ranges as of the last pass, sorted.

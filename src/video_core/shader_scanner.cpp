@@ -34,8 +34,61 @@ constexpr u32 MaxCodeLength = 1_MB;
 constexpr auto ScanInterval = std::chrono::seconds{3};
 constexpr u32 FullPassEvery = 8;
 constexpr u64 UnreadablePieceSize = 64_KB;
+/// Beyond this many queued signatures or ranges, the next pass picks the rest up.
+constexpr size_t MaxPending = 64 * 1024;
+
+/// What file reads and loads queued for the scanner. Static, so a game thread can queue while
+/// the scanner is being destroyed.
+struct Pending {
+    std::atomic<bool> enabled{false};
+    std::mutex mutex;
+    std::condition_variable_any cv;
+    std::vector<u64> infos;
+    std::vector<std::pair<u64, u64>> ranges;
+};
+Pending pending;
 
 } // Anonymous namespace
+
+void ShaderScanner::NoteRead(const void* data, u64 addr, u64 size) {
+    if (!pending.enabled.load(std::memory_order_relaxed) || size < sizeof(AmdGpu::BinaryInfo)) {
+        return;
+    }
+    const auto* bytes = static_cast<const u8*>(data);
+    const u8* end = bytes + size - Signature.size() + 1;
+    std::vector<u64> found;
+    for (const u8* it = bytes;
+         (it = static_cast<const u8*>(std::memchr(it, Signature[0], end - it))) != nullptr; ++it) {
+        if (std::memcmp(it, Signature.data(), Signature.size()) == 0) {
+            found.push_back(addr + (it - bytes));
+        }
+    }
+    if (found.empty()) {
+        return;
+    }
+    {
+        std::scoped_lock lock{pending.mutex};
+        if (pending.infos.size() + found.size() > MaxPending) {
+            return;
+        }
+        pending.infos.insert(pending.infos.end(), found.begin(), found.end());
+    }
+    pending.cv.notify_one();
+}
+
+void ShaderScanner::NoteFilled(u64 addr, u64 size) {
+    if (!pending.enabled.load(std::memory_order_relaxed) || size == 0) {
+        return;
+    }
+    {
+        std::scoped_lock lock{pending.mutex};
+        if (pending.ranges.size() >= MaxPending) {
+            return;
+        }
+        pending.ranges.emplace_back(addr, size);
+    }
+    pending.cv.notify_one();
+}
 
 ShaderScanner::ShaderScanner() {
 #ifdef __linux__
@@ -44,6 +97,7 @@ ShaderScanner::ShaderScanner() {
         LOG_WARNING(Render, "Shader scan unavailable: can't open /proc/self/mem");
         return;
     }
+    pending.enabled = true;
     thread = std::jthread([this](std::stop_token stop) { Run(stop); });
 #else
     LOG_INFO(Render, "Shader scan is only available on Linux for now");
@@ -51,6 +105,7 @@ ShaderScanner::ShaderScanner() {
 }
 
 ShaderScanner::~ShaderScanner() {
+    pending.enabled = false;
     if (thread.joinable()) {
         thread.request_stop();
         thread.join();
@@ -83,13 +138,47 @@ bool ShaderScanner::Read(u64 addr, void* dst, u64 size) const {
 void ShaderScanner::Run(std::stop_token stop) {
     Common::SetCurrentThreadName("shadPS4:ShaderScan");
     Common::SetCurrentThreadPriority(Common::ThreadPriority::Low);
-    std::mutex wait_mutex;
-    std::condition_variable_any cv;
+    auto next_pass = std::chrono::steady_clock::now();
     while (!stop.stop_requested()) {
-        ScanOnce();
-        std::unique_lock lock{wait_mutex};
-        cv.wait_for(lock, stop, ScanInterval, [] { return false; });
+        ScanPending();
+        if (std::chrono::steady_clock::now() >= next_pass) {
+            ScanOnce();
+            next_pass = std::chrono::steady_clock::now() + ScanInterval;
+        }
+        std::unique_lock lock{pending.mutex};
+        pending.cv.wait_until(lock, stop, next_pass,
+                              [] { return !pending.infos.empty() || !pending.ranges.empty(); });
     }
+}
+
+void ShaderScanner::ScanPending() {
+    std::vector<u64> infos;
+    std::vector<std::pair<u64, u64>> ranges;
+    {
+        std::scoped_lock lock{pending.mutex};
+        infos.swap(pending.infos);
+        ranges.swap(pending.ranges);
+    }
+    if (infos.empty() && ranges.empty()) {
+        return;
+    }
+    const u64 start = PerfStats::NowNs();
+    u32 found = 0;
+    for (const u64 info : infos) {
+        found += TryAdd(info) ? 1 : 0;
+    }
+    const u32 before = pass_new;
+    std::vector<u8> chunk;
+    u64 scanned = 0;
+    for (const auto& [addr, size] : ranges) {
+        ScanRange(addr, size, chunk);
+        scanned += size;
+    }
+    found += pass_new - before;
+    pass_new = before;
+    pending_new += found;
+    scan_ns.fetch_add(PerfStats::NowNs() - start, std::memory_order_relaxed);
+    scan_bytes.fetch_add(scanned, std::memory_order_relaxed);
 }
 
 void ShaderScanner::ScanOnce() {
@@ -119,13 +208,14 @@ void ShaderScanner::ScanOnce() {
     const u64 elapsed = PerfStats::NowNs() - start;
     scan_ns.fetch_add(elapsed, std::memory_order_relaxed);
     scan_bytes.fetch_add(scanned, std::memory_order_relaxed);
-    if (pass_new > 0 || full) {
+    if (pass_new > 0 || pending_new > 0 || full) {
         std::scoped_lock lock{mutex};
         LOG_INFO(Render,
                  "Shader scan ({}) read {} MB in {:.1f} ms ({} MB unreadable): {} new shaders, "
-                 "{} known",
+                 "{} found from file reads and loads since the last pass, {} known",
                  full ? "full" : "new ranges", scanned >> 20, elapsed / 1e6, pass_unreadable >> 20,
-                 pass_new, shaders.size());
+                 pass_new, pending_new, shaders.size());
+        pending_new = 0;
     }
 }
 
@@ -166,28 +256,28 @@ void ShaderScanner::ScanRange(u64 base, u64 size, std::vector<u8>& chunk) {
     }
 }
 
-void ShaderScanner::TryAdd(u64 info_addr) {
+bool ShaderScanner::TryAdd(u64 info_addr) {
     AmdGpu::BinaryInfo info;
     if (!Read(info_addr, &info, sizeof(info)) || !info.Valid() || info.length == 0 ||
         info.length > MaxCodeLength || info.length % sizeof(u32) != 0) {
-        return;
+        return false;
     }
     {
         std::scoped_lock lock{mutex};
         if (shaders.contains(info.shader_hash)) {
-            return;
+            return false;
         }
     }
     // The code ends a little before its info (usage metadata sits between), and starts with
     // s_mov_b32 vcc_hi whose literal points at the info.
     const u64 window = info.length + 512;
     if (window > info_addr) {
-        return;
+        return false;
     }
     std::vector<u32> before(window / sizeof(u32));
     const u64 window_base = info_addr - window;
     if (!Read(window_base, before.data(), window)) {
-        return;
+        return false;
     }
     for (u64 k = 1; k * 8 <= window; ++k) {
         const u64 code_addr = info_addr - k * 8;
@@ -196,7 +286,7 @@ void ShaderScanner::TryAdd(u64 info_addr) {
             continue;
         }
         if (code_addr + info.length > info_addr) {
-            return;
+            return false;
         }
         Shader shader{
             .code = {before.begin() + index, before.begin() + index + info.length / sizeof(u32)},
@@ -206,9 +296,11 @@ void ShaderScanner::TryAdd(u64 info_addr) {
         std::scoped_lock lock{mutex};
         if (shaders.try_emplace(info.shader_hash, std::move(shader)).second) {
             ++pass_new;
+            return true;
         }
-        return;
+        return false;
     }
+    return false;
 }
 
 std::optional<ShaderScanner::Shader> ShaderScanner::Find(u64 hash) {
