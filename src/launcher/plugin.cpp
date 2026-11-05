@@ -24,6 +24,7 @@
 #include "common/scm_rev.h"
 #include "core/emulator_settings.h"
 #include "core/user_settings.h"
+#include "launcher/keys.h"
 #include "launcher/library.h"
 #include "launcher/plugin.h"
 #include "launcher/settings.h"
@@ -46,8 +47,12 @@ constexpr std::string_view GAME_DIR = "--game-dir";
 
 // The setting holding the game folders: a folder picker keeping a list, one path per line
 constexpr char GAME_DIRS_KEY[] = "game_dirs";
+// The trophy key: a file the player picks, installed into shadPS4's keys.json
+constexpr char TROPHY_KEY[] = "trophy_key";
 constexpr char LANGUAGE_KEY[] = "console-language";
 constexpr char PAGE[] = "shadPS4";
+// The section of what the player brings from their own console
+constexpr char SYSTEM_FILES[] = "System files";
 constexpr char GROUP[] = "Emulators";
 
 // launcherd sends a setting's stored value right after the settings are described, and nothing
@@ -153,6 +158,9 @@ public:
         cb.setting = [](void* user, const char* key, const char* value) {
             static_cast<Plugin*>(user)->OnSetting(key, value);
         };
+        cb.invoke = [](void* user, const char* key, const char* value) {
+            static_cast<Plugin*>(user)->OnInvoke(key, value);
+        };
         cb.closed = [](void* user) { static_cast<Plugin*>(user)->OnClosed(); };
 
         lc_runner_callbacks rc{};
@@ -207,6 +215,7 @@ public:
     int Run() {
         m_worker = std::thread([this] { Work(); });
         SendSettings();
+        SendGameSettings();
         {
             // The first library has the setting's folders in it, so their games don't flicker
             // to not installed on every start
@@ -253,16 +262,14 @@ private:
         }
     }
 
-    // Its own settings (the game folders, and the rows marked runner) on shadPS4's page, and the
-    // rest as game settings, which the launcher also offers per game and sends to the games it
-    // starts
+    // Its own settings on shadPS4's page: the game folders, the trophy key, and the rows marked
+    // runner. Again whenever what it has installed changes.
     void SendSettings() {
         const auto rows = Settings::Rows();
 
-        // Kept alive until lc_settings and lc_game_settings have encoded them
+        // Kept alive until lc_settings has encoded them
         std::vector<std::vector<lc_option>> options(rows.size());
         std::vector<lc_setting> own;
-        std::vector<lc_setting> game;
 
         lc_path_pick pick{};
         pick.file = false;
@@ -283,7 +290,47 @@ private:
         dirs.group = GROUP;
         own.push_back(dirs);
 
+        // Its own words: what's in keys.json, which other shadPS4 front ends also set
+        const std::string key_hex = Keys::TrophyKeyHex();
+        lc_setting key{};
+        key.key = TROPHY_KEY;
+        key.section = SYSTEM_FILES;
+        key.label = "Trophy key";
+        key.help = "Your PS4's trophy key, 32 hex digits, which shadPS4 needs to read games' "
+                   "trophy lists. It's kept in shadPS4's keys.json.";
+        key.kind = LC_SETTING_TEXT;
+        key.placeholder = "32 hex digits";
+        // What the player types comes to OnInvoke; the row shows the key in keys.json
+        key.value = key_hex.c_str();
+        key.default_value = "";
+        key.install = true;
+        key.group = GROUP;
+
+        lc_path_pick folder_pick{};
+        folder_pick.file = false;
+        folder_pick.start = "~";
+
+        // The trophy key heads the system files, after the rest
+        std::vector<size_t> order;
         for (size_t i = 0; i < rows.size(); i++) {
+            if (rows[i].runner && rows[i].section != SYSTEM_FILES) {
+                order.push_back(i);
+            }
+        }
+        const size_t key_at = order.size();
+        for (size_t i = 0; i < rows.size(); i++) {
+            if (rows[i].runner && rows[i].section == SYSTEM_FILES) {
+                order.push_back(i);
+            }
+        }
+        for (size_t n = 0; n <= order.size(); n++) {
+            if (n == key_at) {
+                own.push_back(key);
+            }
+            if (n == order.size()) {
+                break;
+            }
+            const size_t i = order[n];
             const auto& row = rows[i];
             lc_setting s{};
             s.key = row.key.c_str();
@@ -294,20 +341,92 @@ private:
             s.default_value = row.default_value.c_str();
             s.group = GROUP;
             s.live = row.live;
-            if (row.kind == Settings::Row::Kind::Toggle) {
-                s.kind = LC_SETTING_TOGGLE;
-            } else {
-                s.kind = LC_SETTING_CHOICE;
-                for (const auto& [value, label] : row.options) {
-                    options[i].push_back({value.c_str(), label.c_str()});
-                }
-                s.options = options[i].data();
-                s.option_count = options[i].size();
-            }
-            (row.runner ? own : game).push_back(s);
+            Describe(row, s, options[i], folder_pick);
+            own.push_back(s);
         }
         lc_settings(m_session, PAGE, own.data(), own.size());
+    }
+
+    // The rest of shadPS4's settings, as game settings, which the launcher also offers per game
+    // and sends to the games it starts
+    void SendGameSettings() {
+        const auto rows = Settings::Rows();
+        std::vector<std::vector<lc_option>> options(rows.size());
+        std::vector<lc_setting> game;
+        const lc_path_pick no_pick{};
+        for (size_t i = 0; i < rows.size(); i++) {
+            const auto& row = rows[i];
+            if (row.runner) {
+                continue;
+            }
+            lc_setting s{};
+            s.key = row.key.c_str();
+            s.section = row.section.c_str();
+            s.label = row.label.c_str();
+            s.help = row.help.c_str();
+            s.value = row.default_value.c_str();
+            s.default_value = row.default_value.c_str();
+            s.group = GROUP;
+            s.live = row.live;
+            Describe(row, s, options[i], no_pick);
+            game.push_back(s);
+        }
         lc_game_settings(m_session, PAGE, game.data(), game.size());
+    }
+
+    // A row's kind, its options pointing into `options`
+    static void Describe(const Settings::Row& row, lc_setting& s, std::vector<lc_option>& options,
+                         const lc_path_pick& folder) {
+        switch (row.kind) {
+        case Settings::Row::Kind::Toggle:
+            s.kind = LC_SETTING_TOGGLE;
+            break;
+        case Settings::Row::Kind::Choice:
+            s.kind = LC_SETTING_CHOICE;
+            for (const auto& [value, label] : row.options) {
+                options.push_back({value.c_str(), label.c_str()});
+            }
+            s.options = options.data();
+            s.option_count = options.size();
+            break;
+        case Settings::Row::Kind::Folder:
+            s.kind = LC_SETTING_PATH;
+            s.path = &folder;
+            break;
+        }
+    }
+
+    // An install row's value: the trophy key the player typed, which the launcher doesn't keep
+    void OnInvoke(const char* key, const char* value) {
+        if (key == nullptr || std::string_view(key) != TROPHY_KEY || value == nullptr) {
+            return;
+        }
+        // On the worker, which also reads trophy files with the key
+        Post([this, text = std::string(value)] { SetTrophyKey(text); });
+    }
+
+    void SetTrophyKey(const std::string& text) {
+        auto parsed = Keys::ParseTrophyKey(text);
+        if (const auto* error = std::get_if<std::string>(&parsed)) {
+            lc_notify(m_session, "Trophy key not saved", error->c_str(), true);
+            return;
+        }
+        const auto& key = std::get<std::vector<u8>>(parsed);
+        if (const auto error = Keys::SaveTrophyKey(key); !error.empty()) {
+            lc_notify(m_session, "Trophy key not saved", error.c_str(), true);
+            return;
+        }
+        SendSettings(); // The row shows the key in keys.json
+        lc_notify(m_session, "Trophy key saved", "Your PS4 games' trophies will show now.", false);
+        // The trophy lists it couldn't read without it
+        std::map<uint64_t, std::pair<std::string, std::string>> waiting;
+        {
+            std::scoped_lock lock(m_mutex);
+            waiting.swap(m_need_key);
+        }
+        for (const auto& [game, request] : waiting) {
+            OnListAchievements(game, request.first, request.second);
+        }
     }
 
     std::vector<fs::path> Folders() {
@@ -457,9 +576,15 @@ private:
         if (root.empty()) {
             return;
         }
+        if (!Keys::HaveTrophyKey()) {
+            // Asked again once the player installs the key
+            std::scoped_lock lock(m_mutex);
+            m_need_key[game] = {title_id, game_dir};
+            return;
+        }
         const auto sets = Trophies::ExtractSets(root);
         if (sets.empty()) {
-            return; // No trophies, or no trophy key: nothing to say, and nothing to wipe
+            return; // No trophies: nothing to say, and nothing to wipe
         }
         const auto trophies =
             Trophies::List(sets, UserManagement.GetDefaultUser().user_id, Language());
@@ -496,6 +621,8 @@ private:
     bool m_started = false; // The first library is queued
     std::deque<std::function<void()>> m_jobs;
     std::set<uint64_t> m_achievements_queued; // Games with a trophy list job waiting
+    // Trophy lists asked for before there was a trophy key: game -> title id, folder
+    std::map<uint64_t, std::pair<std::string, std::string>> m_need_key;
     std::thread m_worker;
     std::vector<fs::path> m_setting_dirs;
     std::set<std::string> m_own_keys;            // The rows marked runner, besides game_dirs

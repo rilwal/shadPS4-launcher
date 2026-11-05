@@ -230,7 +230,9 @@ static void sent() {
 	check_sent(protocol::settings("Steam", &key, 1), {"secret", "set"});
 
 	// A folder list, against the example's second row
-	const lc_path_pick folders_pick {false, "Choose a folder of PS3 games", "~/Games", true};
+	const char* const    iso[] = {"iso"};
+	const lc_pick_filter discs {"Disc images", iso, 1, nullptr, 0};
+	const lc_path_pick   folders_pick {false, "Choose a folder of PS3 games", "~/Games", true, &discs, 1};
 	lc_setting         folders {};
 	folders.key           = "game_dirs";
 	folders.section       = "Library";
@@ -248,9 +250,46 @@ static void sent() {
 			compare("settings.items[1]", built->find("items")->items().front(), rows[1], {"start"});
 			const Value& row = built->find("items")->items().front();
 			CHECK(row.find("kind")->find("Path")->find("multiple")->as_bool());
+			const Value& filter = row.find("kind")->find("Path")->find("filters")->items().front();
+			CHECK(filter.text("label") == "Disc images" && filter.find("extensions")->items().front().as_string() == "iso");
 			CHECK(row.find("value")->find("List")->items().size() == 2);
 			CHECK(row.find("default")->find("List")->items().empty());
 		}
+	}
+
+	// An install pick: the row's value is the plugin's words, as text, even for several files
+	const char* const    raps[] = {"*.rap"};
+	const lc_pick_filter licences {"Licences", nullptr, 0, raps, 1};
+	const lc_path_pick   licence_pick {true, "Choose licence files", nullptr, true, &licences, 1};
+	lc_setting           licence {};
+	licence.key           = "licences";
+	licence.section       = "System";
+	licence.label         = "Licences";
+	licence.kind          = LC_SETTING_PATH;
+	licence.path          = &licence_pick;
+	licence.value         = "12 installed";
+	licence.default_value = "None";
+	licence.install       = true;
+	// And an install text row: its value is the plugin's too
+	lc_setting trophy {};
+	trophy.key              = "trophy_key";
+	trophy.section          = "System";
+	trophy.label            = "Trophy key";
+	trophy.kind             = LC_SETTING_TEXT;
+	trophy.value            = "00112233";
+	trophy.default_value    = "";
+	trophy.install          = true;
+	const lc_setting both[] = {licence, trophy};
+	const auto installs     = lc::json::parse(protocol::settings("", both, 2).json);
+	CHECK(installs.has_value());
+	if (installs) {
+		const Value& row = installs->find("items")->items().front();
+		CHECK(row.find("kind")->find("Path")->find("install")->as_bool());
+		CHECK(row.find("kind")->find("Path")->text("pick") == "file");
+		CHECK(row.find("value")->text("Text") == "12 installed" && row.find("default")->text("Text") == "None");
+		const Value& text = installs->find("items")->items().back();
+		CHECK(text.find("kind")->find("Text")->find("install")->as_bool());
+		CHECK(text.find("value")->text("Text") == "00112233");
 	}
 
 	// Game settings: rows as settings' are, with `live` and the group of the page they go on

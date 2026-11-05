@@ -10,7 +10,10 @@
  *
  * It's the same connection as a session underneath: the lc_session calls that make sense here
  * (lc_notify, lc_flush, lc_close) work on it too. lc_callbacks.setting brings the values of its
- * settings, and lc_callbacks.invoke a press of one of its LC_SETTING_ACTION rows (`value` NULL).
+ * settings, and lc_callbacks.invoke a press of one of its LC_SETTING_ACTION rows (`value` NULL) or
+ * the file the player picked for one of its `install` LC_SETTING_PATH rows (a firmware update to
+ * install, say). It can call lc_settings again at any time, to say what it has installed: values
+ * aren't sent again for rows it described before.
  * What the launcher asks of a runner arrives through lc_runner_callbacks, on the library's reader
  * thread, one at a time, so a slow one holds up the rest (settings too): hand long work, such as
  * a scan, to a thread of the runner's own. Answer from the callback or later from any thread, but

@@ -179,7 +179,7 @@ static Value setting_value(const lc_setting& s, const char* value) {
 	Value obj = Value::object();
 	if (s.kind == LC_SETTING_TOGGLE) {
 		obj.set("Bool", str(value) == "true");
-	} else if (s.kind == LC_SETTING_PATH && s.path != nullptr && s.path->multiple) {
+	} else if (s.kind == LC_SETTING_PATH && s.path != nullptr && s.path->multiple && !s.install) {
 		Value       items = Value::array();
 		std::string text  = str(value);
 		for (size_t start = 0; start < text.size();) {
@@ -217,6 +217,7 @@ static Value setting(const lc_setting& s) {
 		case LC_SETTING_TEXT: {
 			Value text = Value::object();
 			text.set("placeholder", str(s.placeholder));
+			text.set("install", s.install);
 			kind = Value::object();
 			kind.set("Text", std::move(text));
 			break;
@@ -227,13 +228,31 @@ static Value setting(const lc_setting& s) {
 			Value pick = Value::object();
 			pick.set("pick", p.file ? "file" : "folder");
 			pick.set("title", str(p.title));
-			pick.set("filters", Value::array());
+			Value filters = Value::array();
+			for (size_t i = 0; i < p.filter_count; i++) {
+				const lc_pick_filter& f = p.filters[i];
+				Value extensions = Value::array();
+				for (size_t j = 0; j < f.extension_count; j++) {
+					extensions.push(str(f.extensions[j]));
+				}
+				Value patterns = Value::array();
+				for (size_t j = 0; j < f.pattern_count; j++) {
+					patterns.push(str(f.patterns[j]));
+				}
+				Value filter = Value::object();
+				filter.set("label", str(f.label));
+				filter.set("extensions", std::move(extensions));
+				filter.set("patterns", std::move(patterns));
+				filters.push(std::move(filter));
+			}
+			pick.set("filters", std::move(filters));
 			pick.set("start", text_or_null(p.start));
 			pick.set("places", Value::array());
 			pick.set("decorate", false);
 			pick.set("space", false);
 			pick.set("writable", false);
 			pick.set("multiple", p.multiple);
+			pick.set("install", s.install);
 			kind = Value::object();
 			kind.set("Path", std::move(pick));
 			break;

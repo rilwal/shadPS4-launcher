@@ -29,7 +29,7 @@ extern "C" {
 #endif
 
 /* The plugin API version the library speaks. */
-#define LC_PLUGIN_API 6
+#define LC_PLUGIN_API 7
 
 typedef struct lc_session lc_session;
 
@@ -91,7 +91,9 @@ typedef struct lc_callbacks {
 	   the library also starts or stops the capture itself. */
 	void (*pause)(void *user, bool pause);
 	/* The player chose an overlay item: `value` is NULL for an action, "true"/"false" for a
-	   toggle, the option's value for a choice. */
+	   toggle, the option's value for a choice. To a plugin runner: the player pressed one of its
+	   LC_SETTING_ACTION rows (`value` NULL) or picked what one of its `install` LC_SETTING_PATH
+	   rows installs (`value` the path, or the paths one per line). */
 	void (*invoke)(void *user, const char *key, const char *value);
 	/* A live setting changed while the game runs, by the emulator's own key; `value` is NULL for
 	   the default. To a plugin runner: one of its own settings' values, sent for each stored value
@@ -206,12 +208,25 @@ typedef enum lc_setting_kind {
 	LC_SETTING_PATH = 4,
 } lc_setting_kind;
 
+/* Files a picker shows: by extension ("pup", no dot) or by name with * and ? ("PS3UPDAT.PUP",
+   "*.rap"), both ignoring case */
+typedef struct lc_pick_filter {
+	const char        *label;
+	const char *const *extensions;
+	size_t             extension_count;
+	const char *const *patterns;
+	size_t             pattern_count;
+} lc_pick_filter;
+
 /* What an LC_SETTING_PATH row's picker picks */
 typedef struct lc_path_pick {
 	bool        file;     /* A file, else a folder */
 	const char *title;    /* What the picker says it's for; NULL uses the label */
 	const char *start;    /* Where it opens if there's nothing better; "~" is home. May be NULL */
-	bool        multiple; /* A list of them, each choice adding to it */
+	bool        multiple; /* A list of them, each choice adding to it (a file pick: several files) */
+	/* Files shown; none shows every file in a file pick, and none in a folder pick */
+	const lc_pick_filter *filters;
+	size_t                filter_count;
 } lc_path_pick;
 
 typedef struct lc_option {
@@ -236,6 +251,12 @@ typedef struct lc_setting {
 	const char *group;
 	/* A runner's game settings (lc_game_settings): it can change while a game runs */
 	bool live;
+	/* An LC_SETTING_PATH or LC_SETTING_TEXT runner setting whose value is the plugin's to install (a
+	   firmware update, a key), and isn't kept: what the player picks or types arrives as
+	   lc_callbacks.invoke with the row's key (paths one per line for a `multiple` pick). The row's
+	   `value` is the plugin's own ("Firmware 4.92", the key it has), which it changes by calling
+	   lc_settings again. */
+	bool install;
 } lc_setting;
 
 /* Replaces the quick-menu items. */

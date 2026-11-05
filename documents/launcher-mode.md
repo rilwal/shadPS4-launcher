@@ -100,9 +100,17 @@ The options the launcher shows are in `src/launcher/settings.cpp`, on shadPS4's 
 Emulators. Each one's default is what shadPS4's own config says, so a player who never changes it
 in the launcher keeps shadPS4's value (and its per-game config).
 
-- The plugin's own settings: the game folders (the launcher's folder picker) and the console
-  language, which the plugin lists trophies in. It passes the language to the games it starts as
-  `--launcher-setting console-language=<n>`.
+- The plugin's own settings: the game folders (the launcher's folder picker), the console
+  language, which the plugin lists trophies in, and the system modules and system fonts folders
+  (shadPS4's `sys_modules` and `fonts`, defaulting to the ones in its user folder). It passes them
+  to the games it starts as `--launcher-setting <key>=<value>`.
+- The trophy key, under System files: an `install` text row (plugin API 7) taking the 128-bit key
+  as 32 hex digits (spaces are ignored). The launcher doesn't keep what's typed: it reaches the
+  plugin as `invoke`, which saves it to shadPS4's keys.json (`src/launcher/keys.cpp`), or says
+  why it isn't a key. The row's value is the key in keys.json, so a refused key is never kept.
+  Trophy lists the launcher asked for before there was a key are read again once it's saved.
+  KeyManager no longer saves keys.json when it's destroyed, so a game that was running before the
+  key was saved doesn't write its own (no) key back when it exits.
 - Everything else is a game setting (`game_settings`): toggles and choices, numbers being offered
   as steps. The launcher stores the player's values, globally and per game, and sends them with
   `configure` before boot. shadPS4 applies them after loading its config for the game, as
