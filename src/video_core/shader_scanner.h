@@ -23,6 +23,11 @@ class ShaderScanner {
 public:
     struct Shader {
         std::vector<u32> code;
+        /// The PSSL shader struct in front of the code, when the scan found one: the common
+        /// word, a word of embedded constant and scratch sizes, then the stage registers from
+        /// PgmLo, then input usage slots and (for pixel shaders) input semantics, up to the code.
+        /// Empty when the shader came without it.
+        std::vector<u8> header;
         u8 type;
         /// When the scan found it.
         u64 found_ns;
@@ -60,6 +65,8 @@ public:
         /// Median time from finding to first use, over the found ones.
         double median_lead_s{};
         u32 known{};
+        /// How many of the known ones came with their stage registers.
+        u32 with_registers{};
         /// Time and memory the scan spent reading.
         double scan_ms{};
         u64 scanned_mb{};
@@ -75,12 +82,16 @@ private:
     void ScanPending();
     /// Returns whether the shader was new.
     bool TryAdd(u64 info_addr);
+    /// Finds the shader struct that the code at `code_addr` belongs to: its PgmLo is the
+    /// distance from the struct to the code and its PgmHi is all ones.
+    std::vector<u8> ReadHeader(u64 code_addr) const;
     bool Read(u64 addr, void* dst, u64 size) const;
 
     int fd{-1};
     std::mutex mutex;
     tsl::robin_map<u64, Shader> shaders;
     std::vector<double> leads;
+    u32 with_registers{};
     u32 first_uses{};
     u32 found_ahead{};
     /// Scan totals, for the per-pass log.
@@ -88,6 +99,7 @@ private:
     /// Shaders found through file reads and loads, between passes.
     u32 pending_new{};
     u32 pass_index{};
+    u64 start_ns{};
     u64 pass_unreadable{};
     /// Ranges as of the last pass, sorted.
     std::vector<std::pair<VAddr, u64>> last_ranges;

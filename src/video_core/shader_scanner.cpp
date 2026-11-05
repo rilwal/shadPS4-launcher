@@ -5,6 +5,7 @@
 #include <array>
 #include <chrono>
 #include <condition_variable>
+#include <cstdlib>
 #include <cstring>
 
 #ifdef __linux__
@@ -36,6 +37,11 @@ constexpr u32 FullPassEvery = 8;
 constexpr u64 UnreadablePieceSize = 64_KB;
 /// Beyond this many queued signatures or ranges, the next pass picks the rest up.
 constexpr size_t MaxPending = 64 * 1024;
+/// How far before its code a shader struct may start: the struct, up to 255 usage slots and
+/// the input semantics.
+constexpr u64 MaxHeaderLength = 2_KB;
+/// The common word, then the embedded constant buffer and scratch sizes, then PgmLo.
+constexpr u64 HeaderPgmLoOffset = 8;
 
 /// What file reads and loads queued for the scanner. Static, so a game thread can queue while
 /// the scanner is being destroyed.
@@ -98,6 +104,7 @@ ShaderScanner::ShaderScanner() {
         return;
     }
     pending.enabled = true;
+    start_ns = PerfStats::NowNs();
     thread = std::jthread([this](std::stop_token stop) { Run(stop); });
 #else
     LOG_INFO(Render, "Shader scan is only available on Linux for now");
@@ -186,7 +193,13 @@ void ShaderScanner::ScanOnce() {
     auto ranges = Core::Memory::Instance()->MappedRanges();
     // Most passes only read ranges mapped since the last one; every few passes read everything,
     // for shaders loaded into memory that was already mapped.
-    const bool full = pass_index++ % FullPassEvery == 0;
+    // Measurement for now (SHADPS4_SCAN_EARLY_FULL_S): every pass reads everything for this many
+    // seconds after start, for shaders the game unpacks itself into memory mapped earlier.
+    static const u64 early_full_ns = [] {
+        const char* value = std::getenv("SHADPS4_SCAN_EARLY_FULL_S");
+        return value ? std::strtoull(value, nullptr, 10) * 1'000'000'000ULL : 0;
+    }();
+    const bool full = pass_index++ % FullPassEvery == 0 || start - start_ns < early_full_ns;
     std::vector<u8> chunk;
     u64 scanned = 0;
     pass_new = 0;
@@ -290,17 +303,39 @@ bool ShaderScanner::TryAdd(u64 info_addr) {
         }
         Shader shader{
             .code = {before.begin() + index, before.begin() + index + info.length / sizeof(u32)},
+            .header = ReadHeader(code_addr),
             .type = static_cast<u8>(info.type),
             .found_ns = PerfStats::NowNs(),
         };
+        const bool has_header = !shader.header.empty();
         std::scoped_lock lock{mutex};
         if (shaders.try_emplace(info.shader_hash, std::move(shader)).second) {
             ++pass_new;
+            with_registers += has_header ? 1 : 0;
             return true;
         }
         return false;
     }
     return false;
+}
+
+std::vector<u8> ShaderScanner::ReadHeader(u64 code_addr) const {
+    const u64 window = std::min(MaxHeaderLength, code_addr);
+    std::vector<u8> bytes(window);
+    if (window < HeaderPgmLoOffset + 8 || !Read(code_addr - window, bytes.data(), window)) {
+        return {};
+    }
+    for (u64 len = HeaderPgmLoOffset + 8; len <= window; ++len) {
+        const u8* start = bytes.data() + window - len;
+        u32 pgm_lo;
+        u32 pgm_hi;
+        std::memcpy(&pgm_lo, start + HeaderPgmLoOffset, sizeof(pgm_lo));
+        std::memcpy(&pgm_hi, start + HeaderPgmLoOffset + 4, sizeof(pgm_hi));
+        if (pgm_lo == len && pgm_hi == 0xFFFFFFFF) {
+            return {start, start + len};
+        }
+    }
+    return {};
 }
 
 std::optional<ShaderScanner::Shader> ShaderScanner::Find(u64 hash) {
@@ -331,6 +366,7 @@ ShaderScanner::Counts ShaderScanner::TakeCounts() {
         .first_uses = std::exchange(first_uses, 0),
         .found_ahead = std::exchange(found_ahead, 0),
         .known = static_cast<u32>(shaders.size()),
+        .with_registers = with_registers,
         .scan_ms = scan_ns.exchange(0, std::memory_order_relaxed) / 1e6,
         .scanned_mb = scan_bytes.exchange(0, std::memory_order_relaxed) >> 20,
     };

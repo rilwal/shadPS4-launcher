@@ -13,6 +13,7 @@
 #include "core/libraries/kernel/process.h"
 #include "core/memory.h"
 #include "video_core/renderer_vulkan/vk_rasterizer.h"
+#include "video_core/shader_scanner.h"
 
 namespace Core {
 
@@ -822,6 +823,8 @@ s32 MemoryManager::MapFile(void** out_addr, VAddr virtual_addr, u64 size, Memory
         // read-only mappings cannot be registered with userfaultfd in writeprotect mode
         rasterizer->RegisterMemory(mapped_addr, size);
     }
+    // A mapped file may hold shaders, which can be translated before their first draw.
+    VideoCore::ShaderScanner::NoteFilled(mapped_addr, size);
 
     *out_addr = std::bit_cast<void*>(mapped_addr);
     return ORBIS_OK;

@@ -14,6 +14,7 @@
 #include "core/libraries/libs.h"
 #include "core/libraries/zlib/zlib_error.h"
 #include "core/libraries/zlib/zlib_sce.h"
+#include "video_core/shader_scanner.h"
 
 namespace Libraries::Zlib {
 
@@ -58,6 +59,12 @@ void ZlibTaskThread(const std::stop_token& stop) {
         mz_ulong decompressed_length = task.dst_length;
         const auto ret = mz_uncompress(static_cast<u8*>(task.dst), &decompressed_length,
                                        static_cast<const u8*>(task.src), task.src_length);
+        // Games unpack shaders from their archives too; those can be translated before their
+        // first draw.
+        if (ret == Z_OK) {
+            VideoCore::ShaderScanner::NoteRead(task.dst, reinterpret_cast<VAddr>(task.dst),
+                                               decompressed_length);
+        }
 
         {
             // Lock, insert the new result, and push the finished request ID to the done queue.

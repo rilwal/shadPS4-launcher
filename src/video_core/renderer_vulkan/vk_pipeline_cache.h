@@ -268,10 +268,22 @@ private:
                     const Shader::ShaderParams& params, Shader::RuntimeInfo& runtime_info,
                     const Shader::Backend::Bindings& start, const Shader::StageSpecialization& spec,
                     u64 perm_hash);
+    /// The register state a shader's PSSL struct gives, for translating it before any draw
+    /// uses it: the stage registers as written there, with the rest of the draw guessed.
+    std::optional<Shader::RuntimeInfo> GuessRuntimeInfo(Shader::HwStage hw_stage,
+                                                        Shader::SwStage sw_stage,
+                                                        std::span<const u8> header) const;
     void LogGuessStats();
     bool guess_check{};
-    /// Each checked program's guessed SPIR-V hash, to see if a later variant matches it.
-    tsl::robin_map<u64, u64> guessed_hashes;
+    /// Each checked program's guessed SPIR-V hashes that missed the first variant, to see if a
+    /// later variant matches them. Zero once matched.
+    struct GuessedHashes {
+        /// With the draw's registers.
+        u64 resources{};
+        /// With the registers from the shader struct.
+        u64 full{};
+    };
+    tsl::robin_map<u64, GuessedHashes> guessed_hashes;
     struct GuessStats {
         u32 checked{};
         /// Same SPIR-V as the first variant.
@@ -287,6 +299,15 @@ private:
         u32 skipped{};
         /// How many programs each part of the specialisation was guessed wrong in.
         std::map<std::string, u32> wrong;
+        /// With the registers from the shader struct too.
+        u32 full_matched{};
+        u32 full_matched_later{};
+        /// Found without a usable shader struct.
+        u32 no_registers{};
+        /// Parts the struct's registers got wrong, beyond the resources.
+        std::map<std::string, u32> registers_wrong;
+        /// Raw structs logged so far.
+        u32 dumped{};
         bool changed{};
     } guess_stats;
     vk::UniquePipelineLayout pipeline_layout;

@@ -574,9 +574,9 @@ void PipelineCache::FlushCompileStats(u64 now_ns) {
         if (scan.first_uses != 0 || scan.scanned_mb != 0) {
             LOG_INFO(Render_Vulkan,
                      "Shader scan over {:.1f} s: {} of {} new programs found ahead (median "
-                     "{:.1f} s ahead), {} known; read {} MB in {:.0f} ms",
+                     "{:.1f} s ahead), {} known ({} with stage registers); read {} MB in {:.0f} ms",
                      seconds, scan.found_ahead, scan.first_uses, scan.median_lead_s, scan.known,
-                     scan.scanned_mb, scan.scan_ms);
+                     scan.with_registers, scan.scanned_mb, scan.scan_ms);
         }
     }
     LogGuessStats();
@@ -1253,12 +1253,25 @@ PipelineCache::Result PipelineCache::GetProgram(HwStage hw_stage, SwStage sw_sta
             CompileModule(new_info, runtime_info, params.code, perm_idx, binding);
 
         if (const auto guessed = guessed_hashes.find(params.hash);
-            guessed != guessed_hashes.end() && guessed->second == perm_hash) {
-            LOG_INFO(Render_Vulkan, "Guess for {} shader {:#x} matches variant {}", hw_stage,
-                     params.hash, perm_idx);
-            ++guess_stats.matched_later;
-            guess_stats.changed = true;
-            guessed_hashes.erase(guessed);
+            guessed != guessed_hashes.end()) {
+            auto& later = guessed.value();
+            if (later.resources == perm_hash || later.full == perm_hash) {
+                LOG_INFO(Render_Vulkan, "Guess for {} shader {:#x} matches variant {}{}", hw_stage,
+                         params.hash, perm_idx,
+                         later.full == perm_hash ? " with struct registers" : "");
+                guess_stats.changed = true;
+            }
+            if (later.resources == perm_hash) {
+                ++guess_stats.matched_later;
+                later.resources = 0;
+            }
+            if (later.full == perm_hash) {
+                ++guess_stats.full_matched_later;
+                later.full = 0;
+            }
+            if (later.resources == 0 && later.full == 0) {
+                guessed_hashes.erase(guessed);
+            }
         }
 
         RegisterShaderMeta(info, spec.fetch_shader_data, spec, perm_hash, perm_idx);
@@ -1275,6 +1288,98 @@ PipelineCache::Result PipelineCache::GetProgram(HwStage hw_stage, SwStage sw_sta
     return std::make_tuple(&program->info, module, perm_hash);
 }
 
+std::optional<Shader::RuntimeInfo> PipelineCache::GuessRuntimeInfo(
+    HwStage hw_stage, SwStage sw_stage, std::span<const u8> header) const {
+    // The stage registers start at PgmLo, two words into the shader struct.
+    constexpr size_t RegsOffset = 8;
+    const auto reg = [&](u32 i) {
+        u32 value;
+        std::memcpy(&value, header.data() + RegsOffset + i * sizeof(u32), sizeof(value));
+        return value;
+    };
+    const auto settings = [&]<typename T>(const T&) {
+        return std::bit_cast<T>(u64(reg(2)) | u64(reg(3)) << 32);
+    };
+    Shader::RuntimeInfo info{};
+    info.Initialize(hw_stage, sw_stage);
+    switch (hw_stage) {
+    case HwStage::Fragment: {
+        // PgmLo, PgmHi, Rsrc1, Rsrc2, ZFormat, ColFormat, InputEna, InputAddr, InControl,
+        // BarycCntl, DbShaderControl, CbShaderMask.
+        if (header.size() < RegsOffset + 12 * sizeof(u32)) {
+            return std::nullopt;
+        }
+        const auto pgm = settings(AmdGpu::ShaderProgram{}.settings);
+        info.props.fp_denorm_mode32 = pgm.fp_denorm_mode32;
+        info.props.fp_denorm_mode16_64 = pgm.fp_denorm_mode64;
+        info.props.fp_round_mode32 = pgm.fp_round_mode32;
+        info.props.fp_round_mode16_64 = pgm.fp_round_mode64;
+        info.props.num_allocated_vgprs = (pgm.num_vgprs + 1) * 4;
+        info.props.num_user_data = pgm.num_user_regs;
+        info.props.num_input_vgprs = pgm.vgpr_comp_cnt;
+        info.props.dx10_clamp = pgm.dx10_clamp;
+        auto& fs = info.hw.fs;
+        fs.z_export_format = static_cast<AmdGpu::ShaderExportFormat>(reg(4) & 0xf);
+        const AmdGpu::ColorExportFormat col_format{reg(5)};
+        fs.en_flags = std::bit_cast<AmdGpu::PsInput>(reg(6));
+        fs.addr_flags = std::bit_cast<AmdGpu::PsInput>(reg(7));
+        fs.num_inputs = reg(8) & 0x3f;
+        fs.front_face_all_bits = (reg(9) >> 24) & 1;
+        const auto db = std::bit_cast<AmdGpu::DepthShaderControl>(reg(10));
+        fs.depth_before_shader = db.depth_before_shader;
+        const u8 stencil_export =
+            db.stencil_op_val_export_enable | db.stencil_test_val_export_enable;
+        fs.mrtz_mask = db.z_export_enable | (stencil_export << 1) | (db.mask_export_enable << 2) |
+                       (db.coverage_to_mask_enable << 3);
+        // Unknown without the draw: the vertex stage's outputs (assumed in order and smooth),
+        // the render targets (assumed 8-bit unorm in RGBA order wherever the shader exports),
+        // multisampling and blending (assumed off).
+        for (u32 i = 0; i < fs.num_inputs; ++i) {
+            fs.inputs[i] = {.param_index = static_cast<u16>(i)};
+        }
+        for (u32 i = 0; i < Shader::MaxColorBuffers; ++i) {
+            const auto export_format = col_format.GetFormat(i);
+            if (export_format == AmdGpu::ShaderExportFormat::Zero) {
+                continue;
+            }
+            Shader::PsColorBuffer target{
+                .data_format = AmdGpu::DataFormat::Format8_8_8_8,
+                .num_format = AmdGpu::NumberFormat::Unorm,
+                .num_conversion = AmdGpu::NumberConversion::None,
+                .export_format = export_format,
+                .blend_self_scale = 0,
+            };
+            target.swizzle.array = {AmdGpu::CompSwizzle::Red, AmdGpu::CompSwizzle::Green,
+                                    AmdGpu::CompSwizzle::Blue, AmdGpu::CompSwizzle::Alpha};
+            fs.color_buffers[i] =
+                profile.fewer_shader_variants ? ShaderColorBuffer(target) : target;
+        }
+        return info;
+    }
+    case HwStage::Compute: {
+        // PgmLo, PgmHi, Rsrc1, Rsrc2, NumThreadX, NumThreadY, NumThreadZ.
+        if (header.size() < RegsOffset + 7 * sizeof(u32)) {
+            return std::nullopt;
+        }
+        const auto cs = settings(AmdGpu::ComputeProgram{}.settings);
+        info.props.num_user_data = cs.num_user_regs;
+        info.props.num_allocated_vgprs = cs.num_vgprs * 4;
+        info.props.fp_denorm_mode32 = cs.fp_denorm_mode32;
+        info.props.fp_denorm_mode16_64 = cs.fp_denorm_mode64;
+        info.props.fp_round_mode32 = cs.fp_round_mode32;
+        info.props.fp_round_mode16_64 = cs.fp_round_mode64;
+        info.props.dx10_clamp = cs.dx10_clamp;
+        info.hw.cs.workgroup_size = {reg(4) & 0xffff, reg(5) & 0xffff, reg(6) & 0xffff};
+        info.hw.cs.tgid_enable = {bool(cs.tgid_enable & 1), bool(cs.tgid_enable & 2),
+                                  bool(cs.tgid_enable & 4)};
+        info.hw.cs.shared_memory_size = cs.lds_dwords * 128 * 4;
+        return info;
+    }
+    default:
+        return std::nullopt;
+    }
+}
+
 void PipelineCache::CheckGuess(HwStage hw_stage, SwStage sw_stage,
                                const Shader::ShaderParams& params,
                                Shader::RuntimeInfo& runtime_info,
@@ -1286,43 +1391,108 @@ void PipelineCache::CheckGuess(HwStage hw_stage, SwStage sw_stage,
         return;
     }
     ++guess_stats.checked;
-    if (const auto found = shader_scanner->Find(params.hash);
-        found->code.size() != params.code.size() || !std::ranges::equal(found->code, params.code)) {
+    const auto found = shader_scanner->Find(params.hash);
+    if (found->code.size() != params.code.size() || !std::ranges::equal(found->code, params.code)) {
         LOG_INFO(Render_Vulkan, "Shader scan's copy of {} shader {:#x} differs: {} vs {} words",
                  hw_stage, params.hash, found->code.size(), params.code.size());
         ++guess_stats.code_differs;
     }
-    // The draw's register state is kept for now: this measures guessing resources only.
-    Shader::Info guess(hw_stage, sw_stage, params);
-    guess.guess_state = true;
-    auto binding = start;
-    const auto ir_program =
-        Shader::TranslateProgram(params.code, pools, guess, runtime_info, profile);
-    const auto spv = Shader::Backend::SPIRV::EmitSPIRV(profile, runtime_info, ir_program, binding);
-    const u64 hash = HashCombine(params.hash, XXH3_64bits(spv.data(), spv.size() * sizeof(u32)));
-    const auto guess_spec = Shader::StageSpecialization(guess, runtime_info, profile, start);
-    const auto wrong = SpecDifferences(spec, guess_spec);
+    // Translates with nothing known of the resources (no user data), and returns the SPIR-V's
+    // hash and how the specialisation differs from the draw's.
+    const auto translate = [&](Shader::RuntimeInfo& guess_runtime) {
+        Shader::Info guess(hw_stage, sw_stage, params);
+        guess.guess_state = true;
+        auto binding = start;
+        const auto ir_program =
+            Shader::TranslateProgram(params.code, pools, guess, guess_runtime, profile);
+        const auto spv =
+            Shader::Backend::SPIRV::EmitSPIRV(profile, guess_runtime, ir_program, binding);
+        const u64 hash =
+            HashCombine(params.hash, XXH3_64bits(spv.data(), spv.size() * sizeof(u32)));
+        const auto guess_spec = Shader::StageSpecialization(guess, guess_runtime, profile, start);
+        return std::make_pair(hash, SpecDifferences(spec, guess_spec));
+    };
+    // Counted per kind, not per binding: "buf3.format" counts as "buf.format".
+    const auto count_kinds = [](const std::vector<std::string>& parts, auto& counts) {
+        for (const auto& part : parts) {
+            std::string kind;
+            std::ranges::copy_if(part, std::back_inserter(kind), [](char c) {
+                return !std::isdigit(static_cast<unsigned char>(c));
+            });
+            ++counts[kind];
+        }
+    };
+
+    // First with the draw's register state, so this part measures guessing resources only.
+    const auto [hash, wrong] = translate(runtime_info);
     if (wrong.empty()) {
         ++guess_stats.spec_matched;
     }
-    for (const auto& part : wrong) {
-        // Counted per kind, not per binding: "buf3.format" counts as "buf.format".
-        std::string kind;
-        std::ranges::copy_if(part, std::back_inserter(kind),
-                             [](char c) { return !std::isdigit(static_cast<unsigned char>(c)); });
-        ++guess_stats.wrong[kind];
-    }
+    count_kinds(wrong, guess_stats.wrong);
+    auto& guessed = guessed_hashes[params.hash];
     if (hash == perm_hash) {
         ++guess_stats.matched;
-        LOG_INFO(Render_Vulkan, "Guess for {} shader {:#x} matches{}", hw_stage, params.hash,
-                 wrong.empty()
-                     ? ""
-                     : fmt::format(" (specialisation differs in {})", fmt::join(wrong, ", ")));
     } else {
-        guessed_hashes[params.hash] = hash;
-        LOG_INFO(Render_Vulkan, "Guess for {} shader {:#x} differs in: {}", hw_stage, params.hash,
-                 wrong.empty() ? std::string{"nothing in the specialisation"}
-                               : fmt::format("{}", fmt::join(wrong, ", ")));
+        guessed.resources = hash;
+    }
+
+    // Then with the register state guessed from the shader struct as well: nothing from the
+    // draw, which is what a translation ahead of the first draw has.
+    std::optional<Shader::RuntimeInfo> header_runtime;
+    if (!found->header.empty()) {
+        header_runtime = GuessRuntimeInfo(hw_stage, sw_stage, found->header);
+    }
+    if (!header_runtime) {
+        ++guess_stats.no_registers;
+        if (guessed.resources == 0) {
+            guessed_hashes.erase(params.hash);
+        }
+        LOG_INFO(Render_Vulkan, "Guess for {} shader {:#x}: {} with draw registers{}", hw_stage,
+                 params.hash, hash == perm_hash ? "matches" : "differs",
+                 found->header.empty() ? ", no shader struct" : ", shader struct too short");
+        return;
+    }
+    const auto [full_hash, full_wrong] = translate(*header_runtime);
+    // Only the parts that come from registers, to see which of them the struct gets wrong.
+    std::vector<std::string> register_wrong;
+    std::ranges::copy_if(full_wrong, std::back_inserter(register_wrong), [&](const auto& part) {
+        return std::ranges::find(wrong, part) == wrong.end();
+    });
+    count_kinds(register_wrong, guess_stats.registers_wrong);
+    if (full_hash == perm_hash) {
+        ++guess_stats.full_matched;
+    } else {
+        guessed.full = full_hash;
+    }
+    if (guessed.resources == 0 && guessed.full == 0) {
+        guessed_hashes.erase(params.hash);
+    }
+    LOG_INFO(Render_Vulkan,
+             "Guess for {} shader {:#x}: {} with draw registers, {} with struct registers; "
+             "resources differ in: {}; registers differ in: {}",
+             hw_stage, params.hash, hash == perm_hash ? "matches" : "differs",
+             full_hash == perm_hash ? "matches" : "differs",
+             wrong.empty() ? std::string{"nothing"} : fmt::format("{}", fmt::join(wrong, ", ")),
+             register_wrong.empty() ? std::string{"nothing"}
+                                    : fmt::format("{}", fmt::join(register_wrong, ", ")));
+    // A few raw structs next to what the draw had, to work out the parts still guessed.
+    if (!register_wrong.empty() && guess_stats.dumped < 40) {
+        ++guess_stats.dumped;
+        std::string bytes;
+        for (const u8 b : found->header) {
+            bytes += fmt::format("{:02x}", b);
+        }
+        std::string inputs;
+        if (hw_stage == HwStage::Fragment) {
+            const auto& fs = runtime_info.hw.fs;
+            for (u32 i = 0; i < fs.num_inputs; ++i) {
+                const auto& in = fs.inputs[i];
+                inputs += fmt::format(" {}{}{}", in.param_index, in.is_flat ? "f" : "",
+                                      in.is_default ? fmt::format("d{}", in.default_value) : "");
+            }
+        }
+        LOG_INFO(Render_Vulkan, "Shader struct of {} shader {:#x} ({} bytes): {}; draw inputs:{}",
+                 hw_stage, params.hash, found->header.size(), bytes, inputs);
     }
 }
 
@@ -1331,17 +1501,22 @@ void PipelineCache::LogGuessStats() {
         return;
     }
     guess_stats.changed = false;
-    std::vector<std::string> wrong;
-    for (const auto& [kind, count] : guess_stats.wrong) {
-        wrong.push_back(fmt::format("{} {}", kind, count));
-    }
+    const auto list = [](const std::map<std::string, u32>& counts) {
+        std::vector<std::string> parts;
+        for (const auto& [kind, count] : counts) {
+            parts.push_back(fmt::format("{} {}", kind, count));
+        }
+        return parts.empty() ? std::string{"none"} : fmt::format("{}", fmt::join(parts, ", "));
+    };
     LOG_INFO(Render_Vulkan,
-             "Guessed translation so far: {} programs checked, {} same SPIR-V, {} same "
-             "specialisation, {} matched a later variant, {} skipped, {} scan copies differed; "
-             "wrong: {}",
-             guess_stats.checked, guess_stats.matched, guess_stats.spec_matched,
-             guess_stats.matched_later, guess_stats.skipped, guess_stats.code_differs,
-             wrong.empty() ? std::string{"none"} : fmt::format("{}", fmt::join(wrong, ", ")));
+             "Guessed translation so far: {} programs checked, {} skipped, {} scan copies "
+             "differed. With draw registers: {} same SPIR-V, {} same specialisation, {} matched "
+             "a later variant; wrong: {}. With struct registers: {} same SPIR-V, {} matched a "
+             "later variant, {} had no struct; registers wrong: {}",
+             guess_stats.checked, guess_stats.skipped, guess_stats.code_differs,
+             guess_stats.matched, guess_stats.spec_matched, guess_stats.matched_later,
+             list(guess_stats.wrong), guess_stats.full_matched, guess_stats.full_matched_later,
+             guess_stats.no_registers, list(guess_stats.registers_wrong));
 }
 
 std::optional<vk::ShaderModule> PipelineCache::ReplaceShader(vk::ShaderModule module,
