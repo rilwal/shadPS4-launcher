@@ -342,6 +342,7 @@ void TrophiesOpened(const std::map<s32, std::string>& sets, s32 user_id) {
         a.hidden = t.hidden;
         a.dlc = t.dlc;
         a.grade = t.grade.empty() ? nullptr : t.grade.c_str();
+        a.set = t.set.c_str();
         a.unlocked = t.unlocked_at.has_value();
         a.unlocked_at = t.unlocked_at.value_or(0);
         list.push_back(a);
