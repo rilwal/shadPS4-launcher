@@ -282,6 +282,13 @@ private:
                                                         Shader::SwStage sw_stage,
                                                         std::span<const u8> header) const;
     void LogGuessStats();
+    /// Learns how pixel shader input semantics map to vertex outputs from a first use. GPU
+    /// thread; the guess reads semantic_base from any thread.
+    void LearnSemanticBase(u64 hash, const Shader::RuntimeInfo& runtime_info);
+    std::atomic<int> semantic_base{-1};
+    int semantic_base_candidate{-1};
+    u32 semantic_base_votes{};
+    u32 semantic_base_misses{};
     bool guess_check{};
     /// Each checked program's guessed SPIR-V hashes that missed the first variant, to see if a
     /// later variant matches them. Zero once matched.

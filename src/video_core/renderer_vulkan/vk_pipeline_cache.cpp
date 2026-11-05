@@ -1240,6 +1240,9 @@ PipelineCache::Result PipelineCache::GetProgram(HwStage hw_stage, SwStage sw_sta
         if (precompile.active) {
             NotePrecompileType(params.hash, hw_stage);
         }
+        if (shader_scanner && hw_stage == HwStage::Fragment) {
+            LearnSemanticBase(params.hash, runtime_info);
+        }
         it_pgm.value() = std::make_unique<Program>(hw_stage, sw_stage, params);
         auto& program = it_pgm.value();
         auto start = binding;
@@ -1577,6 +1580,62 @@ void PipelineCache::NotePreparedUse(Program& program, u64 hash, bool served,
     program.prepared_spv = {};
 }
 
+/// A pixel shader's input semantics from its shader struct: after the stage registers, a count
+/// byte (padded to a word), the input usage slots, then a u16 per input (semantic in the low
+/// byte, flat shading in bit 10).
+static std::optional<std::vector<u16>> PsInputSemantics(std::span<const u8> header) {
+    constexpr size_t CountOffset = 8 + 12 * sizeof(u32);
+    if (header.size() < CountOffset + 4) {
+        return std::nullopt;
+    }
+    u32 common;
+    std::memcpy(&common, header.data(), sizeof(common));
+    const u32 num_usage_slots = common >> 24;
+    const u32 count = header[CountOffset];
+    const size_t start = CountOffset + 4 + num_usage_slots * 4;
+    if (start + count * sizeof(u16) > header.size()) {
+        return std::nullopt;
+    }
+    std::vector<u16> semantics(count);
+    std::memcpy(semantics.data(), header.data() + start, count * sizeof(u16));
+    return semantics;
+}
+
+void PipelineCache::LearnSemanticBase(u64 hash, const Shader::RuntimeInfo& runtime_info) {
+    const auto found = shader_scanner->Find(hash);
+    if (!found || found->header.empty()) {
+        return;
+    }
+    const auto semantics = PsInputSemantics(found->header);
+    const auto& fs = runtime_info.hw.fs;
+    if (!semantics || semantics->size() != fs.num_inputs || fs.num_inputs == 0) {
+        return;
+    }
+    // The vertex stage's outputs seem to be ordered by semantic, so an input's parameter is
+    // its semantic less the first one the game exports. Learned from what draws use.
+    for (u32 i = 0; i < fs.num_inputs; ++i) {
+        if (fs.inputs[i].is_default) {
+            continue;
+        }
+        const int base = int((*semantics)[i] & 0xff) - int(fs.inputs[i].param_index);
+        if (const int known = semantic_base.load(std::memory_order_relaxed); known >= 0) {
+            if (base != known) {
+                ++semantic_base_misses;
+            }
+            continue;
+        }
+        if (base == semantic_base_candidate) {
+            if (++semantic_base_votes == 3) {
+                semantic_base.store(base, std::memory_order_relaxed);
+                LOG_INFO(Render_Vulkan, "Pixel shader inputs are their semantic less {}", base);
+            }
+        } else {
+            semantic_base_candidate = base;
+            semantic_base_votes = 1;
+        }
+    }
+}
+
 std::optional<Shader::RuntimeInfo> PipelineCache::GuessRuntimeInfo(
     HwStage hw_stage, SwStage sw_stage, std::span<const u8> header) const {
     // The stage registers start at PgmLo, two words into the shader struct.
@@ -1620,11 +1679,19 @@ std::optional<Shader::RuntimeInfo> PipelineCache::GuessRuntimeInfo(
             db.stencil_op_val_export_enable | db.stencil_test_val_export_enable;
         fs.mrtz_mask = db.z_export_enable | (stencil_export << 1) | (db.mask_export_enable << 2) |
                        (db.coverage_to_mask_enable << 3);
-        // Unknown without the draw: the vertex stage's outputs (assumed in order and smooth),
-        // the render targets (assumed 8-bit unorm in RGBA order wherever the shader exports),
-        // multisampling and blending (assumed off).
+        // Unknown without the draw: which vertex outputs the inputs read (from the semantics,
+        // once draws have shown how they map), the render targets (assumed 8-bit unorm wherever
+        // the shader exports), multisampling and blending (assumed off).
+        const auto semantics = PsInputSemantics(header);
+        const int base = semantic_base.load(std::memory_order_relaxed);
         for (u32 i = 0; i < fs.num_inputs; ++i) {
             fs.inputs[i] = {.param_index = static_cast<u16>(i)};
+            if (semantics && semantics->size() == fs.num_inputs && base >= 0 &&
+                int((*semantics)[i] & 0xff) >= base) {
+                const u16 semantic = (*semantics)[i];
+                fs.inputs[i].param_index = static_cast<u16>((semantic & 0xff) - base);
+                fs.inputs[i].is_flat = (semantic >> 10) & 1;
+            }
         }
         for (u32 i = 0; i < Shader::MaxColorBuffers; ++i) {
             const auto export_format = col_format.GetFormat(i);
@@ -1831,6 +1898,8 @@ void PipelineCache::LogGuessStats() {
              guess_stats.matched, guess_stats.spec_matched, guess_stats.matched_later,
              list(guess_stats.wrong), guess_stats.full_matched, guess_stats.full_matched_later,
              guess_stats.no_registers, list(guess_stats.registers_wrong));
+    LOG_INFO(Render_Vulkan, "Pixel shader input semantics: base {}, {} inputs off it",
+             semantic_base.load(std::memory_order_relaxed), semantic_base_misses);
 }
 
 std::optional<vk::ShaderModule> PipelineCache::ReplaceShader(vk::ShaderModule module,
