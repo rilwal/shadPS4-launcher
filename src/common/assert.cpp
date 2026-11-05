@@ -3,6 +3,7 @@
 
 #include "common/arch.h"
 #include "common/assert.h"
+#include "common/soft_assert.h"
 #include "core/signals.h"
 #include "emulator.h"
 #include "launcher/session.h"
@@ -15,7 +16,30 @@
 #error "Missing Crash() implementation for target CPU architecture."
 #endif
 
+namespace Common {
+
+namespace {
+thread_local int soft_asserts = 0;
+}
+
+SoftAsserts::SoftAsserts() {
+    ++soft_asserts;
+}
+
+SoftAsserts::~SoftAsserts() {
+    --soft_asserts;
+}
+
+bool SoftAsserts::Active() {
+    return soft_asserts > 0;
+}
+
+} // namespace Common
+
 void assert_fail_impl() {
+    if (Common::SoftAsserts::Active()) {
+        throw Common::SoftAssertFailure{};
+    }
     Launcher::Session::Failed("shadPS4 stopped on an internal error; its log has the details.",
                               "fatal_error");
     Core::Signals::Instance()->RemoveHandlers();
@@ -30,6 +54,9 @@ void assert_fail_impl() {
 
 void assert_fail_debug_msg(const char* msg) {
     LOG_CRITICAL(Debug, "Assertion Failed!\n{}", msg);
+    if (Common::SoftAsserts::Active()) {
+        throw Common::SoftAssertFailure{};
+    }
     Launcher::Session::Failed(msg, "fatal_error");
     assert_fail_impl();
 }

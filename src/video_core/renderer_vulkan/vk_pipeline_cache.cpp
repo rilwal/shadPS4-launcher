@@ -12,6 +12,7 @@
 #include "common/io_file.h"
 #include "common/path_util.h"
 #include "common/scope_exit.h"
+#include "common/soft_assert.h"
 #include "common/thread.h"
 #include "core/debug_state.h"
 #include "core/emulator_settings.h"
@@ -374,8 +375,10 @@ const Shader::RuntimeInfo& PipelineCache::BuildRuntimeInfo(HwStage stage, SwStag
                 target.export_format = regs.color_export_format.GetFormat(i);
                 // An exported location the draw leaves unbound takes the same stand-in as a
                 // guess: its exports are dropped either way.
-                if (target.data_format == AmdGpu::DataFormat::FormatInvalid &&
-                    target.export_format != AmdGpu::ShaderExportFormat::Zero) {
+                if (target.export_format == AmdGpu::ShaderExportFormat::Zero) {
+                    // Not exported to, so what's bound there doesn't reach the code.
+                    target = {};
+                } else if (target.data_format == AmdGpu::DataFormat::FormatInvalid) {
                     target = UnboundTarget(target.export_format);
                 }
             }
@@ -561,6 +564,26 @@ PipelineCache::PipelineCache(const Instance& instance_, Scheduler& scheduler_,
     }
 }
 
+/// Stands for a stage that's never compiled early, such as a domain shader on the vertex stage.
+constexpr auto UnguessedStage = static_cast<HwStage>(0xfe);
+
+/// The stage a first use counts as for early compiling: its hardware stage, unless the hardware
+/// stage runs something other than its usual kind of shader.
+static HwStage PrecompileStageOf(HwStage hw_stage, SwStage sw_stage) {
+    const bool usual = (hw_stage == HwStage::Vertex && sw_stage == SwStage::Vertex) ||
+                       (hw_stage == HwStage::Fragment && sw_stage == SwStage::Fragment) ||
+                       (hw_stage == HwStage::Compute && sw_stage == SwStage::Compute);
+    return usual ? hw_stage : UnguessedStage;
+}
+
+/// Whether a translation from a guessed stage came out as something that stage can be. A
+/// guess of the wrong stage mustn't reach the backend's checks, which end the emulator: shared
+/// memory on a graphics stage means the shader is really a hull, local or export shader.
+static bool GuessTranslated(const Shader::Info& info, HwStage hw_stage) {
+    return !info.translation_failed &&
+           (hw_stage == HwStage::Compute || static_cast<u32>(info.shared_types) == 0);
+}
+
 /// The stages whose register state a shader's struct gives.
 static bool PrecompilesStage(HwStage stage) {
     return stage == HwStage::Fragment || stage == HwStage::Compute || stage == HwStage::Vertex;
@@ -630,12 +653,23 @@ void PipelineCache::RunTranslateBench(u32 rounds) {
             Shader::Backend::Bindings binding{};
             const auto before = Shader::ThreadTranslateTimes();
             const u64 start = VideoCore::PerfStats::NowNs();
-            const auto ir_program =
-                Shader::TranslateProgram(found->code, bench_pools, info, *runtime_info, profile);
-            const u64 emit_start = VideoCore::PerfStats::NowNs();
-            const auto spv =
-                Shader::Backend::SPIRV::EmitSPIRV(profile, *runtime_info, ir_program, binding);
-            const u64 end = VideoCore::PerfStats::NowNs();
+            u64 emit_start = 0;
+            u64 end = 0;
+            try {
+                const Common::SoftAsserts soft_asserts;
+                const auto ir_program = Shader::TranslateProgram(found->code, bench_pools, info,
+                                                                 *runtime_info, profile);
+                if (!GuessTranslated(info, hw_stage)) {
+                    throw Common::SoftAssertFailure{};
+                }
+                emit_start = VideoCore::PerfStats::NowNs();
+                const auto spv =
+                    Shader::Backend::SPIRV::EmitSPIRV(profile, *runtime_info, ir_program, binding);
+                end = VideoCore::PerfStats::NowNs();
+            } catch (const Common::SoftAssertFailure&) {
+                unguessable += round == 0 ? 1 : 0;
+                continue;
+            }
             const auto& after = Shader::ThreadTranslateTimes();
             for (size_t i = 0; i < phases.ns.size(); ++i) {
                 phases.ns[i] += after.ns[i] - before.ns[i];
@@ -796,13 +830,15 @@ void PipelineCache::FlushCompileStats(u64 now_ns) {
             LOG_INFO(Render_Vulkan,
                      "Compiled early over {:.1f} s: {} shaders ({} shader objects, {} compute "
                      "pipelines) in {:.0f} ms of worker time; first uses: {} served, {} needed "
-                     "another variant; {} came too late; {} queued, {} waiting for their type",
+                     "another variant; {} came too late; {} queued, {} waiting for their type; "
+                     "{} dropped as the wrong stage",
                      seconds, precompile.translated, precompile.shader_objects,
                      precompile.compute_pipelines, precompile.worker_ns / 1e6, precompile.served,
                      precompile.missed, precompile.duplicate, precompile.queue.size(),
-                     precompile.untyped.size());
+                     precompile.untyped.size(), precompile.rejected);
             precompile.translated = precompile.shader_objects = precompile.compute_pipelines = 0;
             precompile.served = precompile.missed = precompile.duplicate = 0;
+            precompile.rejected = 0;
             precompile.worker_ns = 0;
         }
     }
@@ -1437,11 +1473,14 @@ PipelineCache::Result PipelineCache::GetProgram(HwStage hw_stage, SwStage sw_sta
     }
     auto [it_pgm, new_program] = program_cache.try_emplace(params.hash);
     if (new_program) {
+        // A domain shader runs on the hardware vertex stage but isn't a vertex shader: it's
+        // noted as a stage that isn't compiled early.
+        const auto noted_stage = PrecompileStageOf(hw_stage, sw_stage);
         if (shader_scanner) {
-            shader_scanner->NoteFirstUse(params.hash, static_cast<u8>(hw_stage));
+            shader_scanner->NoteFirstUse(params.hash, static_cast<u8>(noted_stage));
         }
         if (precompile.active) {
-            NotePrecompileType(params.hash, hw_stage);
+            NotePrecompileType(params.hash, noted_stage);
         }
         if (shader_scanner && hw_stage == HwStage::Fragment) {
             LearnSemanticBase(params.hash, runtime_info);
@@ -1660,9 +1699,25 @@ void PipelineCache::PrecompileOne(u64 hash, HwStage hw_stage) {
     info.guessed_fetch = fetch ? &*fetch : nullptr;
     thread_local Shader::Pools worker_pools;
     Shader::Backend::Bindings binding{};
-    const auto ir_program =
-        Shader::TranslateProgram(found->code, worker_pools, info, *runtime_info, profile);
-    auto spv = Shader::Backend::SPIRV::EmitSPIRV(profile, *runtime_info, ir_program, binding);
+    // The struct, the stage and even the code are guesses (the scan may catch bytes that aren't
+    // a shader, or one half written), so a failed check in translation drops this shader
+    // instead of stopping the emulator.
+    std::vector<u32> spv;
+    try {
+        const Common::SoftAsserts soft_asserts;
+        const auto ir_program =
+            Shader::TranslateProgram(found->code, worker_pools, info, *runtime_info, profile);
+        if (!GuessTranslated(info, hw_stage)) {
+            throw Common::SoftAssertFailure{};
+        }
+        spv = Shader::Backend::SPIRV::EmitSPIRV(profile, *runtime_info, ir_program, binding);
+    } catch (const Common::SoftAssertFailure&) {
+        LOG_INFO(Render_Vulkan, "Not compiling {} shader {:#x} early: it doesn't translate as one",
+                 hw_stage, hash);
+        std::scoped_lock lock{precompile.mutex};
+        ++precompile.rejected;
+        return;
+    }
     auto spec = Shader::StageSpecialization(info, *runtime_info, profile, {});
     info.guess_state = false;
     info.guessed_fetch = nullptr;
@@ -1787,7 +1842,9 @@ void PipelineCache::NotePreparedUse(Program& program, u64 hash, bool served,
                                     const Shader::StageSpecialization& spec, u64 perm_hash) {
     program.prepared = false;
     if (shader_scanner) {
-        shader_scanner->NoteFirstUse(hash, static_cast<u8>(program.info.hw_stage));
+        shader_scanner->NoteFirstUse(
+            hash, static_cast<u8>(PrecompileStageOf(spec.runtime_info.hw_stage,
+                                                    spec.runtime_info.sw_stage)));
     }
     if (served) {
         ++precompile.served;
@@ -1984,6 +2041,10 @@ std::optional<Shader::RuntimeInfo> PipelineCache::GuessRuntimeInfo(
         for (u32 i = 0; i < Shader::MaxColorBuffers; ++i) {
             const auto export_format = col_format.GetFormat(i);
             if (export_format == AmdGpu::ShaderExportFormat::Zero) {
+                // Normalised like a draw's, whose unexported targets are left out the same way.
+                fs.color_buffers[i] = profile.fewer_shader_variants
+                                          ? ShaderColorBuffer(Shader::PsColorBuffer{})
+                                          : Shader::PsColorBuffer{};
                 continue;
             }
             const auto target = UnboundTarget(export_format);

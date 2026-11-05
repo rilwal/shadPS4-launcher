@@ -413,6 +413,8 @@ private:
         u32 served{};
         u32 missed{};
         u32 duplicate{};
+        /// Shaders whose guessed translation failed, so they wait for their draw.
+        u32 rejected{};
         bool active{};
         std::vector<std::jthread> threads;
     } precompile;
