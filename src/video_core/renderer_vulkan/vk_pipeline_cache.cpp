@@ -59,7 +59,22 @@ static std::vector<std::string> SpecDifferences(const Shader::StageSpecializatio
     };
     const auto& ra = a.runtime_info;
     const auto& rb = b.runtime_info;
-    check(ra.props == rb.props, "props");
+    // Each field with both values, since a value pair says where a guess goes wrong.
+    const auto prop = [&](auto pa, auto pb, const char* name) {
+        if (pa != pb) {
+            out.push_back(fmt::format("props.{} {}/{}", name, u32(pa), u32(pb)));
+        }
+    };
+    const auto& pa = ra.props;
+    const auto& pb = rb.props;
+    prop(pa.fp_denorm_mode32, pb.fp_denorm_mode32, "fp_denorm_mode32");
+    prop(pa.fp_denorm_mode16_64, pb.fp_denorm_mode16_64, "fp_denorm_mode16_64");
+    prop(pa.fp_round_mode32, pb.fp_round_mode32, "fp_round_mode32");
+    prop(pa.fp_round_mode16_64, pb.fp_round_mode16_64, "fp_round_mode16_64");
+    prop(pa.num_allocated_vgprs, pb.num_allocated_vgprs, "num_allocated_vgprs");
+    prop(pa.num_user_data, pb.num_user_data, "num_user_data");
+    prop(pa.num_input_vgprs, pb.num_input_vgprs, "num_input_vgprs");
+    prop(pa.dx10_clamp, pb.dx10_clamp, "dx10_clamp");
     if (ra.sw_stage == SwStage::Vertex) {
         const auto& va = ra.sw.vs;
         const auto& vb = rb.sw.vs;
@@ -431,6 +446,13 @@ const Shader::RuntimeInfo& PipelineCache::BuildRuntimeInfo(HwStage stage, SwStag
             if (info.props.num_input_vgprs < 2) {
                 info.sw.vs.step_rate_1 = 0;
             }
+            // The count also takes the fetch shader's instance inputs, set by the fetch shader
+            // generator at bind time and missing from the shader struct, and those reach the
+            // shader as vertex inputs. With every instance VGPR set the code is the same: a
+            // register the hardware leaves unset is one the shader writes before reading.
+            if (stage == HwStage::Vertex) {
+                info.props.num_input_vgprs = 3;
+            }
         }
         info.sw.vs.vertex_sgpr_offset = draw_indirect_params.vertex_sgpr_offset;
         info.sw.vs.instance_sgpr_offset = draw_indirect_params.instance_sgpr_offset;
@@ -715,8 +737,9 @@ void PipelineCache::RunTranslateBench(u32 rounds) {
              dwords != 0 ? total_ns / 1e3 / (dwords / 1e3) : 0.0, unguessable, stages, list);
     std::ranges::sort(timed, std::greater{}, &Timed::ns);
     for (size_t i = 0; i < std::min<size_t>(timed.size(), 10); ++i) {
-        LOG_INFO(Render_Vulkan, "Translation bench: slowest {}: {} shader {:#x}, {} dwords, {:.2f} ms",
-                 i + 1, timed[i].stage, timed[i].hash, timed[i].dwords, timed[i].ns / 1e6);
+        LOG_INFO(Render_Vulkan,
+                 "Translation bench: slowest {}: {} shader {:#x}, {} dwords, {:.2f} ms", i + 1,
+                 timed[i].stage, timed[i].hash, timed[i].dwords, timed[i].ns / 1e6);
     }
 }
 
@@ -755,7 +778,9 @@ void PipelineCache::FlushCompileStats(u64 now_ns) {
     const u64 bg_worst_latency_ns = bg.worst_latency_ns.exchange(0, std::memory_order_relaxed);
     if (frames.count != 0 || stats.graphics != 0 || stats.compute != 0 || bg_created != 0) {
         LOG_INFO(Render_Vulkan,
-                 "Frames over {:.1f} s: {} ({:.1f} FPS), {} over 33 ms, worst {:.1f} ms. "
+                 "Frames over {:.1f} s: {} ({:.1f} FPS), {} over 33 ms, worst {:.1f} ms, "
+                 "99th percentile {:.1f} ms, 99.9th {:.1f} ms; {} stutters ({} over 50 ms, {} "
+                 "over 100 ms) stalling {:.1f} ms, since boot {} stalling {:.1f} ms. "
                  "Compiled {} graphics + {} compute pipelines from {} shaders ({} permutations, "
                  "{} only for binding offsets): recompile "
                  "{:.1f} ms, driver {:.1f} ms, worst pipeline {:.1f} ms. "
@@ -764,7 +789,9 @@ void PipelineCache::FlushCompileStats(u64 now_ns) {
                  "{} draws waited for a new target ({} ran on the GPU thread), waited {:.1f} ms, "
                  "{} pending",
                  seconds, frames.count, frames.count / seconds, frames.hitches,
-                 frames.worst_ns / 1e6, stats.graphics, stats.compute, stats.shaders,
+                 frames.worst_ns / 1e6, frames.p99_ns / 1e6, frames.p999_ns / 1e6, frames.stutters,
+                 frames.over_50, frames.over_100, frames.stall_ns / 1e6, frames.total_stutters,
+                 frames.total_stall_ns / 1e6, stats.graphics, stats.compute, stats.shaders,
                  stats.permutations, stats.binding_permutations, stats.recompile_ns / 1e6,
                  stats.driver_ns / 1e6, stats.worst_ns / 1e6, AsyncModeName(GetAsyncMode()),
                  stats.background, bg_created, bg_driver_ns / 1e6, bg_worst_driver_ns / 1e6,
@@ -1843,8 +1870,8 @@ void PipelineCache::NotePreparedUse(Program& program, u64 hash, bool served,
     program.prepared = false;
     if (shader_scanner) {
         shader_scanner->NoteFirstUse(
-            hash, static_cast<u8>(PrecompileStageOf(spec.runtime_info.hw_stage,
-                                                    spec.runtime_info.sw_stage)));
+            hash, static_cast<u8>(
+                      PrecompileStageOf(spec.runtime_info.hw_stage, spec.runtime_info.sw_stage)));
     }
     if (served) {
         ++precompile.served;
@@ -2067,6 +2094,10 @@ std::optional<Shader::RuntimeInfo> PipelineCache::GuessRuntimeInfo(
         info.props.num_user_data = pgm.num_user_regs;
         info.props.num_input_vgprs = pgm.vgpr_comp_cnt;
         info.props.dx10_clamp = pgm.dx10_clamp;
+        if (profile.fewer_shader_variants && instance.IsVertexInputDynamicState()) {
+            // As BuildRuntimeInfo sets it.
+            info.props.num_input_vgprs = 3;
+        }
         // Unknown without the draw, assumed off: user clip planes, clipping disabled, a
         // [-w, w] depth range on drivers without depth clip control, instancing, indirect draws
         // and emulated rect and quad lists.
