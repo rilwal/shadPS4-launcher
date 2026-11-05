@@ -383,17 +383,19 @@ void PipelineCache::FlushCompileStats(u64 now_ns) {
     if (frames.count != 0 || stats.graphics != 0 || stats.compute != 0 || bg_created != 0) {
         LOG_INFO(Render_Vulkan,
                  "Frames over {:.1f} s: {} ({:.1f} FPS), {} over 33 ms, worst {:.1f} ms. "
-                 "Compiled {} graphics + {} compute pipelines from {} shaders: recompile "
+                 "Compiled {} graphics + {} compute pipelines from {} shaders ({} permutations, "
+                 "{} only for binding offsets): recompile "
                  "{:.1f} ms, driver {:.1f} ms, worst pipeline {:.1f} ms. "
                  "Async {}: {} sent to workers, {} created there (driver {:.1f} ms, worst "
                  "{:.1f} ms, ready at worst {:.1f} ms after the draw), {} draws skipped, "
                  "{} draws waited for a new target, waited {:.1f} ms, {} pending",
                  seconds, frames.count, frames.count / seconds, frames.hitches,
                  frames.worst_ns / 1e6, stats.graphics, stats.compute, stats.shaders,
-                 stats.recompile_ns / 1e6, stats.driver_ns / 1e6, stats.worst_ns / 1e6,
-                 AsyncModeName(GetAsyncMode()), stats.background, bg_created, bg_driver_ns / 1e6,
-                 bg_worst_driver_ns / 1e6, bg_worst_latency_ns / 1e6, stats.skipped_draws,
-                 stats.waited_draws, stats.waited_ns / 1e6, compiler->Pending());
+                 stats.permutations, stats.binding_permutations, stats.recompile_ns / 1e6,
+                 stats.driver_ns / 1e6, stats.worst_ns / 1e6, AsyncModeName(GetAsyncMode()),
+                 stats.background, bg_created, bg_driver_ns / 1e6, bg_worst_driver_ns / 1e6,
+                 bg_worst_latency_ns / 1e6, stats.skipped_draws, stats.waited_draws,
+                 stats.waited_ns / 1e6, compiler->Pending());
     }
     const u64 probes = bg.probes.exchange(0, std::memory_order_relaxed);
     const u64 probe_optimized_ns = bg.probe_optimized_ns.exchange(0, std::memory_order_relaxed);
@@ -913,6 +915,16 @@ PipelineCache::Result PipelineCache::GetProgram(HwStage hw_stage, SwStage sw_sta
 
     const auto it = std::ranges::find(program->modules, spec, &Program::Module::spec);
     if (it == program->modules.end()) {
+        ++compile_stats.permutations;
+        // Counts variants that only exist because an earlier stage moved the bindings.
+        const bool binding_only = std::ranges::any_of(program->modules, [&](const auto& m) {
+            auto moved = spec;
+            moved.start = m.spec.start;
+            return moved == m.spec;
+        });
+        if (binding_only) {
+            ++compile_stats.binding_permutations;
+        }
         auto new_info = Shader::Info(hw_stage, sw_stage, params);
         module = CompileModule(new_info, runtime_info, params.code, perm_idx, binding);
 

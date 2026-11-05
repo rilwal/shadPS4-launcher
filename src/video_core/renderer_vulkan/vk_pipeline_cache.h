@@ -175,6 +175,10 @@ private:
         u64 graphics{};
         u64 compute{};
         u64 shaders{};
+        /// Shaders compiled again as another variant of a program already seen.
+        u64 permutations{};
+        /// Of those, ones that only differ in where their bindings start.
+        u64 binding_permutations{};
         u64 recompile_ns{};
         /// Driver time on the GPU thread, so not counting background creations.
         u64 driver_ns{};
