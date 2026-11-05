@@ -205,8 +205,10 @@ std::map<s32, std::string> ExtractTrophies(std::string_view npbind_guest,
             continue;
         }
 
-        // The npbind entry that names this file is the set's index (its service label). Files
-        // usually match entries by position, but some games number them from 01.
+        // The npbind entry that names this file has the set's NP communication ID, and the file's
+        // number is the service label the game opens it with. Files usually match entries by
+        // position, but some games number them from 01: the Uncharted collection's first entry
+        // names trophy01.trp, which Drake's Fortune opens with service label 1.
         const auto found = std::find(trophy_numbers.begin(), trophy_numbers.end(), trophy_number);
         if (found == trophy_numbers.end()) {
             LOG_WARNING(Common_Filesystem, "Trophy file {} does not have a corresponding NPCommId",
@@ -216,9 +218,9 @@ std::map<s32, std::string> ExtractTrophies(std::string_view npbind_guest,
         const s32 trophy_index = static_cast<s32>(found - trophy_numbers.begin());
 
         const std::string np_comm_id = np_comm_ids[trophy_index];
-        trophy_index_map[trophy_index] = np_comm_id;
-        LOG_INFO(Loader, "Mapped trophy file {} to index {}, NPCommID {}", entry.name, trophy_index,
-                 np_comm_id);
+        trophy_index_map[trophy_number] = np_comm_id;
+        LOG_INFO(Loader, "Mapped trophy file {} to service label {}, NPCommID {}", entry.name,
+                 trophy_number, np_comm_id);
 
         // Extract the actual trophies if they're not extracted yet.
         const auto& trophy_output_dir =
