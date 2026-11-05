@@ -18,6 +18,7 @@
 #include "SDL3/SDL_events.h"
 #include "SDL3/SDL_timer.h"
 
+#include "common/ab_switch.h"
 #include "common/elf_info.h"
 #include "common/io_file.h"
 #include "common/path_util.h"
@@ -171,6 +172,7 @@ std::filesystem::path GetInputConfigFile(const std::string& game_id) {
             {"hotkey_screenshot_with_overlays", "lalt, f12"},
             {"hotkey_fullscreen", "f11"},
             {"hotkey_show_fps", "f10"},
+            {"hotkey_ab_switch", "f1"},
             {"hotkey_pause", "f9"},
             {"hotkey_reload_inputs", "f8"},
             {"hotkey_toggle_mouse_to_joystick", "f7"},
@@ -772,6 +774,11 @@ void ControllerOutput::FinalizeUpdate(u8 gamepad_index) {
             break;
         case HOTKEY_SIMPLE_FPS:
             PushSDLEvent(SDL_EVENT_TOGGLE_SIMPLE_FPS);
+            break;
+        case HOTKEY_AB_SWITCH:
+            if (new_button_state) {
+                Common::AbSwitch::Toggle();
+            }
             break;
         case HOTKEY_TOGGLE_MOUSE_TO_JOYSTICK:
             PushSDLEvent(SDL_EVENT_MOUSE_TO_JOYSTICK);

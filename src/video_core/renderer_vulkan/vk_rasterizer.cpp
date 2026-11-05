@@ -43,8 +43,14 @@ Rasterizer::Rasterizer(const Instance& instance_, Scheduler& scheduler_, Runtime
       liverpool{liverpool_}, memory{Core::Memory::Instance()},
       pipeline_cache{instance, scheduler, liverpool, buffer_cache.GetSparsePageShift()},
       host_markers_enabled{EmulatorSettings.IsVkHostMarkersEnabled()},
-      guest_markers_enabled{EmulatorSettings.IsVkGuestMarkersEnabled()},
-      fenced_readbacks{EmulatorSettings.GetReadbacksMode() == GpuReadbacksMode::Fenced} {
+      guest_markers_enabled{EmulatorSettings.IsVkGuestMarkersEnabled()} {
+    const u32 readbacks_mode = EmulatorSettings.GetReadbacksMode();
+    fenced_readbacks = readbacks_mode == GpuReadbacksMode::Fenced;
+    if (fenced_readbacks || readbacks_mode == GpuReadbacksMode::Precise) {
+        // Both protect GPU-written pages the same way, so they can be switched live.
+        readbacks_ab =
+            Common::AbSwitch::Register("Precise readbacks", "Fenced readbacks", fenced_readbacks);
+    }
     if (!EmulatorSettings.IsNullGPU()) {
         liverpool->BindRasterizer(this);
     }
@@ -400,6 +406,18 @@ void Rasterizer::Finish() {
 }
 
 void Rasterizer::OnSubmit() {
+    if (const u32 period_s = EmulatorSettings.GetAbSwitchSeconds();
+        period_s != 0 && Common::AbSwitch::IsRegistered()) {
+        const u64 now = std::chrono::duration_cast<std::chrono::nanoseconds>(
+                            std::chrono::steady_clock::now().time_since_epoch())
+                            .count();
+        if (last_ab_switch_ns == 0) {
+            last_ab_switch_ns = now;
+        } else if (now - last_ab_switch_ns >= u64{period_s} * 1'000'000'000ULL) {
+            last_ab_switch_ns = now;
+            Common::AbSwitch::Toggle();
+        }
+    }
     buffer_cache.TickFrame();
     texture_cache.ProcessDownloadImages();
     texture_cache.RunGarbageCollector();
@@ -411,14 +429,23 @@ void Rasterizer::OnFence() {
 }
 
 bool Rasterizer::DeferFenceSignal(Common::UniqueFunction<void>&& signal, bool throttle) {
-    if (!fenced_readbacks) {
+    const bool fenced = IsFencedReadbacks();
+    const bool pending = deferred_signals_in_flight.load(std::memory_order_acquire) != 0;
+    if (!fenced && !pending) {
         return false;
     }
     // Priority operations run in order once the GPU reaches their tick, so the image and
-    // buffer data queued here land in guest memory before the signal runs.
-    const bool images = texture_cache.ProcessDownloadImages(true);
-    const bool buffers = buffer_cache.LandGpuModifiedMemory();
-    if (!images && !buffers && deferred_signals_in_flight.load(std::memory_order_acquire) == 0) {
+    // buffer data queued here land in guest memory before the signal runs. Right after an
+    // A/B switch away from Fenced, signals still queue behind the pending ones to stay in order.
+    bool images = false;
+    bool buffers = false;
+    if (fenced) {
+        images = texture_cache.ProcessDownloadImages(true);
+        buffers = buffer_cache.LandGpuModifiedMemory();
+    } else {
+        OnFence();
+    }
+    if (!images && !buffers && !pending) {
         // Nothing for the guest to wait for, and no earlier signal to stay behind:
         // signal now, so the guest can run ahead as before.
         signal();

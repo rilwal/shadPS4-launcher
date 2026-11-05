@@ -7,6 +7,7 @@
 #include <magic_enum/magic_enum.hpp>
 #include <xxhash.h>
 
+#include "common/ab_switch.h"
 #include "common/alignment.h"
 #include "core/debug_state.h"
 #include "core/emulator_settings.h"
@@ -78,7 +79,9 @@ BufferCache::BufferCache(const Vulkan::Instance& instance_, Vulkan::Scheduler& s
       stream_buffer{instance, scheduler, MemoryType::Stream, STREAM_BUFFER_SIZE},
       gds_buffer{instance, 0, GDS_BUFFER_SIZE, MemoryType::Stream, "GDS Buffer"},
       memory_semaphore{instance} {
-    fenced_readbacks = EmulatorSettings.GetReadbacksMode() == GpuReadbacksMode::Fenced;
+    const u32 readbacks_mode = EmulatorSettings.GetReadbacksMode();
+    tracks_gpu_pages =
+        readbacks_mode == GpuReadbacksMode::Precise || readbacks_mode == GpuReadbacksMode::Fenced;
     const vk::BufferCreateInfo probe_ci = {
         .flags =
             vk::BufferCreateFlagBits::eSparseBinding | vk::BufferCreateFlagBits::eSparseResidency,
@@ -165,7 +168,7 @@ void BufferCache::ReadMemory(VAddr device_addr, u64 size, bool is_write, bool as
 }
 
 void BufferCache::DownloadMemory(const Buffer* arena, VAddr device_addr, u64 size, bool async) {
-    if (fenced_readbacks) {
+    if (!landings.empty()) {
         // Data already on its way back must land first, or it would overwrite what the CPU
         // writes next. Then pages whose landing is done can simply be unprotected.
         WaitForLandings(device_addr, size);
@@ -192,7 +195,7 @@ void BufferCache::DownloadMemory(const Buffer* arena, VAddr device_addr, u64 siz
         gpu_modified_ranges.Subtract(address, size);
     });
     if (total_size_bytes == 0) {
-        if (fenced_readbacks) {
+        if (tracks_gpu_pages) {
             // Everything here has landed; nothing is left to protect.
             memory_tracker->UnmarkRegionAsGpuModified(device_addr, size, false);
         }
@@ -354,26 +357,43 @@ void BufferCache::LogReadbackStats() {
                         std::chrono::steady_clock::now().time_since_epoch())
                         .count();
     if (readback_stats.last_log_ns == 0) {
-        readback_stats.last_log_ns = now;
+        readback_stats =
+            ReadbackStats{.last_log_ns = now, .ab_switches = Common::AbSwitch::Switches()};
         return;
     }
-    if (now - readback_stats.last_log_ns < IntervalNs) {
-        return;
+    // A window that spans an A/B switch would mix both variants: log what came before it.
+    if (now - readback_stats.last_log_ns >= IntervalNs ||
+        readback_stats.ab_switches != Common::AbSwitch::Switches()) {
+        FlushReadbackStats();
     }
+}
+
+void BufferCache::FlushReadbackStats() {
+    const u64 now = std::chrono::duration_cast<std::chrono::nanoseconds>(
+                        std::chrono::steady_clock::now().time_since_epoch())
+                        .count();
     auto& stats = readback_stats;
-    if (stats.sync_downloads != 0 || stats.landings != 0 || stats.deferred_fences != 0) {
-        const double seconds = double(now - stats.last_log_ns) / 1e9;
+    const double seconds = double(now - stats.last_log_ns) / 1e9;
+    if (seconds > 0.5 &&
+        (stats.sync_downloads != 0 || stats.landings != 0 || stats.deferred_fences != 0)) {
+        // While an A/B switch flips, the variant is the one before the switch.
+        const bool switched = stats.ab_switches != Common::AbSwitch::Switches();
+        const char* variant = Common::AbSwitch::Label();
+        if (variant && switched) {
+            variant = Common::AbSwitch::IsB() ? "A" : "B";
+        }
         // Milliseconds of each second the GPU thread spent waiting.
         LOG_INFO(Render,
-                 "Readbacks per second: {:.1f} stalling downloads ({:.1f} KB, {:.2f} ms stalled), "
-                 "{:.1f} fence landings ({:.1f} KB), fences {:.1f} deferred / {:.1f} immediate, "
-                 "{:.2f} ms throttled",
-                 stats.sync_downloads / seconds, stats.sync_download_bytes / 1024.0 / seconds,
-                 stats.stall_ns / 1e6 / seconds, stats.landings / seconds,
-                 stats.landing_bytes / 1024.0 / seconds, stats.deferred_fences / seconds,
-                 stats.immediate_fences / seconds, stats.throttle_ns / 1e6 / seconds);
+                 "Readbacks per second [{}] over {:.1f} s: {:.1f} stalling downloads ({:.1f} KB, "
+                 "{:.2f} ms stalled), {:.1f} fence landings ({:.1f} KB), fences {:.1f} deferred / "
+                 "{:.1f} immediate, {:.2f} ms throttled",
+                 variant ? variant : "-", seconds, stats.sync_downloads / seconds,
+                 stats.sync_download_bytes / 1024.0 / seconds, stats.stall_ns / 1e6 / seconds,
+                 stats.landings / seconds, stats.landing_bytes / 1024.0 / seconds,
+                 stats.deferred_fences / seconds, stats.immediate_fences / seconds,
+                 stats.throttle_ns / 1e6 / seconds);
     }
-    stats = ReadbackStats{.last_log_ns = now};
+    stats = ReadbackStats{.last_log_ns = now, .ab_switches = Common::AbSwitch::Switches()};
 }
 
 void BufferCache::WaitForLandings(VAddr device_addr, u64 size) {

@@ -437,6 +437,8 @@ struct GPUSettings {
     Setting<bool> userfaultfd{false};
     Setting<bool> inline_fetch_shader{false};
     Setting<bool> fast_shader_math{false};
+    /// Seconds between automatic A/B switches (0 = only on the hotkey).
+    Setting<u32> ab_switch_seconds{0};
 
     std::vector<OverrideItem> GetOverrideableFields() const {
         return std::vector<OverrideItem>{
@@ -462,6 +464,7 @@ struct GPUSettings {
             make_override<GPUSettings>("userfaultfd", &GPUSettings::userfaultfd),
             make_override<GPUSettings>("inline_fetch_shader", &GPUSettings::inline_fetch_shader),
             make_override<GPUSettings>("fast_shader_math", &GPUSettings::fast_shader_math),
+            make_override<GPUSettings>("ab_switch_seconds", &GPUSettings::ab_switch_seconds),
         };
     }
 };
@@ -471,7 +474,8 @@ NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE(GPUSettings, window_width, window_height, int
                                    direct_memory_access_enabled, dump_shaders, patch_shaders,
                                    vblank_frequency, full_screen, full_screen_mode, present_mode,
                                    hdr_allowed, fsr_enabled, rcas_enabled, rcas_attenuation,
-                                   userfaultfd, inline_fetch_shader, fast_shader_math)
+                                   userfaultfd, inline_fetch_shader, fast_shader_math,
+                                   ab_switch_seconds)
 
 // -------------------------------
 // Vulkan settings
@@ -773,6 +777,7 @@ public:
     SETTING_FORWARD_BOOL(m_gpu, RcasEnabled, rcas_enabled)
     SETTING_FORWARD(m_gpu, RcasAttenuation, rcas_attenuation)
     SETTING_FORWARD(m_gpu, ReadbacksMode, readbacks_mode)
+    SETTING_FORWARD(m_gpu, AbSwitchSeconds, ab_switch_seconds)
     SETTING_FORWARD_BOOL(m_gpu, ReadbackLinearImagesEnabled, readback_linear_images_enabled)
     SETTING_FORWARD_BOOL(m_gpu, DirectMemoryAccessEnabled, direct_memory_access_enabled)
     SETTING_FORWARD_BOOL_READONLY(m_gpu, PatchShaders, patch_shaders)

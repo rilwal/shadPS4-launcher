@@ -7,6 +7,7 @@
 #include <imgui.h>
 
 #include "SDL3/SDL_log.h"
+#include "common/ab_switch.h"
 #include "common/singleton.h"
 #include "common/types.h"
 #include "core/debug_state.h"
@@ -288,6 +289,9 @@ void L::DrawSimple() {
         PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 1.0f, 1.0f, 1.0f)); // White
     }
     Text("%d FPS (%.1f ms)", static_cast<int>(std::round(frameRate)), 1000.0f / frameRate);
+    if (const char* variant = Common::AbSwitch::Label()) {
+        Text("A/B: %s (%s)", variant, Common::AbSwitch::IsB() ? "B" : "A");
+    }
     PopStyleColor();
 }
 
