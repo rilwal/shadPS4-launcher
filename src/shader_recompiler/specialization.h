@@ -112,9 +112,11 @@ struct StageSpecialization {
                          });
         }
         u32 binding{};
+        // With the descriptor heap, shaders read buffer strides at run time.
+        const bool runtime_stride = profile_.uses_descriptor_heap;
         ForEachSharp(binding, buffers, info->buffers,
-                     [](auto& spec, const auto& desc, AmdGpu::Buffer sharp) {
-                         spec.stride = sharp.GetStride();
+                     [runtime_stride](auto& spec, const auto& desc, AmdGpu::Buffer sharp) {
+                         spec.stride = runtime_stride ? 0 : sharp.GetStride();
                          spec.is_formatted = desc.is_formatted;
                          spec.swizzle_enable = sharp.swizzle_enable;
                          if (spec.is_formatted) {

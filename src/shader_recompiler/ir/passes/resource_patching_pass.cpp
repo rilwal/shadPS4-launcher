@@ -547,7 +547,7 @@ void PatchGlobalDataShareAccess(IR::Inst& inst, Info& info, Descriptors& descrip
 }
 
 IR::U32 CalculateBufferAddress(IR::IREmitter& ir, const IR::Inst& inst, const Info& info,
-                               const AmdGpu::Buffer& buffer, u32 stride) {
+                               const AmdGpu::Buffer& buffer, u32 stride, bool runtime_stride) {
     const auto inst_info = inst.Flags<IR::BufferInstInfo>();
     const u32 inst_offset = inst_info.inst_offset.Value();
     const auto is_inst_typed = inst_info.inst_data_fmt != AmdGpu::DataFormat::FormatInvalid;
@@ -560,8 +560,9 @@ IR::U32 CalculateBufferAddress(IR::IREmitter& ir, const IR::Inst& inst, const In
 
     // If address calculation is of the form "index * const_stride + offset" with offset constant
     // and both const_stride and offset are divisible with the element size, apply shift directly.
-    if (inst_info.index_enable && !inst_info.voffset_enable && soffset.IsImmediate() &&
-        !buffer.swizzle_enable && !buffer.add_tid_enable && (stride & mask) == 0) {
+    if (!runtime_stride && inst_info.index_enable && !inst_info.voffset_enable &&
+        soffset.IsImmediate() && !buffer.swizzle_enable && !buffer.add_tid_enable &&
+        (stride & mask) == 0) {
         const u32 total_offset = soffset.U32() + inst_offset;
         if ((total_offset & mask) == 0) {
             // buffer_offset = index * (const_stride >> shift) + (offset >> shift)
@@ -590,7 +591,12 @@ IR::U32 CalculateBufferAddress(IR::IREmitter& ir, const IR::Inst& inst, const In
         const IR::U32 voffset = IR::GetBufferVOffsetArg(&inst);
         offset = ir.IAdd(offset, voffset);
     }
-    const IR::U32 const_stride = ir.Imm32(stride);
+    // With the descriptor heap the stride comes from the stage's table, so the shader doesn't
+    // depend on it. Without an index the stride isn't used.
+    const bool has_index = inst_info.index_enable || buffer.add_tid_enable;
+    const IR::U32 const_stride = !runtime_stride ? ir.Imm32(stride)
+                                 : has_index     ? ir.BufferStride(inst.Arg(0))
+                                                 : ir.Imm32(0U);
     IR::U32 buffer_offset;
     if (buffer.swizzle_enable) {
         const IR::U32 const_index_stride = ir.Imm32(buffer.GetIndexStride());
@@ -622,7 +628,7 @@ IR::U32 CalculateBufferAddress(IR::IREmitter& ir, const IR::Inst& inst, const In
     return buffer_offset;
 }
 
-void PatchBufferArgs(IR::Inst& inst, Info& info) {
+void PatchBufferArgs(IR::Inst& inst, Info& info, const Profile& profile) {
     const auto handle = inst.Arg(0);
     const auto buffer_res = info.buffers[handle.U32()];
     const auto buffer = buffer_res.GetSharp(info);
@@ -634,7 +640,8 @@ void PatchBufferArgs(IR::Inst& inst, Info& info) {
 
     IR::IREmitter ir{*inst.GetParent(), IR::Block::InstructionList::s_iterator_to(inst)};
     inst.SetArg(IR::LoadBufferArgs::Address,
-                CalculateBufferAddress(ir, inst, info, buffer, buffer.stride));
+                CalculateBufferAddress(ir, inst, info, buffer, buffer.stride,
+                                       profile.uses_descriptor_heap));
 }
 
 void PatchImageSampleArgs(IR::Inst& inst, Info& info, const ImageResource& image_res,
@@ -944,7 +951,7 @@ void ResourcePatchingPass(Shader::Info& info, const ResourceDiscoveryList& resou
     for (const auto& usage : resources) {
         IR::Inst& inst = *usage.user;
         if (IsBufferInstruction(inst)) {
-            PatchBufferArgs(inst, info);
+            PatchBufferArgs(inst, info, profile);
         } else if (IsImageInstruction(inst)) {
             PatchImageArgs(inst, info);
         } else if (IsDataRingInstruction(inst)) {

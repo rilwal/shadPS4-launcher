@@ -795,17 +795,24 @@ void EmitContext::DefinePushDataBlock() {
     Name(push_data_block, "push_data");
     interfaces.push_back(push_data_block);
 
-    if (profile.uses_descriptor_heap && profile.needs_buffer_offsets) {
+    if (profile.uses_descriptor_heap) {
         DefineStageTable();
     }
 }
 
 void EmitContext::DefineStageTable() {
     static_assert(StageTable::BufOffsetsSize == 4 * 16);
-    const Id table_type{Name(TypeStruct(U32[4], U32[4], U32[4], U32[4]), "StageTable")};
+    static_assert(StageTable::StridesOffset == StageTable::StridesMember * 16);
+    constexpr u32 num_strides = StageTable::StridesSize / 16;
+    std::array<Id, StageTable::StridesMember + num_strides> members;
+    members.fill(U32[4]);
+    const Id table_type{Name(TypeStruct(members), "StageTable")};
     Decorate(table_type, spv::Decoration::Block);
-    for (u32 i = 0; i < 4; ++i) {
-        MemberName(table_type, i, fmt::format("buf_offsets{}", i));
+    for (u32 i = 0; i < members.size(); ++i) {
+        MemberName(table_type, i,
+                   i < StageTable::StridesMember
+                       ? fmt::format("buf_offsets{}", i)
+                       : fmt::format("strides{}", i - StageTable::StridesMember));
         MemberDecorate(table_type, i, spv::Decoration::Offset, i * 16U);
     }
     stage_table_block = DefineVar(table_type, spv::StorageClass::Uniform);

@@ -52,7 +52,7 @@ ComputePipeline::ComputePipeline(const Instance& instance, Scheduler& scheduler,
     auto& heap_mappings = build->heap_mappings;
     vk::PipelineShaderStageCreateInfo stage_ci = shader_ci;
     if (uses_heap) {
-        heap_mappings.Build(*info, HeapGeometry::Of(instance), profile.needs_buffer_offsets);
+        heap_mappings.Build(*info, HeapGeometry::Of(instance));
         heap_mappings.info.pNext = stage_ci.pNext;
         stage_ci.pNext = &heap_mappings.info;
     } else {

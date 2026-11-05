@@ -331,7 +331,7 @@ GraphicsPipeline::GraphicsPipeline(
                 continue;
             }
             auto& mappings = b.heap_mappings[i];
-            mappings.Build(*stage_info, geometry, profile.needs_buffer_offsets);
+            mappings.Build(*stage_info, geometry);
             mappings.info.pNext = stage_ci.pNext;
             stage_ci.pNext = &mappings.info;
         }

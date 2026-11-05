@@ -1014,6 +1014,11 @@ void Rasterizer::BindBuffers(const Shader::Info& stage, Shader::Backend::Binding
                                 stage.pgm_hash);
                 }
                 push_data.AddOffset(binding.buffer, adjust);
+                if (heaps) {
+                    // Shaders read strides from the stage's table.
+                    heap_stages.back().strides[binding.buffer] =
+                        static_cast<u16>(vsharp.GetStride());
+                }
                 AddBufferInfo(buffer, offset_aligned, size + adjust);
                 bound_buffers.emplace_back(buffer, offset, size, src_access);
                 if (desc.is_written) {

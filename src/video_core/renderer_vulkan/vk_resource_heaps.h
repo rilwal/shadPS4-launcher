@@ -43,8 +43,9 @@ struct StageHeapMappings {
     std::vector<vk::DescriptorSetAndBindingMappingEXT> mappings;
     vk::ShaderDescriptorSetAndBindingMappingInfoEXT info{};
 
-    /// Fills the mappings for `stage` and points `info` at them, so this must not move after.
-    void Build(const Shader::Info& stage, const HeapGeometry& geometry, bool stage_table);
+    /// Fills the mappings for `stage`, its stage table included, and points `info` at them, so
+    /// this must not move after.
+    void Build(const Shader::Info& stage, const HeapGeometry& geometry);
 };
 
 /// The descriptors one stage of a draw writes, as the rasterizer gathered them.
@@ -56,6 +57,7 @@ struct HeapStageWrites {
     /// One more than the highest binding the stage uses.
     u32 num_bindings{};
     std::array<u8, Shader::StageTable::BufOffsetsSize> buf_offsets{};
+    std::array<u16, Shader::StageTable::StridesSize / sizeof(u16)> strides{};
 };
 
 /// What the rasterizer gathered for one draw or dispatch.

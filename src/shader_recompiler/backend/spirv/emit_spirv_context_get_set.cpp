@@ -64,6 +64,18 @@ Id EmitReadConst(EmitContext& ctx, IR::Inst* inst, Id addr, Id offset) {
     }
 }
 
+Id EmitBufferStride(EmitContext& ctx, u32 handle) {
+    // Strides are 16-bit, two to a word, after the buffer offsets in the stage's table.
+    const u32 binding = ctx.buffers[handle].binding;
+    const u32 word = binding / 2;
+    const Id pointer{ctx.OpAccessChain(
+        ctx.TypePointer(spv::StorageClass::Uniform, ctx.U32[1]), ctx.stage_table_block,
+        ctx.ConstU32(StageTable::StridesMember + word / 4), ctx.ConstU32(word % 4))};
+    const Id value{ctx.OpLoad(ctx.U32[1], pointer)};
+    return ctx.OpBitFieldUExtract(ctx.U32[1], value, ctx.ConstU32((binding % 2) * 16),
+                                  ctx.ConstU32(16U));
+}
+
 Id EmitReadConstBuffer(EmitContext& ctx, u32 handle, Id index) {
     const auto& buffer = ctx.buffers[handle];
     if (const Id offset = buffer.Offset(PointerSize::B32); Sirit::ValidId(offset)) {

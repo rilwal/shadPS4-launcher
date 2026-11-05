@@ -75,8 +75,7 @@ HeapGeometry HeapGeometry::Of(const Instance& instance) {
     };
 }
 
-void StageHeapMappings::Build(const Shader::Info& stage, const HeapGeometry& geometry,
-                              bool stage_table) {
+void StageHeapMappings::Build(const Shader::Info& stage, const HeapGeometry& geometry) {
     // Bindings are numbered per stage in this order, and each one's index sits in the table at
     // the same position as its binding number.
     mappings.clear();
@@ -98,17 +97,15 @@ void StageHeapMappings::Build(const Shader::Info& stage, const HeapGeometry& geo
             IndirectMapping(0, binding, logical_stage, binding, geometry.sampler_stride, false));
         ++binding;
     }
-    if (stage_table) {
-        vk::DescriptorSetAndBindingMappingEXT table{
-            .descriptorSet = Shader::StageTable::DescriptorSet,
-            .firstBinding = Shader::StageTable::Binding,
-            .bindingCount = 1,
-            .resourceMask = vk::SpirvResourceTypeFlagBitsEXT::eUniformBuffer,
-            .source = vk::DescriptorMappingSourceEXT::ePushAddress,
-        };
-        table.sourceData.pushAddressOffset = Shader::HeapPushData::StageTableOffset(logical_stage);
-        mappings.push_back(table);
-    }
+    vk::DescriptorSetAndBindingMappingEXT table{
+        .descriptorSet = Shader::StageTable::DescriptorSet,
+        .firstBinding = Shader::StageTable::Binding,
+        .bindingCount = 1,
+        .resourceMask = vk::SpirvResourceTypeFlagBitsEXT::eUniformBuffer,
+        .source = vk::DescriptorMappingSourceEXT::ePushAddress,
+    };
+    table.sourceData.pushAddressOffset = Shader::HeapPushData::StageTableOffset(logical_stage);
+    mappings.push_back(table);
     info = vk::ShaderDescriptorSetAndBindingMappingInfoEXT{
         .mappingCount = static_cast<u32>(mappings.size()),
         .pMappings = mappings.data(),
@@ -282,6 +279,9 @@ void ResourceHeaps::Bind(const HeapDraw& draw, const Shader::PushData& push_data
         const auto [table, table_offset] = table_buffer.Map(table_size, table_alignment);
         ASSERT_MSG(table, "Failed to map a stage table of {} bytes", table_size);
         std::memcpy(table, stage.buf_offsets.data(), stage.buf_offsets.size());
+        static_assert(sizeof(stage.strides) == Shader::StageTable::StridesSize);
+        std::memcpy(table + Shader::StageTable::StridesOffset, stage.strides.data(),
+                    sizeof(stage.strides));
         u32* indices = reinterpret_cast<u32*>(table + Shader::StageTable::IndicesOffset);
         resource_infos.resize(num_resources);
         resource_ranges.resize(num_resources);

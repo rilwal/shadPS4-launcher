@@ -250,12 +250,18 @@ struct StageTable {
     static constexpr u32 Binding = 0;
     /// Buffer offsets as bytes, read as four uvec4s.
     static constexpr u32 BufOffsetsSize = 64;
-    static constexpr u32 IndicesOffset = BufOffsetsSize;
+    /// Buffer strides as u16s, read as eight uvec4s after the offsets: shaders read strides
+    /// at run time, so one shader serves buffers of any stride.
+    static constexpr u32 StridesOffset = BufOffsetsSize;
+    static constexpr u32 StridesSize = 128;
+    static constexpr u32 StridesMember = 4;
+    static constexpr u32 IndicesOffset = StridesOffset + StridesSize;
     /// Room for every buffer, image binding and sampler a stage can have.
     static constexpr u32 MaxIndices = NUM_BUFFERS + NUM_IMAGES * 16 + NUM_SAMPLERS;
     static constexpr u32 MaxSize = IndicesOffset + MaxIndices * sizeof(u32);
 };
 static_assert(NUM_BUFFERS <= StageTable::BufOffsetsSize);
+static_assert(NUM_BUFFERS <= StageTable::StridesSize / sizeof(u16));
 
 /// Push data with VK_EXT_descriptor_heap: the push constants above, then each logical
 /// stage's table address.

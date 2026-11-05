@@ -432,6 +432,10 @@ U32 IREmitter::ReadConstBuffer(const Value& handle, const U32& index, BufferInst
     return Inst<U32>(Opcode::ReadConstBuffer, Flags{info}, handle, index);
 }
 
+U32 IREmitter::BufferStride(const Value& handle) {
+    return Inst<U32>(Opcode::BufferStride, handle);
+}
+
 U8 IREmitter::LoadBufferU8(const Value& handle, const Value& address, BufferInstInfo info) {
     return Inst<U8>(Opcode::LoadBufferU8, Flags{info}, handle, address);
 }
