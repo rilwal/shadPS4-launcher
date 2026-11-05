@@ -1,8 +1,10 @@
 // SPDX-FileCopyrightText: Copyright 2024 shadPS4 Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+#include <cstdlib>
 #include <mutex>
 #include <span>
+#include <string_view>
 #include <type_traits>
 #include <utility>
 #include <vector>
@@ -152,6 +154,22 @@ Id TypeId(const EmitContext& ctx, IR::Type type) {
     }
 }
 
+// Experiment: a selection-control hint on every if, to see what it does to driver compile
+// time. SHADPS4_IF_CONTROL=flatten or dontflatten; unset leaves the choice to the driver.
+static spv::SelectionControlMask IfSelectionControl() {
+    static const spv::SelectionControlMask mask = [] {
+        const char* value = std::getenv("SHADPS4_IF_CONTROL");
+        if (value && std::string_view{value} == "flatten") {
+            return spv::SelectionControlMask::Flatten;
+        }
+        if (value && std::string_view{value} == "dontflatten") {
+            return spv::SelectionControlMask::DontFlatten;
+        }
+        return spv::SelectionControlMask::MaskNone;
+    }();
+    return mask;
+}
+
 void Traverse(EmitContext& ctx, const IR::Program& program) {
     IR::Block* current_block{};
     for (const IR::AbstractSyntaxNode& node : program.syntax_list) {
@@ -172,7 +190,7 @@ void Traverse(EmitContext& ctx, const IR::Program& program) {
         case IR::AbstractSyntaxNode::Type::If: {
             const Id if_label{node.data.if_node.body->Definition<Id>()};
             const Id endif_label{node.data.if_node.merge->Definition<Id>()};
-            ctx.OpSelectionMerge(endif_label, spv::SelectionControlMask::MaskNone);
+            ctx.OpSelectionMerge(endif_label, IfSelectionControl());
             ctx.OpBranchConditional(ctx.Def(node.data.if_node.cond), if_label, endif_label);
             break;
         }
