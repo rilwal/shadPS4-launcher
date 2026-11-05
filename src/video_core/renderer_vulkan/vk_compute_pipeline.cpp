@@ -6,6 +6,7 @@
 #include "shader_recompiler/info.h"
 #include "video_core/renderer_vulkan/vk_compute_pipeline.h"
 #include "video_core/renderer_vulkan/vk_instance.h"
+#include "video_core/renderer_vulkan/vk_resource_heaps.h"
 #include "video_core/renderer_vulkan/vk_scheduler.h"
 
 namespace Vulkan {
@@ -31,80 +32,94 @@ ComputePipeline::ComputePipeline(const Instance& instance, Scheduler& scheduler,
         .pName = "main",
     };
 
-    u32 binding{};
-    boost::container::small_vector<vk::DescriptorSetLayoutBinding, 32> bindings;
-    for (const auto& buffer : info->buffers) {
-        // During deserialization, we don't have access to the UD to fetch sharp data. To address
-        // this properly we need to track shaprs or portion of them in `sdata`, but since we're
-        // interested only in "is storage" flag (which is not even effective atm), we can take a
-        // shortcut there.
-        const auto sharp = preloading ? AmdGpu::Buffer{} : buffer.GetSharp(*info);
-        bindings.push_back({
-            .binding = binding++,
-            .descriptorType = vk::DescriptorType::eStorageBuffer,
-            .descriptorCount = 1,
-            .stageFlags = vk::ShaderStageFlagBits::eCompute,
-        });
-    }
-    for (const auto& image : info->images) {
-        const u32 num_bindings = image.NumBindings(*info);
-        bindings.push_back({
-            .binding = binding,
-            .descriptorType = image.is_written ? vk::DescriptorType::eStorageImage
-                                               : vk::DescriptorType::eSampledImage,
-            .descriptorCount = num_bindings,
-            .stageFlags = vk::ShaderStageFlagBits::eCompute,
-        });
-        binding += num_bindings;
-    }
-    for (const auto& sampler : info->samplers) {
-        bindings.push_back({
-            .binding = binding++,
-            .descriptorType = vk::DescriptorType::eSampler,
-            .descriptorCount = 1,
-            .stageFlags = vk::ShaderStageFlagBits::eCompute,
-        });
-    }
-
-    const vk::PushConstantRange push_constants = {
-        .stageFlags = vk::ShaderStageFlagBits::eCompute,
-        .offset = 0,
-        .size = sizeof(Shader::PushData),
-    };
-
-    uses_push_descriptors = binding < instance.MaxPushDescriptors();
-    const auto flags = uses_push_descriptors
-                           ? vk::DescriptorSetLayoutCreateFlagBits::ePushDescriptorKHR
-                           : vk::DescriptorSetLayoutCreateFlagBits{};
-    const vk::DescriptorSetLayoutCreateInfo desc_layout_ci = {
-        .flags = flags,
-        .bindingCount = static_cast<u32>(bindings.size()),
-        .pBindings = bindings.data(),
-    };
     const auto device = instance.GetDevice();
-    auto [descriptor_set_result, descriptor_set] =
-        device.createDescriptorSetLayoutUnique(desc_layout_ci);
-    ASSERT_MSG(descriptor_set_result == vk::Result::eSuccess,
-               "Failed to create compute descriptor set layout: {}",
-               vk::to_string(descriptor_set_result));
-    desc_layout = std::move(descriptor_set);
+    // With the descriptor heap there are no layouts: the shader maps its own bindings.
+    const bool uses_heap = instance.UsesDescriptorHeap();
+    StageHeapMappings heap_mappings;
+    vk::PipelineShaderStageCreateInfo stage_ci = shader_ci;
+    if (uses_heap) {
+        heap_mappings.Build(*info, HeapGeometry::Of(instance), profile.needs_buffer_offsets);
+        heap_mappings.info.pNext = stage_ci.pNext;
+        stage_ci.pNext = &heap_mappings.info;
+    } else {
+        u32 binding{};
+        boost::container::small_vector<vk::DescriptorSetLayoutBinding, 32> bindings;
+        for (const auto& buffer : info->buffers) {
+            // During deserialization, we don't have access to the UD to fetch sharp data. To
+            // address this properly we need to track shaprs or portion of them in `sdata`, but
+            // since we're interested only in "is storage" flag (which is not even effective atm),
+            // we can take a shortcut there.
+            const auto sharp = preloading ? AmdGpu::Buffer{} : buffer.GetSharp(*info);
+            bindings.push_back({
+                .binding = binding++,
+                .descriptorType = vk::DescriptorType::eStorageBuffer,
+                .descriptorCount = 1,
+                .stageFlags = vk::ShaderStageFlagBits::eCompute,
+            });
+        }
+        for (const auto& image : info->images) {
+            const u32 num_bindings = image.NumBindings(*info);
+            bindings.push_back({
+                .binding = binding,
+                .descriptorType = image.is_written ? vk::DescriptorType::eStorageImage
+                                                   : vk::DescriptorType::eSampledImage,
+                .descriptorCount = num_bindings,
+                .stageFlags = vk::ShaderStageFlagBits::eCompute,
+            });
+            binding += num_bindings;
+        }
+        for (const auto& sampler : info->samplers) {
+            bindings.push_back({
+                .binding = binding++,
+                .descriptorType = vk::DescriptorType::eSampler,
+                .descriptorCount = 1,
+                .stageFlags = vk::ShaderStageFlagBits::eCompute,
+            });
+        }
 
-    const vk::DescriptorSetLayout set_layout = *desc_layout;
-    const vk::PipelineLayoutCreateInfo layout_info = {
-        .setLayoutCount = 1U,
-        .pSetLayouts = &set_layout,
-        .pushConstantRangeCount = 1U,
-        .pPushConstantRanges = &push_constants,
+        const vk::PushConstantRange push_constants = {
+            .stageFlags = vk::ShaderStageFlagBits::eCompute,
+            .offset = 0,
+            .size = sizeof(Shader::PushData),
+        };
+
+        uses_push_descriptors = binding < instance.MaxPushDescriptors();
+        const auto flags = uses_push_descriptors
+                               ? vk::DescriptorSetLayoutCreateFlagBits::ePushDescriptorKHR
+                               : vk::DescriptorSetLayoutCreateFlagBits{};
+        const vk::DescriptorSetLayoutCreateInfo desc_layout_ci = {
+            .flags = flags,
+            .bindingCount = static_cast<u32>(bindings.size()),
+            .pBindings = bindings.data(),
+        };
+        auto [descriptor_set_result, descriptor_set] =
+            device.createDescriptorSetLayoutUnique(desc_layout_ci);
+        ASSERT_MSG(descriptor_set_result == vk::Result::eSuccess,
+                   "Failed to create compute descriptor set layout: {}",
+                   vk::to_string(descriptor_set_result));
+        desc_layout = std::move(descriptor_set);
+
+        const vk::DescriptorSetLayout set_layout = *desc_layout;
+        const vk::PipelineLayoutCreateInfo layout_info = {
+            .setLayoutCount = 1U,
+            .pSetLayouts = &set_layout,
+            .pushConstantRangeCount = 1U,
+            .pPushConstantRanges = &push_constants,
+        };
+        auto [layout_result, layout] = instance.GetDevice().createPipelineLayoutUnique(layout_info);
+        ASSERT_MSG(layout_result == vk::Result::eSuccess,
+                   "Failed to create compute pipeline layout: {}", vk::to_string(layout_result));
+        pipeline_layout = std::move(layout);
+        SetObjectName(device, *pipeline_layout, "Compute PipelineLayout {}", debug_str);
+    }
+
+    const vk::PipelineCreateFlags2CreateInfo flags2 = {
+        .flags = vk::PipelineCreateFlagBits2::eDescriptorHeapEXT,
     };
-    auto [layout_result, layout] = instance.GetDevice().createPipelineLayoutUnique(layout_info);
-    ASSERT_MSG(layout_result == vk::Result::eSuccess,
-               "Failed to create compute pipeline layout: {}", vk::to_string(layout_result));
-    pipeline_layout = std::move(layout);
-    SetObjectName(device, *pipeline_layout, "Compute PipelineLayout {}", debug_str);
-
     const vk::ComputePipelineCreateInfo compute_pipeline_ci = {
-        .stage = shader_ci,
-        .layout = *pipeline_layout,
+        .pNext = uses_heap ? &flags2 : nullptr,
+        .stage = stage_ci,
+        .layout = uses_heap ? vk::PipelineLayout{} : *pipeline_layout,
     };
     auto [pipeline_result, pipe] =
         instance.GetDevice().createComputePipelineUnique(pipeline_cache, compute_pipeline_ci);

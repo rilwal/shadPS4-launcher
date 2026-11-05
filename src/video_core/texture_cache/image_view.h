@@ -53,8 +53,20 @@ struct ImageView {
     ImageView(ImageView&&) = default;
     ImageView& operator=(ImageView&&) = default;
 
+    /// What a descriptor heap needs to write a descriptor for this view: its create info,
+    /// chained through the given structs that live as long as the result is used.
+    const vk::ImageViewCreateInfo& HeapCreateInfo(vk::ImageViewCreateInfo& ci,
+                                                  vk::ImageViewUsageCreateInfo& usage,
+                                                  vk::ImageViewMinLodCreateInfoEXT& min_lod) const;
+
     ImageViewInfo info;
     vk::UniqueImageView image_view;
+
+private:
+    /// The create info without its chain, which is rebuilt by HeapCreateInfo.
+    vk::ImageViewCreateInfo create_info{};
+    vk::ImageUsageFlags usage_flags{};
+    float min_lod{};
 };
 
 } // namespace VideoCore

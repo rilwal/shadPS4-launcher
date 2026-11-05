@@ -54,6 +54,9 @@ struct Profile {
     bool supports_shader_stencil_export{};
     bool fast_shader_math{};
     bool support_bda{};
+    /// Resources come from VK_EXT_descriptor_heap: each stage numbers its own bindings, and
+    /// buffer offsets are read from the stage's table instead of push constants.
+    bool uses_descriptor_heap{};
 
     bool operator==(const Profile&) const = default;
 };

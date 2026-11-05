@@ -118,6 +118,16 @@ public:
         return maintenance_5;
     }
 
+    /// Returns true if shader resources are bound through VK_EXT_descriptor_heap.
+    bool UsesDescriptorHeap() const {
+        return descriptor_heap;
+    }
+
+    /// Limits of VK_EXT_descriptor_heap, when it's used.
+    const vk::PhysicalDeviceDescriptorHeapPropertiesEXT& DescriptorHeapProperties() const {
+        return descriptor_heap_props;
+    }
+
     bool IsMaintenance6Supported() const {
         return maintenance_6;
     }
@@ -501,6 +511,7 @@ private:
     vk::PhysicalDeviceVulkan12Properties vk12_props;
     vk::PhysicalDeviceVulkan13Properties vk13_props;
     vk::PhysicalDevicePushDescriptorPropertiesKHR push_descriptor_props;
+    vk::PhysicalDeviceDescriptorHeapPropertiesEXT descriptor_heap_props;
     vk::PhysicalDeviceFeatures features;
     vk::PhysicalDeviceVulkan12Features vk12_features;
     vk::PhysicalDeviceVulkan13Features vk13_features;
@@ -542,6 +553,7 @@ private:
     bool shader_atomic_float2{};
     bool workgroup_memory_explicit_layout{};
     bool maintenance_5{};
+    bool descriptor_heap{};
     bool maintenance_6{};
     bool maintenance_8{};
     bool attachment_feedback_loop{};

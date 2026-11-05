@@ -7,6 +7,8 @@
 #include "shader_recompiler/ir/type.h"
 #include "video_core/amdgpu/resource.h"
 
+#include <cstddef>
+
 #include <boost/container/static_vector.hpp>
 
 namespace Shader {
@@ -239,5 +241,35 @@ struct PushData {
 };
 static_assert(sizeof(PushData) <= 128,
               "PushData size is greater than minimum size guaranteed by Vulkan spec");
+
+/// With VK_EXT_descriptor_heap, each stage of a draw has a table in memory, at an address in
+/// push data: its buffer offsets, then one heap index per descriptor it reads.
+struct StageTable {
+    /// The table is also a uniform buffer the shader declares at this set and binding.
+    static constexpr u32 DescriptorSet = 1;
+    static constexpr u32 Binding = 0;
+    /// Buffer offsets as bytes, read as four uvec4s.
+    static constexpr u32 BufOffsetsSize = 64;
+    static constexpr u32 IndicesOffset = BufOffsetsSize;
+    /// Room for every buffer, image binding and sampler a stage can have.
+    static constexpr u32 MaxIndices = NUM_BUFFERS + NUM_IMAGES * 16 + NUM_SAMPLERS;
+    static constexpr u32 MaxSize = IndicesOffset + MaxIndices * sizeof(u32);
+};
+static_assert(NUM_BUFFERS <= StageTable::BufOffsetsSize);
+
+/// Push data with VK_EXT_descriptor_heap: the push constants above, then each logical
+/// stage's table address.
+struct HeapPushData {
+    static constexpr u32 NumStages = 6;
+
+    PushData data;
+    alignas(8) std::array<u64, NumStages> stage_tables;
+
+    static constexpr u32 StageTableOffset(u32 stage) {
+        return static_cast<u32>(offsetof(HeapPushData, stage_tables) + stage * sizeof(u64));
+    }
+};
+static_assert(sizeof(HeapPushData) <= 256,
+              "HeapPushData is larger than the push data VK_EXT_descriptor_heap guarantees");
 
 } // namespace Shader

@@ -13,6 +13,7 @@
 #include "video_core/renderer_vulkan/vk_graphics_pipeline.h"
 #include "video_core/renderer_vulkan/vk_instance.h"
 #include "video_core/renderer_vulkan/vk_pipeline_compiler.h"
+#include "video_core/renderer_vulkan/vk_resource_heaps.h"
 #include "video_core/renderer_vulkan/vk_scheduler.h"
 #include "video_core/renderer_vulkan/vk_shader_util.h"
 
@@ -28,6 +29,12 @@ static constexpr std::array LogicalStageToStageBit = {
     vk::ShaderStageFlagBits::eGeometry,
     vk::ShaderStageFlagBits::eCompute,
 };
+
+static Shader::SwStage StageBitToLogicalStage(vk::ShaderStageFlagBits bit) {
+    const auto it = std::ranges::find(LogicalStageToStageBit, bit);
+    ASSERT(it != LogicalStageToStageBit.end());
+    return static_cast<Shader::SwStage>(std::distance(LogicalStageToStageBit.begin(), it));
+}
 
 /// Everything vkCreateGraphicsPipelines reads, kept in one place so that a worker can create the
 /// pipeline after the constructor has returned. The layout still belongs to the pipeline, so a
@@ -64,6 +71,10 @@ struct GraphicsPipeline::Build {
     vk::PipelineColorBlendStateCreateInfo color_blending;
     vk::PipelineDepthStencilStateCreateInfo depth_stencil_info;
     vk::GraphicsPipelineCreateInfo pipeline_info;
+    /// With the descriptor heap: where each stage finds its descriptors, and the heap flag.
+    bool uses_heap{};
+    std::array<StageHeapMappings, MaxShaderStages> heap_mappings;
+    vk::PipelineCreateFlags2CreateInfo flags2{};
 };
 
 GraphicsPipeline::GraphicsPipeline(
@@ -80,32 +91,36 @@ GraphicsPipeline::GraphicsPipeline(
 
     const vk::Device device = instance.GetDevice();
     std::ranges::copy(infos, stages.begin());
-    BuildDescSetLayout(preloading);
     const auto debug_str = GetDebugString();
     auto build = std::make_unique<Build>();
     Build& b = *build;
     b.device = device;
     b.cache = pipeline_cache;
     b.name = debug_str;
+    // With the descriptor heap there are no layouts: each stage maps its own bindings.
+    b.uses_heap = instance.UsesDescriptorHeap();
 
-    const vk::PushConstantRange push_constants = {
-        .stageFlags = AllGraphicsStageBits,
-        .offset = 0,
-        .size = sizeof(Shader::PushData),
-    };
+    if (!b.uses_heap) {
+        BuildDescSetLayout(preloading);
+        const vk::PushConstantRange push_constants = {
+            .stageFlags = AllGraphicsStageBits,
+            .offset = 0,
+            .size = sizeof(Shader::PushData),
+        };
 
-    const vk::DescriptorSetLayout set_layout = *desc_layout;
-    const vk::PipelineLayoutCreateInfo layout_info = {
-        .setLayoutCount = 1U,
-        .pSetLayouts = &set_layout,
-        .pushConstantRangeCount = 1,
-        .pPushConstantRanges = &push_constants,
-    };
-    auto [layout_result, layout] = instance.GetDevice().createPipelineLayoutUnique(layout_info);
-    ASSERT_MSG(layout_result == vk::Result::eSuccess,
-               "Failed to create graphics pipeline layout: {}", vk::to_string(layout_result));
-    pipeline_layout = std::move(layout);
-    SetObjectName(device, *pipeline_layout, "Graphics PipelineLayout {}", debug_str);
+        const vk::DescriptorSetLayout set_layout = *desc_layout;
+        const vk::PipelineLayoutCreateInfo layout_info = {
+            .setLayoutCount = 1U,
+            .pSetLayouts = &set_layout,
+            .pushConstantRangeCount = 1,
+            .pPushConstantRanges = &push_constants,
+        };
+        auto [layout_result, layout] = instance.GetDevice().createPipelineLayoutUnique(layout_info);
+        ASSERT_MSG(layout_result == vk::Result::eSuccess,
+                   "Failed to create graphics pipeline layout: {}", vk::to_string(layout_result));
+        pipeline_layout = std::move(layout);
+        SetObjectName(device, *pipeline_layout, "Graphics PipelineLayout {}", debug_str);
+    }
 
     if (!preloading) {
         VertexInputs<AmdGpu::Buffer> guest_buffers;
@@ -295,6 +310,22 @@ GraphicsPipeline::GraphicsPipeline(
     for (auto& stage : shader_stages) {
         stage.pNext = instance.IsSubgroupSize64Supported() ? &b.subgroup_size_ci : nullptr;
     }
+    if (b.uses_heap) {
+        const auto geometry = HeapGeometry::Of(instance);
+        for (size_t i = 0; i < shader_stages.size(); ++i) {
+            auto& stage_ci = shader_stages[i];
+            const auto sw_stage = StageBitToLogicalStage(stage_ci.stage);
+            const auto* stage_info = infos[u32(sw_stage)];
+            if (!stage_info) {
+                // Our own helper stages read no descriptors.
+                continue;
+            }
+            auto& mappings = b.heap_mappings[i];
+            mappings.Build(*stage_info, geometry, profile.needs_buffer_offsets);
+            mappings.info.pNext = stage_ci.pNext;
+            stage_ci.pNext = &mappings.info;
+        }
+    }
 
     const auto depth_format =
         instance.GetSupportedFormat(LiverpoolToVK::DepthFormat(key.z_format, key.stencil_format),
@@ -439,8 +470,12 @@ GraphicsPipeline::GraphicsPipeline(
 
     // Required by spec unless VK_EXT_extended_dynamic_state3 is supported.
     // In practice, we use dynamic state for all of it.
-    b.pipeline_info = vk::GraphicsPipelineCreateInfo{
+    b.flags2 = vk::PipelineCreateFlags2CreateInfo{
         .pNext = &b.pipeline_rendering_ci,
+        .flags = vk::PipelineCreateFlagBits2::eDescriptorHeapEXT,
+    };
+    b.pipeline_info = vk::GraphicsPipelineCreateInfo{
+        .pNext = b.uses_heap ? static_cast<const void*>(&b.flags2) : &b.pipeline_rendering_ci,
         .stageCount = static_cast<u32>(shader_stages.size()),
         .pStages = shader_stages.data(),
         .pVertexInputState = !instance.IsVertexInputDynamicState() ? &b.vertex_input_info : nullptr,
@@ -453,7 +488,7 @@ GraphicsPipeline::GraphicsPipeline(
             !instance.IsExtendedDynamicState3Supported() ? &b.depth_stencil_info : nullptr,
         .pColorBlendState = &b.color_blending,
         .pDynamicState = &b.dynamic_info,
-        .layout = *pipeline_layout,
+        .layout = b.uses_heap ? vk::PipelineLayout{} : *pipeline_layout,
     };
 
     if (options.compiler && options.tiered) {
@@ -529,8 +564,14 @@ GraphicsPipeline::~GraphicsPipeline() {
 
 void GraphicsPipeline::Create(const Build& b, bool optimize) {
     auto info = b.pipeline_info;
+    auto flags2 = b.flags2;
     if (!optimize) {
+        // With flags2 chained, the driver reads the flags from there instead.
         info.flags |= vk::PipelineCreateFlagBits::eDisableOptimization;
+        flags2.flags |= vk::PipelineCreateFlagBits2::eDisableOptimization;
+        if (b.uses_heap) {
+            info.pNext = &flags2;
+        }
     }
     const u64 start = VideoCore::PerfStats::NowNs();
     auto [pipeline_result, pipe] = b.device.createGraphicsPipelineUnique(b.cache, info);
@@ -544,7 +585,12 @@ void GraphicsPipeline::Create(const Build& b, bool optimize) {
 void GraphicsPipeline::Probe(const Build& b, u64 optimized_ns,
                              const std::function<void(u64, u64)>& on_probed) {
     auto info = b.pipeline_info;
+    auto flags2 = b.flags2;
     info.flags |= vk::PipelineCreateFlagBits::eDisableOptimization;
+    flags2.flags |= vk::PipelineCreateFlagBits2::eDisableOptimization;
+    if (b.uses_heap) {
+        info.pNext = &flags2;
+    }
     const u64 start = VideoCore::PerfStats::NowNs();
     auto [result, pipe] = b.device.createGraphicsPipelineUnique({}, info);
     const u64 unoptimized_ns = VideoCore::PerfStats::NowNs() - start;

@@ -914,9 +914,9 @@ void TextureCache::RefreshImage(Image& image) {
     runtime.UploadImage(&image, buffer, image_copies);
 }
 
-vk::Sampler TextureCache::GetSampler(const AmdGpu::Sampler& sharp,
-                                     AmdGpu::BorderColorBuffer border_color_base,
-                                     const bool is_depth) {
+Sampler& TextureCache::GetSampler(const AmdGpu::Sampler& sharp,
+                                  AmdGpu::BorderColorBuffer border_color_base,
+                                  const bool is_depth) {
     // Compare and plain uses of one S# need separate samplers.
     const u64 hash = HashCombine(XXH3_64bits(&sharp, sizeof(sharp)), is_depth);
     const auto [it, new_sampler] = samplers.try_emplace(hash);
@@ -929,7 +929,7 @@ vk::Sampler TextureCache::GetSampler(const AmdGpu::Sampler& sharp,
 
     Sampler& sampler = slot_samplers[it->second];
     sampler_lru_cache.Touch(sampler, gc_tick);
-    return sampler.Handle();
+    return sampler;
 }
 
 void TextureCache::RegisterImage(ImageId image_id) {

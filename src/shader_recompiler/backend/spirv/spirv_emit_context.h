@@ -253,6 +253,8 @@ public:
     Id vertex_index{};
     Id instance_id{};
     Id push_data_block{};
+    /// With VK_EXT_descriptor_heap: this stage's table, which holds its buffer offsets.
+    Id stage_table_block{};
     Id base_vertex{};
     Id base_instance{};
     Id frag_coord{};
@@ -400,6 +402,7 @@ private:
     void DefineVertexBlock();
     void DefineOutputs();
     void DefinePushDataBlock();
+    void DefineStageTable();
     void DefineBuffers();
     void DefineImagesAndSamplers();
     void DefineSharedMemory();

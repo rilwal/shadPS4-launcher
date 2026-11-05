@@ -332,6 +332,7 @@ PipelineCache::PipelineCache(const Instance& instance_, Scheduler& scheduler_,
         .supports_shader_stencil_export = instance_.IsShaderStencilExportSupported(),
         .fast_shader_math = EmulatorSettings.IsFastShaderMath(),
         .support_bda = instance_.IsBufferDeviceAddressSupported(),
+        .uses_descriptor_heap = instance_.UsesDescriptorHeap(),
     };
     // A quarter of the cores: the game's own threads and the GPU thread need the rest.
     const u32 compile_threads = std::clamp(std::thread::hardware_concurrency() / 4, 1u, 4u);
@@ -734,6 +735,10 @@ bool PipelineCache::RefreshGraphicsStages() {
         }
 
         const auto params = AmdGpu::GetParams(*pgm);
+        if (profile.uses_descriptor_heap) {
+            // Each stage maps its own bindings onto the heap, so its numbers start at 0.
+            binding = {};
+        }
         std::tie(infos[stage_out_idx], modules[stage_out_idx], key.stage_hashes[stage_out_idx]) =
             GetProgram(stage_in, stage_out, params, binding);
         return true;

@@ -135,13 +135,13 @@ vk::BufferUsageFlags SupportedUsage(const Vulkan::Instance& instance, vk::Buffer
 }
 
 Buffer::Buffer(const Vulkan::Instance& instance, VAddr cpu_addr_, u64 size_bytes_,
-               MemoryType mem_type_, std::string_view debug_name)
+               MemoryType mem_type_, std::string_view debug_name, vk::BufferUsageFlags extra_usage)
     : cpu_addr{cpu_addr_}, size_bytes{size_bytes_}, mem_type{mem_type_},
       buffer{instance.GetDevice(), instance.GetAllocator()} {
 
     vk::BufferCreateInfo buffer_ci = {
         .size = size_bytes,
-        .usage = SupportedUsage(instance, AllFlags),
+        .usage = SupportedUsage(instance, AllFlags | extra_usage),
         .sharingMode = vk::SharingMode::eExclusive,
     };
     VmaAllocationInfo alloc_info{};

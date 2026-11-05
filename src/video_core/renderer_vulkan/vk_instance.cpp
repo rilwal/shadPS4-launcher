@@ -8,6 +8,7 @@
 #include "common/assert.h"
 #include "common/debug.h"
 #include "common/types.h"
+#include "core/emulator_settings.h"
 #include "imgui/renderer/imgui_core.h"
 #include "launcher/overlay.h"
 #include "sdl_window.h"
@@ -239,7 +240,7 @@ bool Instance::CreateDevice() {
         return false;
     }
 
-    boost::container::static_vector<const char*, 40> enabled_extensions;
+    boost::container::static_vector<const char*, 48> enabled_extensions;
     const auto add_extension = [&](std::string_view extension) -> bool {
         const auto result =
             std::find_if(available_extensions.begin(), available_extensions.end(),
@@ -278,6 +279,35 @@ bool Instance::CreateDevice() {
     maintenance_5 = add_extension(VK_KHR_MAINTENANCE_5_EXTENSION_NAME);
     maintenance_6 = add_extension(VK_KHR_MAINTENANCE_6_EXTENSION_NAME);
     maintenance_8 = add_extension(VK_KHR_MAINTENANCE_8_EXTENSION_NAME);
+    // Pipelines that use the heap set it through VkPipelineCreateFlags2CreateInfo.
+    if (EmulatorSettings.IsDescriptorHeap() && maintenance_5 &&
+        feature_chain.get<vk::PhysicalDeviceVulkan12Features>().bufferDeviceAddress) {
+        descriptor_heap = add_extension(VK_EXT_DESCRIPTOR_HEAP_EXTENSION_NAME);
+        if (descriptor_heap) {
+            const auto heap_features =
+                physical_device
+                    .getFeatures2<vk::PhysicalDeviceFeatures2,
+                                  vk::PhysicalDeviceDescriptorHeapFeaturesEXT>()
+                    .get<vk::PhysicalDeviceDescriptorHeapFeaturesEXT>();
+            descriptor_heap = heap_features.descriptorHeap;
+        }
+        if (descriptor_heap) {
+            descriptor_heap_props =
+                physical_device
+                    .getProperties2<vk::PhysicalDeviceProperties2,
+                                    vk::PhysicalDeviceDescriptorHeapPropertiesEXT>()
+                    .get<vk::PhysicalDeviceDescriptorHeapPropertiesEXT>();
+            const auto& p = descriptor_heap_props;
+            LOG_INFO(Render_Vulkan,
+                     "Descriptor heap: resource heap up to {} bytes, sampler heap up to {} "
+                     "bytes, descriptors {} (buffer) / {} (image) / {} (sampler) bytes, {} "
+                     "bytes of push data",
+                     p.maxResourceHeapSize, p.maxSamplerHeapSize, p.bufferDescriptorSize,
+                     p.imageDescriptorSize, p.samplerDescriptorSize, p.maxPushDataSize);
+        } else {
+            enabled_extensions.pop_back();
+        }
+    }
     attachment_feedback_loop = add_extension(VK_EXT_ATTACHMENT_FEEDBACK_LOOP_LAYOUT_EXTENSION_NAME);
     if (attachment_feedback_loop) {
         attachment_feedback_loop =
@@ -521,6 +551,9 @@ bool Instance::CreateDevice() {
         vk::PhysicalDeviceMaintenance8FeaturesKHR{
             .maintenance8 = true,
         },
+        vk::PhysicalDeviceDescriptorHeapFeaturesEXT{
+            .descriptorHeap = true,
+        },
         vk::PhysicalDeviceAttachmentFeedbackLoopLayoutFeaturesEXT{
             .attachmentFeedbackLoopLayout = true,
         },
@@ -586,6 +619,9 @@ bool Instance::CreateDevice() {
     }
     if (!maintenance_8) {
         device_chain.unlink<vk::PhysicalDeviceMaintenance8FeaturesKHR>();
+    }
+    if (!descriptor_heap) {
+        device_chain.unlink<vk::PhysicalDeviceDescriptorHeapFeaturesEXT>();
     }
     if (!attachment_feedback_loop) {
         device_chain.unlink<vk::PhysicalDeviceAttachmentFeedbackLoopLayoutFeaturesEXT>();

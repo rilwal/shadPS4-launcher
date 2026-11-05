@@ -4,6 +4,7 @@
 #include <algorithm>
 #include "video_core/renderer_vulkan/liverpool_to_vk.h"
 #include "video_core/renderer_vulkan/vk_instance.h"
+#include "video_core/renderer_vulkan/vk_resource_heaps.h"
 #include "video_core/texture_cache/sampler.h"
 
 namespace VideoCore {
@@ -62,6 +63,10 @@ Sampler::Sampler(const Vulkan::Instance& instance, const AmdGpu::Sampler& sample
         .borderColor = border_color,
         .unnormalizedCoordinates = false, // Handled in shader due to Vulkan limitations.
     };
+    create_info = sampler_ci;
+    create_info.pNext = nullptr;
+    custom_border = custom_color;
+
     auto [sampler_result, smplr] = instance.GetDevice().createSamplerUnique(sampler_ci);
     ASSERT_MSG(sampler_result == vk::Result::eSuccess, "Failed to create sampler: {}",
                vk::to_string(sampler_result));
@@ -69,5 +74,26 @@ Sampler::Sampler(const Vulkan::Instance& instance, const AmdGpu::Sampler& sample
 }
 
 Sampler::~Sampler() = default;
+
+const vk::SamplerCreateInfo& Sampler::HeapCreateInfo(
+    vk::SamplerCreateInfo& ci, vk::SamplerCustomBorderColorCreateInfoEXT& custom) const {
+    ci = create_info;
+    if (custom_border) {
+        custom = *custom_border;
+        ci.pNext = &custom;
+    }
+    return ci;
+}
+
+SamplerHeapSlot::~SamplerHeapSlot() {
+    Release();
+}
+
+void SamplerHeapSlot::Release() {
+    if (owner) {
+        owner->ReleaseSampler(index, border);
+        owner = nullptr;
+    }
+}
 
 } // namespace VideoCore

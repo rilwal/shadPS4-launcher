@@ -8,6 +8,7 @@
 #include "video_core/buffer_cache/buffer_cache.h"
 #include "video_core/page_manager.h"
 #include "video_core/renderer_vulkan/vk_pipeline_cache.h"
+#include "video_core/renderer_vulkan/vk_resource_heaps.h"
 #include "video_core/renderer_vulkan/vk_scheduler.h"
 #include "video_core/texture_cache/texture_cache.h"
 
@@ -135,6 +136,13 @@ private:
                      Shader::PushData& push_data);
     void BindTextures(const Shader::Info& stage, Shader::Backend::Bindings& binding);
     bool BindResources(const Pipeline* pipeline);
+    /// Binds what BindResources gathered, through the descriptor heap or the pipeline's layout.
+    void CommitResources(const Pipeline* pipeline);
+
+    /// A buffer descriptor's range; a null buffer makes a null descriptor.
+    void AddBufferInfo(const VideoCore::Buffer* buffer, u64 offset, u64 size);
+    /// An image descriptor's view; a null view makes a null descriptor.
+    void AddImageInfo(const VideoCore::ImageView* view, vk::ImageLayout layout);
 
     void BindVertexBuffers(const GraphicsPipeline* pipeline);
     void BindIndexBuffer(u32 index_offset = 0, bool is_indirect = false);
@@ -158,6 +166,9 @@ private:
     const Instance& instance;
     Scheduler& scheduler;
     Runtime& runtime;
+    /// Set when shader resources go through VK_EXT_descriptor_heap. Declared before the caches
+    /// so that it outlives the samplers that give their heap slots back to it.
+    std::unique_ptr<ResourceHeaps> heaps;
     VideoCore::PageManager page_manager;
     VideoCore::BufferCache buffer_cache;
     VideoCore::TextureCache texture_cache;
@@ -192,6 +203,12 @@ private:
     u32 set_write_index{};
     Pipeline::DescriptorWrites set_writes;
     Shader::PushData push_data;
+
+    // Kept next to buffer_infos and image_infos for the heap.
+    boost::container::static_vector<vk::DeviceAddress, Shader::NUM_BUFFERS> buffer_addresses;
+    boost::container::static_vector<const VideoCore::ImageView*, Shader::NUM_IMAGES> image_views;
+    boost::container::static_vector<u32, Shader::NUM_IMAGES> sampler_slots;
+    boost::container::static_vector<HeapStageWrites, Shader::HeapPushData::NumStages> heap_stages;
 
     bool attachment_feedback_loop{};
     bool needs_barrier{};

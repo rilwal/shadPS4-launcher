@@ -245,11 +245,17 @@ void EmitContext::DefineBufferProperties() {
             continue;
         }
 
-        const u32 half = PushData::BufOffsetIndex + (binding >> 4);
         const u32 comp = (binding & 0xf) >> 2;
         const u32 offset = (binding & 0x3) << 3;
-        const Id ptr{OpAccessChain(TypePointer(spv::StorageClass::PushConstant, U32[1]),
-                                   push_data_block, ConstU32(half), ConstU32(comp))};
+        // With the descriptor heap, offsets come from the stage's own table, since push data is
+        // shared by every stage and each stage numbers its buffers from 0.
+        const bool from_table = profile.uses_descriptor_heap;
+        const u32 half = (from_table ? 0 : PushData::BufOffsetIndex) + (binding >> 4);
+        const auto storage_class =
+            from_table ? spv::StorageClass::Uniform : spv::StorageClass::PushConstant;
+        const Id ptr{OpAccessChain(TypePointer(storage_class, U32[1]),
+                                   from_table ? stage_table_block : push_data_block, ConstU32(half),
+                                   ConstU32(comp))};
         const Id value{OpLoad(U32[1], ptr)};
 
         const Id buf_offset{OpBitFieldUExtract(U32[1], value, ConstU32(offset), ConstU32(8U))};
@@ -788,6 +794,25 @@ void EmitContext::DefinePushDataBlock() {
     push_data_block = DefineVar(struct_type, spv::StorageClass::PushConstant);
     Name(push_data_block, "push_data");
     interfaces.push_back(push_data_block);
+
+    if (profile.uses_descriptor_heap && profile.needs_buffer_offsets) {
+        DefineStageTable();
+    }
+}
+
+void EmitContext::DefineStageTable() {
+    static_assert(StageTable::BufOffsetsSize == 4 * 16);
+    const Id table_type{Name(TypeStruct(U32[4], U32[4], U32[4], U32[4]), "StageTable")};
+    Decorate(table_type, spv::Decoration::Block);
+    for (u32 i = 0; i < 4; ++i) {
+        MemberName(table_type, i, fmt::format("buf_offsets{}", i));
+        MemberDecorate(table_type, i, spv::Decoration::Offset, i * 16U);
+    }
+    stage_table_block = DefineVar(table_type, spv::StorageClass::Uniform);
+    Decorate(stage_table_block, spv::Decoration::DescriptorSet, StageTable::DescriptorSet);
+    Decorate(stage_table_block, spv::Decoration::Binding, StageTable::Binding);
+    Name(stage_table_block, "stage_table");
+    interfaces.push_back(stage_table_block);
 }
 
 EmitContext::BufferSpv EmitContext::DefineBuffer(bool is_written, bool is_coherent, u32 elem_shift,

@@ -443,6 +443,14 @@ const std::vector<Entry>& Entries() {
                              static_cast<u32>(std::stoi(value)), G);
                      }),
                  Nothing));
+        e.push_back(Toggle(
+            "descriptor-heap", "Descriptor heap", "Accuracy",
+            "Give shaders their textures and buffers through the graphics driver's descriptor "
+            "heap, "
+            "where it has one. Experimental: it's the groundwork for compiling shaders ahead of "
+            "time.",
+            [] { return EmulatorSettings.IsDescriptorHeap(); },
+            [](bool v) { EmulatorSettings.SetDescriptorHeap(v, G); }));
 
         // System
         e.push_back(Toggle(
