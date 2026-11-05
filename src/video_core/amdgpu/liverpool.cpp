@@ -721,13 +721,21 @@ Liverpool::Task Liverpool::ProcessGraphics(std::span<const u32> dcb) {
             }
             case PM4ItOpcode::EventWriteEos: {
                 const auto* event_eos = reinterpret_cast<const PM4CmdEventWriteEos*>(header);
-                if (rasterizer) {
-                    rasterizer->OnFence();
+                auto signal = [eos = *event_eos] {
+                    eos.SignalFence([](void* address, u64 data, u32 num_bytes) {
+                        auto* memory = Core::Memory::Instance();
+                        ASSERT(memory->TryWriteBacking(address, &data, num_bytes));
+                    });
+                };
+                const bool deferred =
+                    rasterizer && event_eos->command == PM4CmdEventWriteEos::Command::SignalFence &&
+                    rasterizer->DeferFenceSignal(auto{signal}, false);
+                if (!deferred) {
+                    if (rasterizer) {
+                        rasterizer->OnFence();
+                    }
+                    signal();
                 }
-                event_eos->SignalFence([](void* address, u64 data, u32 num_bytes) {
-                    auto* memory = Core::Memory::Instance();
-                    ASSERT(memory->TryWriteBacking(address, &data, num_bytes));
-                });
                 if (event_eos->command == PM4CmdEventWriteEos::Command::GdsStore) {
                     ASSERT(event_eos->size == 1);
                     if (rasterizer) {
@@ -740,15 +748,22 @@ Liverpool::Task Liverpool::ProcessGraphics(std::span<const u32> dcb) {
             }
             case PM4ItOpcode::EventWriteEop: {
                 const auto* event_eop = reinterpret_cast<const PM4CmdEventWriteEop*>(header);
-                if (rasterizer) {
-                    rasterizer->OnFence();
+                auto signal = [eop = *event_eop] {
+                    eop.SignalFence(
+                        [](void* address, u64 data, u32 num_bytes) {
+                            auto* memory = Core::Memory::Instance();
+                            ASSERT(memory->TryWriteBacking(address, &data, num_bytes));
+                        },
+                        [] { Platform::IrqC::Instance()->Signal(Platform::InterruptId::GfxEop); });
+                };
+                // Throttle on the end-of-frame style fences that raise an interrupt.
+                const bool throttle = event_eop->int_sel != InterruptSelect::None;
+                if (!rasterizer || !rasterizer->DeferFenceSignal(auto{signal}, throttle)) {
+                    if (rasterizer) {
+                        rasterizer->OnFence();
+                    }
+                    signal();
                 }
-                event_eop->SignalFence(
-                    [](void* address, u64 data, u32 num_bytes) {
-                        auto* memory = Core::Memory::Instance();
-                        ASSERT(memory->TryWriteBacking(address, &data, num_bytes));
-                    },
-                    [] { Platform::IrqC::Instance()->Signal(Platform::InterruptId::GfxEop); });
                 break;
             }
             case PM4ItOpcode::DmaData: {
@@ -1215,16 +1230,37 @@ Liverpool::Task Liverpool::ProcessCompute(std::span<const u32> acb, u32 vqid) {
         }
         case PM4ItOpcode::ReleaseMem: {
             const auto* release_mem = reinterpret_cast<const PM4CmdReleaseMem*>(header);
-            if (rasterizer) {
-                rasterizer->OnFence();
+            const auto signal_irq = [pipe_id = queue.pipe_id] {
+                Platform::IrqC::Instance()->Signal(static_cast<Platform::InterruptId>(pipe_id));
+            };
+            // A GDS store is a GPU copy recorded right here, so it can't be deferred.
+            const bool deferrable = rasterizer && release_mem->data_sel != DataSelect::GdsMemStore;
+            const bool deferred =
+                deferrable &&
+                rasterizer->DeferFenceSignal(
+                    [rel = *release_mem, signal_irq] {
+                        rel.SignalFence(
+                            [](void* address, u64 data, u32 num_bytes) {
+                                auto* memory = Core::Memory::Instance();
+                                ASSERT(memory->TryWriteBacking(address, &data, num_bytes));
+                            },
+                            signal_irq, [](VAddr, u16, u16) { UNREACHABLE(); });
+                    },
+                    false);
+            if (!deferred) {
+                if (rasterizer) {
+                    rasterizer->OnFence();
+                }
+                release_mem->SignalFence(
+                    [](void* address, u64 data, u32 num_bytes) {
+                        std::memcpy(address, &data, num_bytes);
+                    },
+                    signal_irq,
+                    [this](VAddr dst, u16 gds_index, u16 num_dwords) {
+                        rasterizer->CopyBuffer(dst, gds_index, num_dwords * sizeof(u32), false,
+                                               true);
+                    });
             }
-            release_mem->SignalFence(
-                [pipe_id = queue.pipe_id] {
-                    Platform::IrqC::Instance()->Signal(static_cast<Platform::InterruptId>(pipe_id));
-                },
-                [this](VAddr dst, u16 gds_index, u16 num_dwords) {
-                    rasterizer->CopyBuffer(dst, gds_index, num_dwords * sizeof(u32), false, true);
-                });
             break;
         }
         case PM4ItOpcode::EventWrite: {

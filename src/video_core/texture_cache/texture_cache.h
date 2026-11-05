@@ -132,7 +132,9 @@ public:
     void UnmapMemory(VAddr cpu_addr, size_t size);
 
     /// Schedules a copy of pending images for download back to CPU memory.
-    void ProcessDownloadImages();
+    /// Waits for the copies by default; with `priority` they land on the priority thread.
+    /// Returns true when any image was pending.
+    bool ProcessDownloadImages(bool priority = false);
 
     /// Retrieves the image handle of the image with the provided attributes.
     [[nodiscard]] ImageId FindImage(ImageDesc& desc, bool exact_fmt = false);

@@ -1,6 +1,8 @@
 // SPDX-FileCopyrightText: Copyright 2024-2026 shadPS4 Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+#include <chrono>
+
 #include "common/debug.h"
 #include "core/debug_state.h"
 #include "core/emulator_settings.h"
@@ -41,7 +43,8 @@ Rasterizer::Rasterizer(const Instance& instance_, Scheduler& scheduler_, Runtime
       liverpool{liverpool_}, memory{Core::Memory::Instance()},
       pipeline_cache{instance, scheduler, liverpool, buffer_cache.GetSparsePageShift()},
       host_markers_enabled{EmulatorSettings.IsVkHostMarkersEnabled()},
-      guest_markers_enabled{EmulatorSettings.IsVkGuestMarkersEnabled()} {
+      guest_markers_enabled{EmulatorSettings.IsVkGuestMarkersEnabled()},
+      fenced_readbacks{EmulatorSettings.GetReadbacksMode() == GpuReadbacksMode::Fenced} {
     if (!EmulatorSettings.IsNullGPU()) {
         liverpool->BindRasterizer(this);
     }
@@ -405,6 +408,57 @@ void Rasterizer::OnSubmit() {
 
 void Rasterizer::OnFence() {
     texture_cache.ProcessDownloadImages();
+}
+
+bool Rasterizer::DeferFenceSignal(Common::UniqueFunction<void>&& signal, bool throttle) {
+    if (!fenced_readbacks) {
+        return false;
+    }
+    // Priority operations run in order once the GPU reaches their tick, so the image and
+    // buffer data queued here land in guest memory before the signal runs.
+    const bool images = texture_cache.ProcessDownloadImages(true);
+    const bool buffers = buffer_cache.LandGpuModifiedMemory();
+    if (!images && !buffers && deferred_signals_in_flight.load(std::memory_order_acquire) == 0) {
+        // Nothing for the guest to wait for, and no earlier signal to stay behind:
+        // signal now, so the guest can run ahead as before.
+        signal();
+        buffer_cache.RecordFence(false, 0);
+        return true;
+    }
+    deferred_signals_in_flight.fetch_add(1, std::memory_order_relaxed);
+    if (throttle) {
+        throttled_fences_in_flight.fetch_add(1, std::memory_order_relaxed);
+    }
+    scheduler.DeferPriorityOperation([this, signal = std::move(signal), throttle]() mutable {
+        signal();
+        deferred_signals_in_flight.fetch_sub(1, std::memory_order_release);
+        if (throttle) {
+            throttled_fences_in_flight.fetch_sub(1, std::memory_order_release);
+            throttled_fences_in_flight.notify_all();
+        }
+    });
+    // Submit now: the guest may wait on this fence before sending more work.
+    Flush();
+
+    // The guest learns about GPU progress later than before, so it can queue more frames.
+    // Some games assert when they're 3+ frames behind; keep the command processor close.
+    constexpr u32 MaxThrottledFencesInFlight = 2;
+    u64 throttle_ns = 0;
+    if (throttle) {
+        u32 in_flight = throttled_fences_in_flight.load(std::memory_order_acquire);
+        if (in_flight > MaxThrottledFencesInFlight) {
+            const auto start = std::chrono::steady_clock::now();
+            while (in_flight > MaxThrottledFencesInFlight) {
+                throttled_fences_in_flight.wait(in_flight, std::memory_order_acquire);
+                in_flight = throttled_fences_in_flight.load(std::memory_order_acquire);
+            }
+            throttle_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(
+                              std::chrono::steady_clock::now() - start)
+                              .count();
+        }
+    }
+    buffer_cache.RecordFence(true, throttle_ns);
+    return true;
 }
 
 bool Rasterizer::BindResources(const Pipeline* pipeline) {

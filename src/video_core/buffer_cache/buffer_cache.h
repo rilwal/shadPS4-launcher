@@ -3,7 +3,9 @@
 
 #pragma once
 
+#include <atomic>
 #include <deque>
+#include <memory>
 #include <boost/container/small_vector.hpp>
 
 #include "common/enum.h"
@@ -101,6 +103,12 @@ public:
     void ReadMemory(VAddr device_addr, u64 size, bool is_write = false, bool async = false,
                     bool assume_locks = false);
 
+    /// Fenced readbacks: records copies of every GPU-modified buffer range into staging memory.
+    /// They are written to guest memory on the scheduler's priority thread once the GPU reaches
+    /// the current tick, so a priority operation queued after this runs after they've landed.
+    /// The pages stay read-protected until then. Returns true when anything was recorded.
+    bool LandGpuModifiedMemory();
+
     /// Flushes GPU modified ranges of the uncovered part of the edge pages of an image.
     void ReadEdgeImagePages(const Image& image);
 
@@ -120,6 +128,12 @@ public:
     /// Mark region as modified from the GPU
     void MarkRegionAsGpuModified(VAddr addr, size_t size);
 
+    /// Readback profiling: records how a fence was signaled and time spent throttled.
+    void RecordFence(bool deferred, u64 throttle_ns) {
+        ++(deferred ? readback_stats.deferred_fences : readback_stats.immediate_fences);
+        readback_stats.throttle_ns += throttle_ns;
+    }
+
     /// Synchronizes all buffers needed for DMA.
     void SynchronizeDmaBuffers();
 
@@ -127,6 +141,21 @@ public:
     void SubmitPendingArenaBinds(Vulkan::SubmitInfo& info);
 
 private:
+    /// A set of GPU-modified ranges on their way back to guest memory (fenced readbacks).
+    struct Landing {
+        RangeSet ranges;
+        std::atomic<bool> done{false};
+    };
+
+    /// Unprotects the pages of finished landings that are still current, and drops them.
+    void ProcessLandings();
+
+    /// Waits until no landing in flight overlaps the region.
+    void WaitForLandings(VAddr device_addr, u64 size);
+
+    /// Logs readback_stats every few seconds, then resets them.
+    void LogReadbackStats();
+
     struct ArenaBinds {
         const Buffer* arena;
         boost::container::small_vector<vk::SparseMemoryBind, 32> binds;
@@ -164,6 +193,21 @@ private:
     Buffer gds_buffer;
     std::unique_ptr<Buffer> null_index_buffer;
     RangeSet gpu_modified_ranges;
+    std::deque<std::shared_ptr<Landing>> landings;
+    bool fenced_readbacks{};
+
+    /// Readback statistics, logged every few seconds.
+    struct ReadbackStats {
+        u64 sync_downloads{};
+        u64 sync_download_bytes{};
+        u64 landings{};
+        u64 landing_bytes{};
+        u64 stall_ns{};
+        u64 throttle_ns{};
+        u64 deferred_fences{};
+        u64 immediate_fences{};
+        u64 last_log_ns{};
+    } readback_stats;
 
     std::unique_ptr<FaultManager> fault_manager;
     std::unique_ptr<Buffer> bda_pagetable_buffer;
