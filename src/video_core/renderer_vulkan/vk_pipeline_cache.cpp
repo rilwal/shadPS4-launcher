@@ -3,6 +3,7 @@
 
 #include <algorithm>
 #include <ranges>
+#include <fmt/ranges.h>
 #include <xxhash.h>
 
 #include "common/hash.h"
@@ -39,6 +40,141 @@ constexpr static std::array DescriptorHeapSizes = {
     vk::DescriptorPoolSize{vk::DescriptorType::eStorageImage, 1024},
     vk::DescriptorPoolSize{vk::DescriptorType::eSampler, 1024},
 };
+
+/// Names the parts of two specializations of one shader that differ, so the log shows what each
+/// new variant was compiled for.
+static std::vector<std::string> SpecDifferences(const Shader::StageSpecialization& a,
+                                                const Shader::StageSpecialization& b) {
+    std::vector<std::string> out;
+    const auto check = [&](bool same, const char* name, auto... index) {
+        if (!same) {
+            out.push_back(fmt::format(fmt::runtime(name), index...));
+        }
+    };
+    const auto& ra = a.runtime_info;
+    const auto& rb = b.runtime_info;
+    check(ra.props == rb.props, "props");
+    if (ra.sw_stage == SwStage::Vertex) {
+        const auto& va = ra.sw.vs;
+        const auto& vb = rb.sw.vs;
+        check(va.step_rate_0 == vb.step_rate_0 && va.step_rate_1 == vb.step_rate_1,
+              "vs.step_rates");
+        check(va.vertex_sgpr_offset == vb.vertex_sgpr_offset &&
+                  va.instance_sgpr_offset == vb.instance_sgpr_offset,
+              "vs.sgpr_offsets");
+        check(va.is_indirect == vb.is_indirect, "vs.is_indirect");
+        check(va.tess_emulated_primitive == vb.tess_emulated_primitive, "vs.tess_emulated");
+    } else if (!ra.HasSameSwInfo(rb.sw)) {
+        out.emplace_back("sw_info");
+    }
+    switch (ra.hw_stage) {
+    case HwStage::Fragment: {
+        const auto& fa = ra.hw.fs;
+        const auto& fb = rb.hw.fs;
+        for (u32 i = 0; i < Shader::MaxColorBuffers; ++i) {
+            const auto& ca = fa.color_buffers[i];
+            const auto& cb = fb.color_buffers[i];
+            check(ca.data_format == cb.data_format && ca.num_format == cb.num_format,
+                  "fs.cb{}.format", i);
+            check(ca.num_conversion == cb.num_conversion, "fs.cb{}.num_conversion", i);
+            check(ca.export_format == cb.export_format, "fs.cb{}.export_format", i);
+            check(ca.blend_self_scale == cb.blend_self_scale, "fs.cb{}.blend_self_scale", i);
+            check(ca.swizzle == cb.swizzle, "fs.cb{}.swizzle", i);
+        }
+        check(fa.en_flags == fb.en_flags, "fs.en_flags");
+        check(fa.addr_flags == fb.addr_flags, "fs.addr_flags");
+        check(fa.num_inputs == fb.num_inputs &&
+                  std::ranges::equal(fa.inputs.begin(), fa.inputs.begin() + fa.num_inputs,
+                                     fb.inputs.begin(), fb.inputs.begin() + fb.num_inputs),
+              "fs.inputs");
+        check(fa.z_export_format == fb.z_export_format, "fs.z_export_format");
+        check(fa.num_samples == fb.num_samples, "fs.num_samples");
+        check(fa.mrtz_mask == fb.mrtz_mask, "fs.mrtz_mask");
+        check(fa.front_face_all_bits == fb.front_face_all_bits, "fs.front_face_all_bits");
+        check(fa.dual_source_blending == fb.dual_source_blending, "fs.dual_source_blending");
+        check(fa.clip_distance_emulation == fb.clip_distance_emulation,
+              "fs.clip_distance_emulation");
+        check(fa.depth_before_shader == fb.depth_before_shader, "fs.depth_before_shader");
+        break;
+    }
+    case HwStage::Vertex: {
+        const auto& va = ra.hw.vs;
+        const auto& vb = rb.hw.vs;
+        check(va.num_outputs == vb.num_outputs && va.outputs == vb.outputs, "hwvs.outputs");
+        check(va.emulate_depth_negative_one_to_one == vb.emulate_depth_negative_one_to_one,
+              "hwvs.depth_negative_one_to_one");
+        check(va.clip_disable == vb.clip_disable, "hwvs.clip_disable");
+        check(va.user_clip_plane_mask == vb.user_clip_plane_mask, "hwvs.user_clip_planes");
+        break;
+    }
+    case HwStage::Compute: {
+        const auto& ca = ra.hw.cs;
+        const auto& cb = rb.hw.cs;
+        check(ca.workgroup_size == cb.workgroup_size, "cs.workgroup_size");
+        check(ca.tgid_enable == cb.tgid_enable, "cs.tgid_enable");
+        break;
+    }
+    default:
+        check(ra.HasSameHwInfo(rb.hw), "hw_info");
+        break;
+    }
+    check(a.fetch_shader_data == b.fetch_shader_data, "fetch_shader");
+    for (u32 i = 0; i < std::min(a.vs_attribs.size(), b.vs_attribs.size()); ++i) {
+        const auto& x = a.vs_attribs[i];
+        const auto& y = b.vs_attribs[i];
+        check(x.divisor == y.divisor, "attr{}.divisor", i);
+        check(x.num_class == y.num_class, "attr{}.num_class", i);
+        check(x.dst_select == y.dst_select, "attr{}.dst_select", i);
+    }
+    check(a.vs_attribs.size() == b.vs_attribs.size(), "attr.count");
+    check(a.fmasks == b.fmasks, "fmasks");
+    const bool has_resources = !a.buffers.empty() || !a.images.empty() || !a.samplers.empty();
+    if (has_resources) {
+        check(a.start == b.start, "binding_start");
+    }
+    u32 binding{};
+    for (u32 i = 0; i < a.buffers.size() && i < b.buffers.size(); ++i) {
+        if (!b.bitset[binding++]) {
+            continue;
+        }
+        const auto& x = a.buffers[i];
+        const auto& y = b.buffers[i];
+        check(x.stride == y.stride, "buf{}.stride", i);
+        check(x.is_formatted == y.is_formatted, "buf{}.is_formatted", i);
+        if (x.is_formatted && y.is_formatted) {
+            check(x.data_format == y.data_format && x.num_format == y.num_format, "buf{}.format",
+                  i);
+            check(x.dst_select == y.dst_select, "buf{}.dst_select", i);
+            check(x.num_conversion == y.num_conversion, "buf{}.num_conversion", i);
+        }
+        check(x.swizzle_enable == y.swizzle_enable, "buf{}.swizzle_enable", i);
+        if (x.swizzle_enable && y.swizzle_enable) {
+            check(x.index_stride == y.index_stride && x.element_size == y.element_size,
+                  "buf{}.swizzle", i);
+        }
+    }
+    binding = static_cast<u32>(a.buffers.size());
+    for (u32 i = 0; i < a.images.size() && i < b.images.size(); ++i) {
+        if (!b.bitset[binding++]) {
+            continue;
+        }
+        const auto& x = a.images[i];
+        const auto& y = b.images[i];
+        check(x.type == y.type, "img{}.type", i);
+        check(x.is_integer == y.is_integer, "img{}.is_integer", i);
+        check(x.is_storage == y.is_storage, "img{}.is_storage", i);
+        check(x.is_srgb == y.is_srgb, "img{}.is_srgb", i);
+        check(x.dst_select == y.dst_select, "img{}.dst_select", i);
+        check(x.num_conversion == y.num_conversion, "img{}.num_conversion", i);
+        check(x.num_bindings == y.num_bindings, "img{}.num_bindings", i);
+    }
+    for (u32 i = 0; i < a.samplers.size() && i < b.samplers.size(); ++i) {
+        check(a.samplers[i].force_unnormalized == b.samplers[i].force_unnormalized,
+              "smp{}.force_unnormalized", i);
+        check(a.samplers[i].force_degamma == b.samplers[i].force_degamma, "smp{}.force_degamma", i);
+    }
+    return out;
+}
 
 static u32 MapOutputs(std::span<Shader::OutputMap, 3> outputs, const AmdGpu::VsOutputControl& ctl) {
     u32 num_outputs = 0;
@@ -1032,6 +1168,16 @@ PipelineCache::Result PipelineCache::GetProgram(HwStage hw_stage, SwStage sw_sta
         if (binding_only) {
             ++compile_stats.binding_permutations;
         }
+        // Compares with the closest existing variant, to show what this one is compiled for.
+        std::vector<std::string> closest;
+        for (const auto& m : program->modules) {
+            auto diff = SpecDifferences(spec, m.spec);
+            if (closest.empty() || diff.size() < closest.size()) {
+                closest = std::move(diff);
+            }
+        }
+        LOG_INFO(Render_Vulkan, "Variant {} of {} shader {:#x} differs in: {}", perm_idx, hw_stage,
+                 params.hash, fmt::join(closest, ", "));
         auto new_info = Shader::Info(hw_stage, sw_stage, params);
         std::tie(module, perm_hash) =
             CompileModule(new_info, runtime_info, params.code, perm_idx, binding);
