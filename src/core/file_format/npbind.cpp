@@ -101,6 +101,33 @@ bool NPBindFile::Load(std::span<const u8> data) {
     return true;
 }
 
+std::vector<s32> NPBindFile::GetTrophyNumbers() const {
+    std::vector<s32> numbers;
+    numbers.reserve(m_bodies.size());
+
+    for (const auto& body : m_bodies) {
+        // Only bodies GetNpCommIds lists, so the two line up
+        if (body.npcommid.data.empty()) {
+            continue;
+        }
+        // ASCII digits, padded with NULs: "1"
+        s32 number = -1;
+        for (const u8 c : body.trophy.data) {
+            if (c == 0) {
+                break;
+            }
+            if (c < '0' || c > '9' || number > 9999) {
+                number = -1;
+                break;
+            }
+            number = (number < 0 ? 0 : number * 10) + (c - '0');
+        }
+        numbers.push_back(number >= 0 ? number : static_cast<s32>(numbers.size()));
+    }
+
+    return numbers;
+}
+
 std::vector<std::string> NPBindFile::GetNpCommIds() const {
     std::vector<std::string> npcommids;
     npcommids.reserve(m_bodies.size());

@@ -19,6 +19,7 @@ set(TEST_TARGETS
     shadps4_settings_test
     shadps4_ngs2_test
     shadps4_gcn_test
+    shadps4_npbind_test
 )
 
 set(SETTINGS_TEST_SOURCES
@@ -172,6 +173,10 @@ set(GCN_TEST_SOURCES
 add_executable(shadps4_settings_test ${SETTINGS_TEST_SOURCES})
 add_executable(shadps4_ngs2_test ${NGS2_TEST_SOURCES})
 add_executable(shadps4_gcn_test ${GCN_TEST_SOURCES})
+add_executable(shadps4_npbind_test
+    ${CMAKE_SOURCE_DIR}/src/core/file_format/npbind.cpp
+    test_npbind.cpp
+)
 
 foreach(t ${TEST_TARGETS})
     target_include_directories(${t} PRIVATE

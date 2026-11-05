@@ -166,6 +166,7 @@ std::map<s32, std::string> ExtractTrophies(std::string_view npbind_guest,
         LOG_WARNING(Common_Filesystem, "No NPCommIDs in npbind.dat");
         return trophy_index_map;
     }
+    const auto trophy_numbers = npbind.GetTrophyNumbers();
     auto& game_info = Common::ElfInfo::Instance();
     game_info.SetNpCommIds(np_comm_ids);
 
@@ -197,22 +198,27 @@ std::map<s32, std::string> ExtractTrophies(std::string_view npbind_guest,
 
         // Extract the number part
         const std::string num_str = stem.substr(pattern.length());
-        s32 trophy_index;
+        s32 trophy_number;
         try {
-            trophy_index = std::stoi(num_str);
+            trophy_number = std::stoi(num_str);
         } catch (...) {
             continue;
         }
 
-        if (static_cast<s32>(np_comm_ids.size()) <= trophy_index) {
-            LOG_WARNING(Common_Filesystem, "Trophy index {} does not have a corresponding NPCommId",
-                        trophy_index);
+        // The npbind entry that names this file is the set's index (its service label). Files
+        // usually match entries by position, but some games number them from 01.
+        const auto found = std::find(trophy_numbers.begin(), trophy_numbers.end(), trophy_number);
+        if (found == trophy_numbers.end()) {
+            LOG_WARNING(Common_Filesystem, "Trophy file {} does not have a corresponding NPCommId",
+                        entry.name);
             continue;
         }
+        const s32 trophy_index = static_cast<s32>(found - trophy_numbers.begin());
 
         const std::string np_comm_id = np_comm_ids[trophy_index];
         trophy_index_map[trophy_index] = np_comm_id;
-        LOG_DEBUG(Loader, "Mapped trophy index {} to NPCommID: {}", trophy_index, np_comm_id);
+        LOG_INFO(Loader, "Mapped trophy file {} to index {}, NPCommID {}", entry.name, trophy_index,
+                 np_comm_id);
 
         // Extract the actual trophies if they're not extracted yet.
         const auto& trophy_output_dir =
