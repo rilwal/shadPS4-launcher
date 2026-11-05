@@ -123,6 +123,11 @@ public:
         return descriptor_heap;
     }
 
+    /// Returns true if graphics draws use VK_EXT_shader_object instead of pipelines.
+    bool UsesShaderObjects() const {
+        return shader_object;
+    }
+
     /// Limits of VK_EXT_descriptor_heap, when it's used.
     const vk::PhysicalDeviceDescriptorHeapPropertiesEXT& DescriptorHeapProperties() const {
         return descriptor_heap_props;
@@ -272,6 +277,14 @@ public:
     /// Returns true if VK_AMD_mixed_attachment_samples is supported
     bool IsMixedAnySamplesSupported() const {
         return amd_mixed_attachment_samples;
+    }
+
+    bool IsDepthClampSupported() const {
+        return features.depthClamp;
+    }
+
+    bool IsNvFramebufferMixedSamplesSupported() const {
+        return nv_framebuffer_mixed_samples;
     }
 
     /// Returns true when geometry shaders are supported by the device
@@ -554,6 +567,7 @@ private:
     bool workgroup_memory_explicit_layout{};
     bool maintenance_5{};
     bool descriptor_heap{};
+    bool shader_object{};
     bool maintenance_6{};
     bool maintenance_8{};
     bool attachment_feedback_loop{};

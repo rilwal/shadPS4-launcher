@@ -15,6 +15,7 @@
 #include "video_core/renderer_vulkan/vk_pipeline_compiler.h"
 #include "video_core/renderer_vulkan/vk_resource_heaps.h"
 #include "video_core/renderer_vulkan/vk_scheduler.h"
+#include "video_core/renderer_vulkan/vk_shader_objects.h"
 #include "video_core/renderer_vulkan/vk_shader_util.h"
 
 namespace Vulkan {
@@ -99,6 +100,9 @@ GraphicsPipeline::GraphicsPipeline(
     b.name = debug_str;
     // With the descriptor heap there are no layouts: each stage maps its own bindings.
     b.uses_heap = instance.UsesDescriptorHeap();
+    // Shader objects need the heap, so they never need a layout either.
+    ShaderObjects* const shader_objects = options.shader_objects;
+    ASSERT(!shader_objects || b.uses_heap);
 
     if (!b.uses_heap) {
         BuildDescSetLayout(preloading);
@@ -261,7 +265,8 @@ GraphicsPipeline::GraphicsPipeline(
         }
         shader_stages.emplace_back(vk::PipelineShaderStageCreateInfo{
             .stage = vk::ShaderStageFlagBits::eTessellationControl,
-            .module = CompileSPV(sdata.tcs, instance.GetDevice()),
+            .module =
+                shader_objects ? vk::ShaderModule{} : CompileSPV(sdata.tcs, instance.GetDevice()),
             .pName = "main",
         });
     }
@@ -280,7 +285,8 @@ GraphicsPipeline::GraphicsPipeline(
         }
         shader_stages.emplace_back(vk::PipelineShaderStageCreateInfo{
             .stage = vk::ShaderStageFlagBits::eTessellationEvaluation,
-            .module = CompileSPV(sdata.tes, instance.GetDevice()),
+            .module =
+                shader_objects ? vk::ShaderModule{} : CompileSPV(sdata.tes, instance.GetDevice()),
             .pName = "main",
         });
     }
@@ -299,7 +305,8 @@ GraphicsPipeline::GraphicsPipeline(
         }
         shader_stages.emplace_back(vk::PipelineShaderStageCreateInfo{
             .stage = vk::ShaderStageFlagBits::eFragment,
-            .module = CompileSPV(sdata.fragment, instance.GetDevice()),
+            .module = shader_objects ? vk::ShaderModule{}
+                                     : CompileSPV(sdata.fragment, instance.GetDevice()),
             .pName = "main",
         });
     }
@@ -468,6 +475,35 @@ GraphicsPipeline::GraphicsPipeline(
         .blendConstants = std::array{1.0f, 1.0f, 1.0f, 1.0f},
     };
 
+    if (shader_objects) {
+        // Helper stages are made here, so their code is the shader object's key.
+        std::array<const std::vector<u32>*, MaxShaderStages> generated{};
+        for (size_t i = 0; i < shader_stages.size(); ++i) {
+            const auto sw_stage = StageBitToLogicalStage(shader_stages[i].stage);
+            if (infos[u32(sw_stage)]) {
+                continue;
+            }
+            switch (sw_stage) {
+            case Shader::SwStage::TessellationControl:
+                generated[i] = &sdata.tcs;
+                break;
+            case Shader::SwStage::TessellationEval:
+                generated[i] = &sdata.tes;
+                break;
+            case Shader::SwStage::Fragment:
+                generated[i] = &sdata.fragment;
+                break;
+            default:
+                UNREACHABLE();
+            }
+        }
+        CreateShaderObjects(b, *shader_objects, generated);
+        if (options.on_created) {
+            options.on_created(driver_ns);
+        }
+        return;
+    }
+
     // Required by spec unless VK_EXT_extended_dynamic_state3 is supported.
     // In practice, we use dynamic state for all of it.
     b.flags2 = vk::PipelineCreateFlags2CreateInfo{
@@ -556,6 +592,104 @@ GraphicsPipeline::GraphicsPipeline(
             Probe(*build, optimized_ns, on_probed);
         }
     });
+}
+
+void GraphicsPipeline::CreateShaderObjects(const Build& b, ShaderObjects& objects,
+                                           std::span<const std::vector<u32>* const> generated) {
+    auto st = std::make_unique<ShaderObjectState>();
+    // Every stage the device has is bound, null when the draw doesn't use it.
+    st->stages[st->num_stages++] = vk::ShaderStageFlagBits::eVertex;
+    if (instance.IsTessellationSupported()) {
+        st->stages[st->num_stages++] = vk::ShaderStageFlagBits::eTessellationControl;
+        st->stages[st->num_stages++] = vk::ShaderStageFlagBits::eTessellationEvaluation;
+    }
+    if (instance.IsGeometryStageSupported()) {
+        st->stages[st->num_stages++] = vk::ShaderStageFlagBits::eGeometry;
+    }
+    st->stages[st->num_stages++] = vk::ShaderStageFlagBits::eFragment;
+
+    u64 created_ns = 0;
+    for (size_t i = 0; i < b.shader_stages.size(); ++i) {
+        const auto& stage_ci = b.shader_stages[i];
+        const auto slot = std::ranges::find(st->stages, stage_ci.stage) - st->stages.begin();
+        ASSERT(slot < st->num_stages);
+        st->shaders[slot] =
+            generated[i]
+                ? objects.GetGenerated(*generated[i], stage_ci.stage, stage_ci.pNext, created_ns)
+                : objects.Get(stage_ci.module, stage_ci.stage, stage_ci.pNext, created_ns);
+        st->tessellation |= stage_ci.stage == vk::ShaderStageFlagBits::eTessellationEvaluation;
+    }
+    driver_ns = created_ns;
+
+    const auto& raster = b.raster_chain.get<vk::PipelineRasterizationStateCreateInfo>();
+    st->topology = st->tessellation ? vk::PrimitiveTopology::ePatchList : b.input_assembly.topology;
+    st->patch_control_points = b.tessellation_state.patchControlPoints;
+    st->samples = b.multisampling.rasterizationSamples;
+    st->polygon_mode = raster.polygonMode;
+    st->depth_clamp = raster.depthClampEnable;
+    st->depth_clip =
+        b.raster_chain.get<vk::PipelineRasterizationDepthClipStateCreateInfoEXT>().depthClipEnable;
+    st->provoking_vertex =
+        b.raster_chain.get<vk::PipelineRasterizationProvokingVertexStateCreateInfoEXT>()
+            .provokingVertexMode;
+    st->negative_one_to_one = b.clip_control.negativeOneToOne;
+    st->logic_op_enable = b.color_blending.logicOpEnable;
+    st->logic_op = b.color_blending.logicOp;
+    st->num_attachments = b.color_blending.attachmentCount;
+    for (u32 i = 0; i < st->num_attachments; ++i) {
+        const auto& a = b.attachments[i];
+        st->blend_enables[i] = a.blendEnable;
+        st->blend_equations[i] = vk::ColorBlendEquationEXT{
+            .srcColorBlendFactor = a.srcColorBlendFactor,
+            .dstColorBlendFactor = a.dstColorBlendFactor,
+            .colorBlendOp = a.colorBlendOp,
+            .srcAlphaBlendFactor = a.srcAlphaBlendFactor,
+            .dstAlphaBlendFactor = a.dstAlphaBlendFactor,
+            .alphaBlendOp = a.alphaBlendOp,
+        };
+    }
+    shader_state = std::move(st);
+}
+
+void GraphicsPipeline::BindShaderObjects(vk::CommandBuffer cmdbuf) const {
+    const auto& st = *shader_state;
+    cmdbuf.bindShadersEXT(st.num_stages, st.stages.data(), st.shaders.data());
+
+    cmdbuf.setPrimitiveTopology(st.topology);
+    if (st.tessellation) {
+        cmdbuf.setPatchControlPointsEXT(st.patch_control_points);
+        // What a pipeline without a domain origin state uses.
+        cmdbuf.setTessellationDomainOriginEXT(vk::TessellationDomainOrigin::eUpperLeft);
+    }
+    cmdbuf.setRasterizationSamplesEXT(st.samples);
+    const std::array<vk::SampleMask, 2> sample_mask = {~0u, ~0u};
+    cmdbuf.setSampleMaskEXT(st.samples, sample_mask.data());
+    cmdbuf.setAlphaToCoverageEnableEXT(false);
+    cmdbuf.setPolygonModeEXT(st.polygon_mode);
+    if (instance.IsDepthClampSupported()) {
+        cmdbuf.setDepthClampEnableEXT(st.depth_clamp);
+    }
+    if (instance.IsDepthClipEnableSupported()) {
+        cmdbuf.setDepthClipEnableEXT(st.depth_clip);
+    }
+    if (instance.IsProvokingVertexSupported()) {
+        cmdbuf.setProvokingVertexModeEXT(st.provoking_vertex);
+    }
+    if (instance.IsDepthClipControlSupported()) {
+        cmdbuf.setDepthClipNegativeOneToOneEXT(st.negative_one_to_one);
+    }
+    if (instance.IsLogicOpSupported()) {
+        cmdbuf.setLogicOpEnableEXT(st.logic_op_enable);
+        cmdbuf.setLogicOpEXT(st.logic_op);
+    }
+    if (instance.IsNvFramebufferMixedSamplesSupported()) {
+        cmdbuf.setCoverageModulationModeNV(vk::CoverageModulationModeNV::eNone);
+        cmdbuf.setCoverageModulationTableEnableNV(false);
+    }
+    if (st.num_attachments != 0) {
+        cmdbuf.setColorBlendEnableEXT(0, st.num_attachments, st.blend_enables.data());
+        cmdbuf.setColorBlendEquationEXT(0, st.num_attachments, st.blend_equations.data());
+    }
 }
 
 GraphicsPipeline::~GraphicsPipeline() {

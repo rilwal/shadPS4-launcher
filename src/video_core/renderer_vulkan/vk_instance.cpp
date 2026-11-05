@@ -240,7 +240,7 @@ bool Instance::CreateDevice() {
         return false;
     }
 
-    boost::container::static_vector<const char*, 48> enabled_extensions;
+    boost::container::static_vector<const char*, 64> enabled_extensions;
     const auto add_extension = [&](std::string_view extension) -> bool {
         const auto result =
             std::find_if(available_extensions.begin(), available_extensions.end(),
@@ -329,6 +329,23 @@ bool Instance::CreateDevice() {
     depth_clip_control = add_extension(VK_EXT_DEPTH_CLIP_CONTROL_EXTENSION_NAME);
     depth_clip_enable = add_extension(VK_EXT_DEPTH_CLIP_ENABLE_EXTENSION_NAME);
     vertex_input_dynamic_state = add_extension(VK_EXT_VERTEX_INPUT_DYNAMIC_STATE_EXTENSION_NAME);
+    // Shader objects take their descriptors from the heap and their vertex input and colour
+    // write masks from dynamic state, so they're only used with all three.
+    if (EmulatorSettings.IsShaderObjects() && descriptor_heap && vertex_input_dynamic_state &&
+        dynamic_state_3 && dynamic_state_3_features.extendedDynamicState3ColorWriteMask) {
+        shader_object = add_extension(VK_EXT_SHADER_OBJECT_EXTENSION_NAME);
+        if (shader_object) {
+            shader_object = physical_device
+                                .getFeatures2<vk::PhysicalDeviceFeatures2,
+                                              vk::PhysicalDeviceShaderObjectFeaturesEXT>()
+                                .get<vk::PhysicalDeviceShaderObjectFeaturesEXT>()
+                                .shaderObject;
+            if (!shader_object) {
+                enabled_extensions.pop_back();
+            }
+        }
+        LOG_INFO(Render_Vulkan, "Shader objects: {}", shader_object ? "on" : "unavailable");
+    }
     // Games excessively leave restart enabled with lists when it isn't actually needed, and it
     // slows down KosmicKrisp due to unrolling. Revisit if KosmicKrisp moves this to mesh shaders.
     list_restart = driver_id != vk::DriverId::eMesaKosmickrisp &&
@@ -554,6 +571,9 @@ bool Instance::CreateDevice() {
         vk::PhysicalDeviceDescriptorHeapFeaturesEXT{
             .descriptorHeap = true,
         },
+        vk::PhysicalDeviceShaderObjectFeaturesEXT{
+            .shaderObject = true,
+        },
         vk::PhysicalDeviceAttachmentFeedbackLoopLayoutFeaturesEXT{
             .attachmentFeedbackLoopLayout = true,
         },
@@ -622,6 +642,9 @@ bool Instance::CreateDevice() {
     }
     if (!descriptor_heap) {
         device_chain.unlink<vk::PhysicalDeviceDescriptorHeapFeaturesEXT>();
+    }
+    if (!shader_object) {
+        device_chain.unlink<vk::PhysicalDeviceShaderObjectFeaturesEXT>();
     }
     if (!attachment_feedback_loop) {
         device_chain.unlink<vk::PhysicalDeviceAttachmentFeedbackLoopLayoutFeaturesEXT>();

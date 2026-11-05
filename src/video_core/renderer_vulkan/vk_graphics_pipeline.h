@@ -26,6 +26,7 @@ static constexpr u32 MaxVertexBufferCount = 32;
 class Instance;
 class Scheduler;
 class DescriptorHeap;
+class ShaderObjects;
 
 template <typename T>
 using VertexInputs = boost::container::static_vector<T, MaxVertexBufferCount>;
@@ -102,6 +103,15 @@ public:
         return key;
     }
 
+    /// True if it draws with shader objects, bound with BindShaderObjects, instead of a
+    /// pipeline handle.
+    [[nodiscard]] bool UsesShaderObjects() const noexcept {
+        return shader_state != nullptr;
+    }
+
+    /// Binds the shader objects and sets the state a pipeline would have baked in.
+    void BindShaderObjects(vk::CommandBuffer cmdbuf) const;
+
     /// Gets the attributes and bindings for vertex inputs.
     template <typename Attribute, typename Binding>
     void GetVertexInputs(VertexInputs<Attribute>& attributes, VertexInputs<Binding>& bindings,
@@ -121,7 +131,33 @@ private:
     static void Probe(const Build& build, u64 optimized_ns,
                       const std::function<void(u64, u64)>& on_probed);
 
+    /// Takes the shaders and baked state from a filled build, instead of creating a pipeline.
+    void CreateShaderObjects(const Build& build, ShaderObjects& objects,
+                             std::span<const std::vector<u32>* const> generated);
+
 private:
+    /// With shader objects: what BindShaderObjects binds and sets.
+    struct ShaderObjectState {
+        std::array<vk::ShaderStageFlagBits, 5> stages{};
+        std::array<vk::ShaderEXT, 5> shaders{};
+        u32 num_stages{};
+        vk::PrimitiveTopology topology{};
+        u32 patch_control_points{};
+        bool tessellation{};
+        vk::SampleCountFlagBits samples{};
+        vk::PolygonMode polygon_mode{};
+        bool depth_clamp{};
+        bool depth_clip{};
+        vk::ProvokingVertexModeEXT provoking_vertex{};
+        bool negative_one_to_one{};
+        bool logic_op_enable{};
+        vk::LogicOp logic_op{};
+        u32 num_attachments{};
+        std::array<vk::Bool32, AmdGpu::NUM_COLOR_BUFFERS> blend_enables{};
+        std::array<vk::ColorBlendEquationEXT, AmdGpu::NUM_COLOR_BUFFERS> blend_equations{};
+    };
+    std::unique_ptr<ShaderObjectState> shader_state;
+
     GraphicsPipelineKey key;
     Shader::Gcn::FetchShaderData fetch_shader{};
 };

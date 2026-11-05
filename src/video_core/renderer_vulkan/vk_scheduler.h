@@ -126,6 +126,8 @@ struct DynamicState {
         bool color_write_masks : 1;
         bool line_width : 1;
         bool feedback_loop_enabled : 1;
+        /// Shader objects and the state they set, which a pipeline bind leaves undefined.
+        bool shader_objects : 1;
     } dirty_state{};
 
     Viewports viewports{};
@@ -166,6 +168,13 @@ struct DynamicState {
 
     /// Commits the dynamic state to the provided command buffer.
     void Commit(const Instance& instance, const vk::CommandBuffer& cmdbuf);
+
+    /// True once after an invalidation, so the rasterizer binds its shader objects again.
+    bool TakeShaderObjectsDirty() {
+        const bool dirty = dirty_state.shader_objects;
+        dirty_state.shader_objects = false;
+        return dirty;
+    }
 
     /// Invalidates all dynamic state to be flushed into the next command buffer.
     void Invalidate() {

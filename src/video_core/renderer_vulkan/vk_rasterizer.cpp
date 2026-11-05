@@ -296,7 +296,7 @@ void Rasterizer::Draw(bool is_indexed, u32 index_offset) {
     const auto [vertex_offset, instance_offset] = GetDrawOffsets(regs, vs_info, fetch_shader);
 
     const auto cmdbuf = scheduler.CommandBuffer();
-    cmdbuf.bindPipeline(vk::PipelineBindPoint::eGraphics, pipeline->Handle());
+    BindGraphics(pipeline);
 
     if (is_indexed) {
         cmdbuf.drawIndexed(regs.num_indices, regs.num_instances.NumInstances(), 0,
@@ -368,7 +368,7 @@ void Rasterizer::DrawIndirect(bool is_indexed, VAddr arg_address, u32 offset, u3
     scheduler.BeginRendering(state);
 
     const auto cmdbuf = scheduler.CommandBuffer();
-    cmdbuf.bindPipeline(vk::PipelineBindPoint::eGraphics, pipeline->Handle());
+    BindGraphics(pipeline);
 
     if (is_indexed) {
         ASSERT(sizeof(VkDrawIndexedIndirectCommand) == stride);
@@ -1462,6 +1462,20 @@ void Rasterizer::UnmapMemory(VAddr addr, u64 size) {
     {
         std::scoped_lock lock{mapped_ranges_mutex};
         mapped_ranges -= decltype(mapped_ranges)::interval_type::right_open(addr, addr + size);
+    }
+}
+
+void Rasterizer::BindGraphics(const GraphicsPipeline* pipeline) {
+    const auto cmdbuf = scheduler.CommandBuffer();
+    if (!pipeline->UsesShaderObjects()) {
+        cmdbuf.bindPipeline(vk::PipelineBindPoint::eGraphics, pipeline->Handle());
+        return;
+    }
+    // A new command buffer or a helper pass's pipeline undoes what the shaders set.
+    const bool invalidated = scheduler.GetDynamicState().TakeShaderObjectsDirty();
+    if (invalidated || bound_shaders != pipeline) {
+        pipeline->BindShaderObjects(cmdbuf);
+        bound_shaders = pipeline;
     }
 }
 

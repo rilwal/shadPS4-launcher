@@ -447,6 +447,9 @@ struct GPUSettings {
     /// Binds shader resources through VK_EXT_descriptor_heap where the driver has it, so a
     /// shader doesn't depend on the other stages of its pipeline. Read at boot.
     Setting<bool> descriptor_heap{false};
+    /// Draws with VK_EXT_shader_object instead of pipelines, so each shader is compiled once
+    /// and reused by every draw that uses it. Needs the descriptor heap.
+    Setting<bool> shader_objects{false};
 
     std::vector<OverrideItem> GetOverrideableFields() const {
         return std::vector<OverrideItem>{
@@ -480,6 +483,7 @@ struct GPUSettings {
             make_override<GPUSettings>("pipeline_compile_probe",
                                        &GPUSettings::pipeline_compile_probe),
             make_override<GPUSettings>("descriptor_heap", &GPUSettings::descriptor_heap),
+            make_override<GPUSettings>("shader_objects", &GPUSettings::shader_objects),
         };
     }
 };
@@ -489,7 +493,7 @@ NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE(
     direct_memory_access_enabled, dump_shaders, patch_shaders, vblank_frequency, full_screen,
     full_screen_mode, present_mode, hdr_allowed, fsr_enabled, rcas_enabled, rcas_attenuation,
     userfaultfd, inline_fetch_shader, fast_shader_math, async_pipelines, async_pipeline_wait_ms,
-    async_pipelines_ab_seconds, pipeline_compile_probe, descriptor_heap)
+    async_pipelines_ab_seconds, pipeline_compile_probe, descriptor_heap, shader_objects)
 
 // -------------------------------
 // Vulkan settings
@@ -802,6 +806,7 @@ public:
     SETTING_FORWARD(m_gpu, AsyncPipelinesAbSeconds, async_pipelines_ab_seconds)
     SETTING_FORWARD_BOOL(m_gpu, PipelineCompileProbe, pipeline_compile_probe)
     SETTING_FORWARD_BOOL(m_gpu, DescriptorHeap, descriptor_heap)
+    SETTING_FORWARD_BOOL(m_gpu, ShaderObjects, shader_objects)
 
     u32 GetVblankFrequency() {
         if (m_gpu.vblank_frequency.value < 30) {

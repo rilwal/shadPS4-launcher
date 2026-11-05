@@ -12,6 +12,7 @@
 #include "video_core/renderer_vulkan/vk_graphics_pipeline.h"
 #include "video_core/renderer_vulkan/vk_pipeline_compiler.h"
 #include "video_core/renderer_vulkan/vk_resource_pool.h"
+#include "video_core/renderer_vulkan/vk_shader_objects.h"
 #include "vulkan/vulkan.hpp"
 
 template <>
@@ -227,6 +228,8 @@ private:
     AmdGpu::Liverpool* liverpool;
     DescriptorHeap desc_heap;
     vk::UniquePipelineCache pipeline_cache;
+    /// With shader objects: every guest shader compiled once, shared by the draws that use it.
+    std::unique_ptr<ShaderObjects> shader_objects;
     vk::UniquePipelineLayout pipeline_layout;
     Shader::Profile profile{};
     Shader::Pools pools;

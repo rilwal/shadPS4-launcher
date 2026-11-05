@@ -451,6 +451,12 @@ const std::vector<Entry>& Entries() {
             "time.",
             [] { return EmulatorSettings.IsDescriptorHeap(); },
             [](bool v) { EmulatorSettings.SetDescriptorHeap(v, G); }));
+        e.push_back(Toggle(
+            "shader-objects", "Shader objects", "Accuracy",
+            "Compile each shader once and reuse it for every draw, instead of compiling a "
+            "pipeline for each combination. Experimental, and needs the descriptor heap.",
+            [] { return EmulatorSettings.IsShaderObjects(); },
+            [](bool v) { EmulatorSettings.SetShaderObjects(v, G); }));
 
         // System
         e.push_back(Toggle(

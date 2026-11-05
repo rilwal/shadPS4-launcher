@@ -110,6 +110,8 @@ private:
     void DepthStencilCopy(bool is_depth, bool is_stencil);
     void EliminateFastClear();
 
+    /// Binds the pipeline, or its shader objects and their baked state.
+    void BindGraphics(const GraphicsPipeline* pipeline);
     void UpdateDynamicState(const GraphicsPipeline* pipeline, bool is_indexed) const;
     void UpdateViewportScissorState() const;
     void UpdateDepthStencilState() const;
@@ -211,6 +213,8 @@ private:
     boost::container::static_vector<HeapStageWrites, Shader::HeapPushData::NumStages> heap_stages;
 
     bool attachment_feedback_loop{};
+    /// The pipeline whose shader objects are bound, while nothing has undone them.
+    const GraphicsPipeline* bound_shaders{};
     bool needs_barrier{};
 };
 

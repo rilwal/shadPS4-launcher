@@ -337,6 +337,9 @@ PipelineCache::PipelineCache(const Instance& instance_, Scheduler& scheduler_,
     // A quarter of the cores: the game's own threads and the GPU thread need the rest.
     const u32 compile_threads = std::clamp(std::thread::hardware_concurrency() / 4, 1u, 4u);
     compiler = std::make_unique<PipelineCompiler>(compile_threads);
+    if (instance.UsesShaderObjects()) {
+        shader_objects = std::make_unique<ShaderObjects>(instance);
+    }
     LOG_INFO(Render_Vulkan, "{} pipeline compile threads", compile_threads);
     WarmUp();
 
@@ -398,6 +401,13 @@ void PipelineCache::FlushCompileStats(u64 now_ns) {
                  bg_worst_latency_ns / 1e6, stats.skipped_draws, stats.waited_draws,
                  stats.waited_ns / 1e6, compiler->Pending());
     }
+    if (shader_objects) {
+        const auto objects = shader_objects->TakeCounts();
+        if (objects.created != 0 || objects.reused != 0) {
+            LOG_INFO(Render_Vulkan, "Shader objects over {:.1f} s: {} created, {} reused", seconds,
+                     objects.created, objects.reused);
+        }
+    }
     const u64 probes = bg.probes.exchange(0, std::memory_order_relaxed);
     const u64 probe_optimized_ns = bg.probe_optimized_ns.exchange(0, std::memory_order_relaxed);
     const u64 probe_unoptimized_ns = bg.probe_unoptimized_ns.exchange(0, std::memory_order_relaxed);
@@ -413,6 +423,10 @@ void PipelineCache::FlushCompileStats(u64 now_ns) {
 }
 
 PipelineCache::AsyncMode PipelineCache::GetAsyncMode() const {
+    if (shader_objects) {
+        // Shaders are created at once; compiling them in the background comes later.
+        return AsyncMode::Off;
+    }
     const u32 setting = EmulatorSettings.GetAsyncPipelines();
     const auto mode = setting <= 3 ? static_cast<AsyncMode>(setting) : AsyncMode::Off;
     if (EmulatorSettings.GetAsyncPipelinesAbSeconds() != 0) {
@@ -550,11 +564,12 @@ const GraphicsPipeline* PipelineCache::GetGraphicsPipeline(const DrawIndirectPar
         GraphicsPipeline::SerializationSupport sdata{};
         const u64 recompile_ns = std::exchange(pending_recompile_ns, 0);
         const auto mode = GetAsyncMode();
+        auto options = MakeCompileOptions(pipeline_hash, recompile_ns, mode);
+        options.shader_objects = shader_objects.get();
         const u64 start = VideoCore::PerfStats::NowNs();
         it.value() = std::make_unique<GraphicsPipeline>(
             instance, scheduler, desc_heap, profile, graphics_key, *pipeline_cache, infos,
-            runtime_infos, fetch_shader, modules, sdata, false,
-            MakeCompileOptions(pipeline_hash, recompile_ns, mode));
+            runtime_infos, fetch_shader, modules, sdata, false, std::move(options));
         // When skipping this is only the setup, as the workers time the driver.
         const u64 gpu_thread_ns = VideoCore::PerfStats::NowNs() - start;
         ++compile_stats.graphics;
@@ -879,6 +894,9 @@ vk::ShaderModule PipelineCache::CompileModule(Shader::Info& info, Shader::Runtim
         module = CompileSPV(spv, instance.GetDevice());
     }
 
+    if (shader_objects) {
+        shader_objects->Register(module, is_patched ? std::span<const u32>{*patch} : spv);
+    }
     RegisterShaderBinary(std::move(spv), info.pgm_hash, perm_idx);
 
     const auto name = GetShaderName(info.hw_stage, info.pgm_hash, perm_idx);
@@ -961,8 +979,14 @@ std::optional<vk::ShaderModule> PipelineCache::ReplaceShader(vk::ShaderModule mo
         for (auto& m : program->modules) {
             if (m.module == module) {
                 const auto& d = instance.GetDevice();
+                if (shader_objects) {
+                    shader_objects->Forget(m.module);
+                }
                 d.destroyShaderModule(m.module);
                 m.module = CompileSPV(spv_code, d);
+                if (shader_objects) {
+                    shader_objects->Register(m.module, spv_code);
+                }
                 new_module = m.module;
             }
         }
