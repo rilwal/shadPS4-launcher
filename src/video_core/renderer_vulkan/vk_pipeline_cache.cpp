@@ -1943,8 +1943,9 @@ std::optional<Shader::RuntimeInfo> PipelineCache::GuessRuntimeInfo(
         const int base = semantic_base.load(std::memory_order_relaxed);
         for (u32 i = 0; i < fs.num_inputs; ++i) {
             fs.inputs[i] = {.param_index = static_cast<u16>(i)};
+            // param_index is 5 bits wide.
             if (semantics && semantics->size() == fs.num_inputs && base >= 0 &&
-                int((*semantics)[i] & 0xff) >= base) {
+                int((*semantics)[i] & 0xff) >= base && int((*semantics)[i] & 0xff) - base < 32) {
                 const u16 semantic = (*semantics)[i];
                 fs.inputs[i].param_index = static_cast<u16>((semantic & 0xff) - base);
                 fs.inputs[i].is_flat = (semantic >> 10) & 1;
