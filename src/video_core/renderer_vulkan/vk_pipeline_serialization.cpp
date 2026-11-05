@@ -14,8 +14,8 @@
 
 namespace Serialization {
 /* You should increment versions below once corresponding serialization scheme is changed. */
-static constexpr u32 ShaderBinaryVersion = 11u;
-static constexpr u32 ShaderMetaVersion = 6u;
+static constexpr u32 ShaderBinaryVersion = 12u;
+static constexpr u32 ShaderMetaVersion = 7u;
 static constexpr u32 PipelineKeyVersion = 3u;
 } // namespace Serialization
 
@@ -83,18 +83,17 @@ void RegisterShaderMeta(const Shader::Info& info,
                                        fmt::format("{:#018x}", perm_hash), ar.TakeOff());
 }
 
-void RegisterShaderBinary(std::vector<u32>&& spv, u64 pgm_hash, size_t perm_idx) {
+void RegisterShaderBinary(std::vector<u32>&& spv, u64 perm_hash) {
     if (!Storage::DataBase::Instance().IsOpened()) {
         return;
     }
 
     Storage::DataBase::Instance().Save(Storage::BlobType::ShaderBinary,
-                                       fmt::format("{:#018x}_{}", pgm_hash, perm_idx),
-                                       std::move(spv));
+                                       fmt::format("{:#018x}", perm_hash), std::move(spv));
 }
 
 bool LoadShaderMeta(Serialization::Archive& ar, Shader::Info& info,
-                    Shader::StageSpecialization& spec, size_t& perm_idx) {
+                    Shader::StageSpecialization& spec, u64& perm_hash) {
     Serialization::Reader meta{ar};
 
     u32 meta_version{};
@@ -109,8 +108,8 @@ bool LoadShaderMeta(Serialization::Archive& ar, Shader::Info& info,
         return false;
     }
 
-    u64 perm_hash_ar{};
-    meta.Read(perm_hash_ar);
+    size_t perm_idx{};
+    meta.Read(perm_hash);
     meta.Read(perm_idx);
 
     spec.Deserialize(ar);
@@ -257,58 +256,40 @@ bool PipelineCache::LoadPipelineStage(Serialization::Archive& ar, size_t stage) 
     auto program = std::make_unique<Program>();
     Shader::StageSpecialization spec{};
     spec.info = &program->info;
-    size_t perm_idx{};
-    if (!LoadShaderMeta(ar, program->info, spec, perm_idx)) {
+    u64 perm_hash{};
+    if (!LoadShaderMeta(ar, program->info, spec, perm_hash)) {
         return false;
     }
 
     std::vector<u32> spv{};
     Storage::DataBase::Instance().Load(Storage::BlobType::ShaderBinary,
-                                       fmt::format("{:#018x}_{}", program->info.pgm_hash, perm_idx),
-                                       spv);
+                                       fmt::format("{:#018x}", perm_hash), spv);
     if (spv.empty()) {
         return false;
     }
 
-    // Permutation hash depends on shader variation index. To prevent collisions, we need insert it
-    // at the exact position rather than append
-
-    vk::ShaderModule module{};
-
+    // Variants are keyed by their content hash, so one already loaded is reused whatever
+    // order it was made in.
     auto [it_pgm, new_program] = program_cache.try_emplace(program->info.pgm_hash);
     if (new_program) {
-        module = CompileSPV(spv, instance.GetDevice());
+        it_pgm.value() = std::move(program);
+    }
+    auto& modules_list = it_pgm.value()->modules;
+    auto it = std::ranges::find(modules_list, perm_hash, &Program::Module::hash);
+    if (it == modules_list.end()) {
+        const vk::ShaderModule module = CompileSPV(spv, instance.GetDevice());
         if (shader_objects) {
             shader_objects->Register(module, spv);
         }
-        it_pgm.value() = std::move(program);
-    } else {
-        const auto& it = std::ranges::find(it_pgm.value()->modules, spec, &Program::Module::spec);
-        if (it != it_pgm.value()->modules.end()) {
-            // A matching permutation is valid only at its original index. A different index means
-            // the store holds entries from more than one cache generation, so this pipeline is
-            // left to compile at runtime.
-            const auto idx = std::distance(it_pgm.value()->modules.begin(), it);
-            if (perm_idx != idx) {
-                LOG_WARNING(Render_Vulkan,
-                            "Cached permutation {} of {}_{:x} conflicts with index {}, skipping "
-                            "preload",
-                            perm_idx, program->info.hw_stage, program->info.pgm_hash, idx);
-                return false;
-            }
-            module = it->module;
-        } else {
-            module = CompileSPV(spv, instance.GetDevice());
-            if (shader_objects) {
-                shader_objects->Register(module, spv);
-            }
-        }
+        // The loaded info is dropped when the program already existed, so point at its own.
+        spec.info = &it_pgm.value()->info;
+        it_pgm.value()->AddPermut(module, std::move(spec), perm_hash);
+        it = modules_list.end() - 1;
     }
-    it_pgm.value()->InsertPermut(module, std::move(spec), perm_idx);
 
     infos[stage] = &it_pgm.value()->info;
-    modules[stage] = module;
-    if (auto& fetch = it_pgm.value()->modules[perm_idx].spec.fetch_shader_data; !fetch.Empty()) {
+    modules[stage] = it->module;
+    if (auto& fetch = it->spec.fetch_shader_data; !fetch.Empty()) {
         fetch_shader = &fetch;
     }
 

@@ -3,6 +3,7 @@
 
 #include <algorithm>
 #include <ranges>
+#include <xxhash.h>
 
 #include "common/hash.h"
 #include "common/io_file.h"
@@ -938,9 +939,11 @@ bool PipelineCache::RefreshComputeKey() {
     return true;
 }
 
-vk::ShaderModule PipelineCache::CompileModule(Shader::Info& info, Shader::RuntimeInfo& runtime_info,
-                                              const std::span<const u32>& code, size_t perm_idx,
-                                              Shader::Backend::Bindings& binding) {
+std::pair<vk::ShaderModule, u64> PipelineCache::CompileModule(Shader::Info& info,
+                                                              Shader::RuntimeInfo& runtime_info,
+                                                              const std::span<const u32>& code,
+                                                              size_t perm_idx,
+                                                              Shader::Backend::Bindings& binding) {
     LOG_INFO(Render_Vulkan, "Compiling {} shader {:#x} {}", info.hw_stage, info.pgm_hash,
              perm_idx != 0 ? "(permutation)" : "");
     DumpShader(code, info.pgm_hash, info.hw_stage, perm_idx, "bin");
@@ -971,7 +974,9 @@ vk::ShaderModule PipelineCache::CompileModule(Shader::Info& info, Shader::Runtim
     if (shader_objects) {
         shader_objects->Register(module, is_patched ? std::span<const u32>{*patch} : spv);
     }
-    RegisterShaderBinary(std::move(spv), info.pgm_hash, perm_idx);
+    // Identified by what it compiles to, not by the order the variants were made in.
+    const u64 hash = HashCombine(info.pgm_hash, XXH3_64bits(spv.data(), spv.size() * sizeof(u32)));
+    RegisterShaderBinary(std::move(spv), hash);
 
     const auto name = GetShaderName(info.hw_stage, info.pgm_hash, perm_idx);
     Vulkan::SetObjectName(instance.GetDevice(), module, name);
@@ -979,7 +984,7 @@ vk::ShaderModule PipelineCache::CompileModule(Shader::Info& info, Shader::Runtim
         DebugState.CollectShader(name, info.sw_stage, module, spv, code,
                                  patch ? *patch : std::span<const u32>{}, is_patched);
     }
-    return module;
+    return {module, hash};
 }
 
 PipelineCache::Result PipelineCache::GetProgram(HwStage hw_stage, SwStage sw_stage,
@@ -991,12 +996,12 @@ PipelineCache::Result PipelineCache::GetProgram(HwStage hw_stage, SwStage sw_sta
         it_pgm.value() = std::make_unique<Program>(hw_stage, sw_stage, params);
         auto& program = it_pgm.value();
         auto start = binding;
-        const auto module = CompileModule(program->info, runtime_info, params.code, 0, binding);
+        const auto [module, perm_hash] =
+            CompileModule(program->info, runtime_info, params.code, 0, binding);
         auto spec = Shader::StageSpecialization(program->info, runtime_info, profile, start);
-        const auto perm_hash = HashCombine(params.hash, 0);
 
         RegisterShaderMeta(program->info, spec.fetch_shader_data, spec, perm_hash, 0);
-        program->AddPermut(module, std::move(spec));
+        program->AddPermut(module, std::move(spec), perm_hash);
         if (auto& fetch = program->modules[0].spec.fetch_shader_data; !fetch.Empty()) {
             fetch_shader = &fetch;
         }
@@ -1011,7 +1016,7 @@ PipelineCache::Result PipelineCache::GetProgram(HwStage hw_stage, SwStage sw_sta
     auto spec = Shader::StageSpecialization(info, runtime_info, profile, binding);
 
     size_t perm_idx = program->modules.size();
-    u64 perm_hash = HashCombine(params.hash, perm_idx);
+    u64 perm_hash{};
 
     vk::ShaderModule module{};
 
@@ -1028,15 +1033,16 @@ PipelineCache::Result PipelineCache::GetProgram(HwStage hw_stage, SwStage sw_sta
             ++compile_stats.binding_permutations;
         }
         auto new_info = Shader::Info(hw_stage, sw_stage, params);
-        module = CompileModule(new_info, runtime_info, params.code, perm_idx, binding);
+        std::tie(module, perm_hash) =
+            CompileModule(new_info, runtime_info, params.code, perm_idx, binding);
 
         RegisterShaderMeta(info, spec.fetch_shader_data, spec, perm_hash, perm_idx);
-        program->AddPermut(module, std::move(spec));
+        program->AddPermut(module, std::move(spec), perm_hash);
     } else {
         info.AddBindings(binding);
         module = it->module;
         perm_idx = std::distance(program->modules.begin(), it);
-        perm_hash = HashCombine(params.hash, perm_idx);
+        perm_hash = it->hash;
     }
     if (auto& fetch = program->modules[perm_idx].spec.fetch_shader_data; !fetch.Empty()) {
         fetch_shader = &fetch;
