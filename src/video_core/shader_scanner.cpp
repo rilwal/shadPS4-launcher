@@ -6,7 +6,6 @@
 #include <chrono>
 #include <condition_variable>
 #include <cstring>
-#include <functional>
 
 #ifdef __linux__
 #include <fcntl.h>
@@ -133,7 +132,6 @@ void ShaderScanner::ScanOnce() {
 void ShaderScanner::ScanRange(u64 base, u64 size, std::vector<u8>& chunk) {
     // Shaders in executables are often only 2-byte aligned, so this searches bytes. Chunks
     // overlap by a signature's length so one across a boundary is still seen.
-    static const std::boyer_moore_horspool_searcher searcher(Signature.begin(), Signature.end());
     for (u64 offset = 0; offset < size; offset += ChunkSize - Signature.size()) {
         const u64 len = std::min(ChunkSize, size - offset);
         if (len < sizeof(AmdGpu::BinaryInfo)) {
@@ -151,10 +149,16 @@ void ShaderScanner::ScanRange(u64 base, u64 size, std::vector<u8>& chunk) {
                 }
             }
         }
-        const auto* data = chunk.data();
-        for (const u8* it = data; (it = std::search(it, data + len, searcher)) != data + len;
+        // memchr is vectorised, and the signature's first byte is rare enough in most data
+        // that checking the rest at each hit costs little.
+        const u8* data = chunk.data();
+        const u8* end = data + len - Signature.size() + 1;
+        for (const u8* it = data;
+             (it = static_cast<const u8*>(std::memchr(it, Signature[0], end - it))) != nullptr;
              ++it) {
-            TryAdd(base + offset + (it - data));
+            if (std::memcmp(it, Signature.data(), Signature.size()) == 0) {
+                TryAdd(base + offset + (it - data));
+            }
         }
         if (len < ChunkSize) {
             break;
