@@ -5,6 +5,7 @@
 
 #include <atomic>
 
+#include "common/ab_switch.h"
 #include "common/recursive_lock.h"
 #include "common/shared_first_mutex.h"
 #include "common/unique_function.h"
@@ -95,6 +96,11 @@ public:
     /// right away instead. Returns false (without signaling) when readbacks aren't Fenced.
     bool DeferFenceSignal(Common::UniqueFunction<void>&& signal, bool throttle);
 
+    /// Whether fences currently use Fenced readbacks (see the A/B switch).
+    [[nodiscard]] bool IsFencedReadbacks() const {
+        return readbacks_ab ? Common::AbSwitch::IsB() : fenced_readbacks;
+    }
+
     PipelineCache& GetPipelineCache() {
         return pipeline_cache;
     }
@@ -159,7 +165,10 @@ private:
     PipelineCache pipeline_cache;
     const bool host_markers_enabled;
     const bool guest_markers_enabled;
-    const bool fenced_readbacks;
+    /// Readbacks Precise or Fenced: the two can be A/B switched live.
+    bool readbacks_ab{};
+    bool fenced_readbacks{};
+    u64 last_ab_switch_ns{};
     std::atomic<u32> deferred_signals_in_flight{0};
     std::atomic<u32> throttled_fences_in_flight{0};
 

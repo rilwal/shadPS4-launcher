@@ -12,6 +12,7 @@
 #include <mutex>
 #include <SDL3/SDL_hints.h>
 
+#include "common/ab_switch.h"
 #include "common/path_util.h"
 #include "core/devtools/layer.h"
 #include "core/emulator_settings.h"
@@ -394,6 +395,30 @@ const std::vector<Entry>& Entries() {
             [](const std::string& value) {
                 EmulatorSettings.SetReadbacksMode(static_cast<u32>(std::stoi(value)), G);
             }));
+        // A/B testing: flip between two variants of an experiment while the game runs
+        // (e.g. Precise vs Fenced readbacks), which compares them with far less noise than
+        // separate runs. The active variant shows under the FPS counter.
+        e.push_back(Live(Toggle(
+                             "ab-variant-b", "A/B test: second variant", "Accuracy",
+                             "Switch the running experiment to its second variant "
+                             "(Fenced, when readbacks are Precise or Fenced).",
+                             [] { return Common::AbSwitch::IsB(); },
+                             [](bool v) {
+                                 if (v != Common::AbSwitch::IsB()) {
+                                     Common::AbSwitch::Toggle();
+                                 }
+                             }),
+                         Nothing));
+        e.push_back(Live(Choice(
+                             "ab-auto-switch", "A/B test: auto switch", "Accuracy",
+                             "Flip the A/B variant on a timer, for unattended comparisons.",
+                             {{"0", "Off"}, {"10", "Every 10 s"}, {"30", "Every 30 s"}},
+                             [] { return std::to_string(EmulatorSettings.GetAbSwitchSeconds()); },
+                             [](const std::string& value) {
+                                 EmulatorSettings.SetAbSwitchSeconds(
+                                     static_cast<u32>(std::stoi(value)), G);
+                             }),
+                         Nothing));
         e.push_back(Toggle(
             "readback-linear-images", "Read back linear images", "Accuracy",
             "Also copy linear images the GPU writes back to memory.",

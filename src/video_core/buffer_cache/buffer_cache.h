@@ -128,6 +128,9 @@ public:
     /// Mark region as modified from the GPU
     void MarkRegionAsGpuModified(VAddr addr, size_t size);
 
+    /// Logs the readback stats gathered so far and starts a new window, e.g. at an A/B switch.
+    void FlushReadbackStats();
+
     /// Readback profiling: records how a fence was signaled and time spent throttled.
     void RecordFence(bool deferred, u64 throttle_ns) {
         ++(deferred ? readback_stats.deferred_fences : readback_stats.immediate_fences);
@@ -194,7 +197,8 @@ private:
     std::unique_ptr<Buffer> null_index_buffer;
     RangeSet gpu_modified_ranges;
     std::deque<std::shared_ptr<Landing>> landings;
-    bool fenced_readbacks{};
+    /// Precise or Fenced: GPU-written pages are protected until their data is in guest memory.
+    bool tracks_gpu_pages{};
 
     /// Readback statistics, logged every few seconds.
     struct ReadbackStats {
@@ -207,6 +211,7 @@ private:
         u64 deferred_fences{};
         u64 immediate_fences{};
         u64 last_log_ns{};
+        u64 ab_switches{};
     } readback_stats;
 
     std::unique_ptr<FaultManager> fault_manager;
