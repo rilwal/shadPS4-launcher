@@ -540,7 +540,12 @@ const GraphicsPipeline* PipelineCache::GetGraphicsPipeline(const DrawIndirectPar
     const auto [it, is_new] = graphics_pipelines.try_emplace(graphics_key);
     if (is_new) {
         const auto pipeline_hash = std::hash<GraphicsPipelineKey>{}(graphics_key);
-        LOG_INFO(Render_Vulkan, "Compiling graphics pipeline {:#x}", pipeline_hash);
+        // Stage variants in logical stage order (fs, tcs, tes, vs, gs), 0 when unused, so a log
+        // shows how many pipelines share each shader.
+        const auto& h = graphics_key.stage_hashes;
+        LOG_INFO(Render_Vulkan,
+                 "Compiling graphics pipeline {:#x} (stages {:#x} {:#x} {:#x} {:#x} {:#x})",
+                 pipeline_hash, h[0], h[1], h[2], h[3], h[4]);
 
         GraphicsPipeline::SerializationSupport sdata{};
         const u64 recompile_ns = std::exchange(pending_recompile_ns, 0);
