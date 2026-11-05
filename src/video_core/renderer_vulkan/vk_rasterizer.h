@@ -118,6 +118,19 @@ private:
 
     bool FilterDraw();
 
+    /// Decides what to do with a draw whose pipeline is still being created: true to skip it.
+    /// Skips only when every target it draws to was also drawn in one of the last frames, so
+    /// the game redraws it soon; otherwise waits, as a target drawn once (a baked texture)
+    /// would stay wrong.
+    bool SkipPendingDraw(const GraphicsPipeline* pipeline);
+
+    /// Records the frame in which each of the draw's targets was drawn.
+    void NoteDrawTargets(const GraphicsPipeline* pipeline);
+
+    /// Color and depth target addresses of the current draw.
+    boost::container::static_vector<VAddr, AmdGpu::NUM_COLOR_BUFFERS + 2> DrawTargets(
+        const GraphicsPipeline* pipeline) const;
+
     void BindBuffers(const Shader::Info& stage, Shader::Backend::Bindings& binding,
                      Shader::PushData& push_data);
     void BindTextures(const Shader::Info& stage, Shader::Backend::Bindings& binding);
@@ -134,6 +147,13 @@ private:
 
 private:
     friend class VideoCore::BufferCache;
+
+    /// The last two game frames in which something was drawn to a target address.
+    struct TargetFrames {
+        u64 last{};
+        u64 previous{};
+    };
+    tsl::robin_map<VAddr, TargetFrames> target_frames;
 
     const Instance& instance;
     Scheduler& scheduler;

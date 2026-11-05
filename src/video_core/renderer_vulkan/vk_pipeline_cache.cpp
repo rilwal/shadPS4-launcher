@@ -387,13 +387,13 @@ void PipelineCache::FlushCompileStats(u64 now_ns) {
                  "{:.1f} ms, driver {:.1f} ms, worst pipeline {:.1f} ms. "
                  "Async {}: {} sent to workers, {} created there (driver {:.1f} ms, worst "
                  "{:.1f} ms, ready at worst {:.1f} ms after the draw), {} draws skipped, "
-                 "waited {:.1f} ms, {} pending",
+                 "{} draws waited for a new target, waited {:.1f} ms, {} pending",
                  seconds, frames.count, frames.count / seconds, frames.hitches,
                  frames.worst_ns / 1e6, stats.graphics, stats.compute, stats.shaders,
                  stats.recompile_ns / 1e6, stats.driver_ns / 1e6, stats.worst_ns / 1e6,
                  AsyncModeName(GetAsyncMode()), stats.background, bg_created, bg_driver_ns / 1e6,
                  bg_worst_driver_ns / 1e6, bg_worst_latency_ns / 1e6, stats.skipped_draws,
-                 stats.waited_ns / 1e6, compiler->Pending());
+                 stats.waited_draws, stats.waited_ns / 1e6, compiler->Pending());
     }
     const u64 probes = bg.probes.exchange(0, std::memory_order_relaxed);
     const u64 probe_optimized_ns = bg.probe_optimized_ns.exchange(0, std::memory_order_relaxed);
@@ -411,8 +411,7 @@ void PipelineCache::FlushCompileStats(u64 now_ns) {
 
 PipelineCache::AsyncMode PipelineCache::GetAsyncMode() const {
     const u32 setting = EmulatorSettings.GetAsyncPipelines();
-    const auto mode =
-        setting == 2 ? AsyncMode::Tiered : (setting == 1 ? AsyncMode::Skip : AsyncMode::Off);
+    const auto mode = setting <= 3 ? static_cast<AsyncMode>(setting) : AsyncMode::Off;
     if (EmulatorSettings.GetAsyncPipelinesAbSeconds() != 0) {
         // Flips between off and the chosen mode (background skipping if none is chosen).
         return ab_async ? (mode == AsyncMode::Off ? AsyncMode::Skip : mode) : AsyncMode::Off;
@@ -426,6 +425,8 @@ const char* PipelineCache::AsyncModeName(AsyncMode mode) {
         return "skip";
     case AsyncMode::Tiered:
         return "tiered";
+    case AsyncMode::SkipAll:
+        return "skip all";
     default:
         return "off";
     }
@@ -458,7 +459,7 @@ PipelineCompileOptions PipelineCache::MakeCompileOptions(u64 pipeline_hash, u64 
         AtomicMax(bg->worst_latency_ns, latency_ns);
         return latency_ns;
     };
-    if (mode == AsyncMode::Skip) {
+    if (mode == AsyncMode::Skip || mode == AsyncMode::SkipAll) {
         options.on_created = [background, pipeline_hash, recompile_ns](u64 driver_ns) {
             const u64 latency_ns = background(driver_ns);
             LOG_INFO(Render_Vulkan,
@@ -494,6 +495,15 @@ PipelineCompileOptions PipelineCache::MakeCompileOptions(u64 pipeline_hash, u64 
         };
     }
     return options;
+}
+
+void PipelineCache::WaitUntilReady(const GraphicsPipeline& pipeline) {
+    const u64 start = VideoCore::PerfStats::NowNs();
+    compiler->WaitFor([&pipeline] { return pipeline.IsReady(); }, std::chrono::hours{1});
+    const u64 waited = VideoCore::PerfStats::NowNs() - start;
+    compile_stats.waited_ns += waited;
+    compile_stats.worst_ns = std::max(compile_stats.worst_ns, waited);
+    ++compile_stats.waited_draws;
 }
 
 u64 PipelineCache::WaitForPipeline(const GraphicsPipeline& pipeline) {
@@ -543,10 +553,11 @@ const GraphicsPipeline* PipelineCache::GetGraphicsPipeline(const DrawIndirectPar
         if (mode != AsyncMode::Off) {
             ++compile_stats.background;
         }
-        if (mode != AsyncMode::Skip) {
+        const bool skips = mode == AsyncMode::Skip || mode == AsyncMode::SkipAll;
+        if (!skips) {
             compile_stats.driver_ns += gpu_thread_ns;
         }
-        const u64 waited_ns = mode == AsyncMode::Skip ? WaitForPipeline(*it.value()) : 0;
+        const u64 waited_ns = skips ? WaitForPipeline(*it.value()) : 0;
         compile_stats.worst_ns =
             std::max(compile_stats.worst_ns, recompile_ns + gpu_thread_ns + waited_ns);
 

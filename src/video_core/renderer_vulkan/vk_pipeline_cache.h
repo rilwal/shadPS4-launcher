@@ -127,10 +127,14 @@ private:
     enum class AsyncMode : u32 {
         /// On the GPU thread, which waits.
         Off = 0,
-        /// On the workers; draws are skipped until the pipeline is ready.
+        /// On the workers. Until the pipeline is ready, draws to targets the game drew in the
+        /// last frames are skipped, and draws to new targets wait for it.
         Skip = 1,
         /// Unoptimized on the GPU thread, then optimized on the workers, replacing it.
         Tiered = 2,
+        /// On the workers, skipping every draw until the pipeline is ready (for comparison:
+        /// it can leave targets drawn once wrong for good).
+        SkipAll = 3,
     };
 
     [[nodiscard]] static const char* AsyncModeName(AsyncMode mode);
@@ -142,6 +146,21 @@ private:
         return GetAsyncMode() != AsyncMode::Off;
     }
 
+public:
+    /// Whether draws with a pending pipeline are skipped only for targets drawn every frame.
+    [[nodiscard]] bool SkipsOnlyRedrawnTargets() const {
+        return GetAsyncMode() == AsyncMode::Skip;
+    }
+
+    /// Whether every draw with a pending pipeline is skipped.
+    [[nodiscard]] bool SkipsAnyPendingDraw() const {
+        return GetAsyncMode() == AsyncMode::SkipAll;
+    }
+
+    /// Waits for a pending pipeline, for a draw that mustn't be skipped.
+    void WaitUntilReady(const GraphicsPipeline& pipeline);
+
+private:
     /// How the next new graphics pipeline gets created, with its stats callbacks.
     PipelineCompileOptions MakeCompileOptions(u64 pipeline_hash, u64 recompile_ns, AsyncMode mode);
 
@@ -164,6 +183,8 @@ private:
         u64 background{};
         u64 skipped_draws{};
         u64 waited_ns{};
+        /// Draws that waited for their pipeline, as they draw to a new target.
+        u64 waited_draws{};
         u64 last_log_ns{};
     } compile_stats;
     /// Recompile time of the shaders gathered for the pipeline being looked up.

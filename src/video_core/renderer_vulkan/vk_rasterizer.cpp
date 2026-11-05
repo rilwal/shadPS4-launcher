@@ -10,6 +10,7 @@
 #include "video_core/amdgpu/liverpool.h"
 #include "video_core/buffer_cache/buffer.h"
 #include "video_core/buffer_cache/buffer_cache.h"
+#include "video_core/perf_stats.h"
 #include "video_core/renderer_vulkan/liverpool_to_vk.h"
 #include "video_core/renderer_vulkan/vk_instance.h"
 #include "video_core/renderer_vulkan/vk_pipeline_cache.h"
@@ -101,6 +102,74 @@ bool Rasterizer::FilterDraw() {
     }
 
     return true;
+}
+
+boost::container::static_vector<VAddr, AmdGpu::NUM_COLOR_BUFFERS + 2> Rasterizer::DrawTargets(
+    const GraphicsPipeline* pipeline) const {
+    const auto& key = pipeline->GetGraphicsKey();
+    const auto& regs = liverpool->regs;
+    boost::container::static_vector<VAddr, AmdGpu::NUM_COLOR_BUFFERS + 2> targets;
+    if (regs.color_control.mode != AmdGpu::ColorControl::OperationMode::Disable) {
+        for (s32 cb = 0; cb < std::bit_width(key.mrt_mask); ++cb) {
+            const auto& col_buf = regs.color_buffers[cb];
+            if (col_buf && regs.color_target_mask.GetMask(cb) && (key.mrt_mask & (1 << cb))) {
+                targets.push_back(col_buf.Address());
+            }
+        }
+    }
+    if (regs.depth_control.depth_enable && regs.depth_buffer.DepthValid()) {
+        targets.push_back(regs.depth_buffer.DepthAddress());
+    }
+    if (regs.depth_control.stencil_enable && regs.depth_buffer.StencilValid()) {
+        targets.push_back(regs.depth_buffer.StencilAddress());
+    }
+    return targets;
+}
+
+void Rasterizer::NoteDrawTargets(const GraphicsPipeline* pipeline) {
+    const u64 frame = VideoCore::PerfStats::frames.total.load(std::memory_order_relaxed) + 1;
+    for (const VAddr address : DrawTargets(pipeline)) {
+        auto& frames = target_frames[address];
+        if (frames.last != frame) {
+            frames.previous = frames.last;
+            frames.last = frame;
+        }
+    }
+}
+
+bool Rasterizer::SkipPendingDraw(const GraphicsPipeline* pipeline) {
+    const bool tracks_targets = pipeline_cache.SkipsOnlyRedrawnTargets();
+    if (pipeline->IsReady()) {
+        if (tracks_targets) {
+            NoteDrawTargets(pipeline);
+        }
+        return false;
+    }
+    // Frames are counted from 1, so 0 means never drawn.
+    constexpr u64 RecentFrames = 2;
+    const u64 frame = VideoCore::PerfStats::frames.total.load(std::memory_order_relaxed) + 1;
+    bool redrawn = pipeline_cache.SkipsAnyPendingDraw();
+    if (!redrawn) {
+        const auto targets = DrawTargets(pipeline);
+        redrawn = !targets.empty();
+        for (const VAddr address : targets) {
+            const auto it = target_frames.find(address);
+            const u64 earlier = it == target_frames.end()  ? 0
+                                : it->second.last == frame ? it->second.previous
+                                                           : it->second.last;
+            if (earlier == 0 || frame - earlier > RecentFrames) {
+                redrawn = false;
+                break;
+            }
+        }
+    }
+    NoteDrawTargets(pipeline);
+    if (redrawn) {
+        pipeline_cache.CountSkippedDraw();
+        return true;
+    }
+    pipeline_cache.WaitUntilReady(*pipeline);
+    return false;
 }
 
 void Rasterizer::PrepareRenderState(const GraphicsPipeline* pipeline) {
@@ -195,9 +264,7 @@ void Rasterizer::Draw(bool is_indexed, u32 index_offset) {
     if (!pipeline) {
         return;
     }
-    if (!pipeline->IsReady()) {
-        // Still being created on a compile thread: skip the draw instead of stalling.
-        pipeline_cache.CountSkippedDraw();
+    if (SkipPendingDraw(pipeline)) {
         return;
     }
 
@@ -259,8 +326,7 @@ void Rasterizer::DrawIndirect(bool is_indexed, VAddr arg_address, u32 offset, u3
     if (!pipeline) {
         return;
     }
-    if (!pipeline->IsReady()) {
-        pipeline_cache.CountSkippedDraw();
+    if (SkipPendingDraw(pipeline)) {
         return;
     }
 

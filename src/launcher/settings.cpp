@@ -419,9 +419,13 @@ const std::vector<Entry>& Entries() {
             Live(Choice(
                      "async-pipelines", "Shader compiling", "Accuracy",
                      "How new shaders get compiled. Pausing the game stutters. In the background, "
-                     "what a shader draws is missing until it's ready. Quick first compiles a "
-                     "slower version at once, then swaps in the full one.",
-                     {{"0", "Pause the game"}, {"1", "In the background"}, {"2", "Quick first"}},
+                     "what a shader draws is missing for a moment if the game draws it every "
+                     "frame; skip all also skips one-off draws, which can stay wrong. Quick "
+                     "first compiles a slower version at once, then swaps in the full one.",
+                     {{"0", "Pause the game"},
+                      {"1", "In the background"},
+                      {"2", "Quick first"},
+                      {"3", "In the background, skip all"}},
                      [] { return std::to_string(EmulatorSettings.GetAsyncPipelines()); },
                      [](const std::string& value) {
                          EmulatorSettings.SetAsyncPipelines(static_cast<u32>(std::stoi(value)), G);

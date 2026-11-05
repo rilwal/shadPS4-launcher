@@ -27,10 +27,13 @@ struct Frames {
 
     std::atomic<u64> count{};
     std::atomic<u64> hitches{};
+    /// Game frames presented since boot; never reset.
+    std::atomic<u64> total{};
     std::atomic<u64> worst_ns{};
     u64 last_ns{}; // presenter thread only
 
     void Record() {
+        total.fetch_add(1, std::memory_order_relaxed);
         const u64 now = NowNs();
         if (last_ns != 0) {
             const u64 delta = now - last_ns;
