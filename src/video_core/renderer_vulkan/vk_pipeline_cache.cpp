@@ -402,6 +402,12 @@ void PipelineCache::FlushCompileStats(u64 now_ns) {
                  bg_worst_latency_ns / 1e6, stats.skipped_draws, stats.waited_draws, stats.ran_now,
                  stats.waited_ns / 1e6, compiler->Pending());
     }
+    if (stats.prefetched != 0 || stats.prefetch_used != 0 || stats.waited_dispatches != 0) {
+        LOG_INFO(Render_Vulkan,
+                 "Look-ahead over {:.1f} s: {} pipelines made ahead of their draw, {} found later "
+                 "by a draw, {} dispatches waited",
+                 seconds, stats.prefetched, stats.prefetch_used, stats.waited_dispatches);
+    }
     if (shader_objects) {
         const auto objects = shader_objects->TakeCounts();
         if (objects.created != 0 || objects.reused != 0) {
@@ -552,11 +558,29 @@ u64 PipelineCache::WaitForPipeline(const GraphicsPipeline& pipeline) {
 }
 
 const GraphicsPipeline* PipelineCache::GetGraphicsPipeline(const DrawIndirectParams params) {
+    return LookUpGraphicsPipeline(params, false);
+}
+
+bool PipelineCache::PrefetchGraphicsPipeline() {
+    const auto mode = GetAsyncMode();
+    if (mode != AsyncMode::Skip && mode != AsyncMode::SkipAll) {
+        return false;
+    }
+    const size_t before = graphics_pipelines.size();
+    LookUpGraphicsPipeline({}, true);
+    return graphics_pipelines.size() != before;
+}
+
+const GraphicsPipeline* PipelineCache::LookUpGraphicsPipeline(const DrawIndirectParams params,
+                                                              bool prefetch) {
     draw_indirect_params = params;
     if (!RefreshGraphicsKey()) {
         return nullptr;
     }
     const auto [it, is_new] = graphics_pipelines.try_emplace(graphics_key);
+    if (!is_new && !prefetch && !prefetched.empty() && prefetched.erase(it->second.get()) != 0) {
+        ++compile_stats.prefetch_used;
+    }
     if (is_new) {
         const auto pipeline_hash = std::hash<GraphicsPipelineKey>{}(graphics_key);
         // Stage variants in logical stage order (fs, tcs, tes, vs, gs), 0 when unused, so a log
@@ -585,7 +609,12 @@ const GraphicsPipeline* PipelineCache::GetGraphicsPipeline(const DrawIndirectPar
         if (!skips) {
             compile_stats.driver_ns += gpu_thread_ns;
         }
-        const u64 waited_ns = skips ? WaitForPipeline(*it.value()) : 0;
+        // A prefetch never waits: the draw it was made for does that if it must.
+        const u64 waited_ns = skips && !prefetch ? WaitForPipeline(*it.value()) : 0;
+        if (prefetch) {
+            ++compile_stats.prefetched;
+            prefetched.insert(it.value().get());
+        }
         compile_stats.worst_ns =
             std::max(compile_stats.worst_ns, recompile_ns + gpu_thread_ns + waited_ns);
 
@@ -605,26 +634,66 @@ const GraphicsPipeline* PipelineCache::GetGraphicsPipeline(const DrawIndirectPar
 }
 
 const ComputePipeline* PipelineCache::GetComputePipeline() {
+    const ComputePipeline* pipeline = LookUpComputePipeline(false);
+    if (pipeline && !pipeline->IsReady()) {
+        // Made ahead on the workers; a dispatch can't be skipped, so it waits.
+        const u64 start = VideoCore::PerfStats::NowNs();
+        if (pipeline->CompileTicket() != 0 && compiler->RunNow(pipeline->CompileTicket())) {
+            ++compile_stats.ran_now;
+        }
+        compiler->WaitFor([pipeline] { return pipeline->IsReady(); }, std::chrono::hours{1});
+        const u64 waited = VideoCore::PerfStats::NowNs() - start;
+        compile_stats.waited_ns += waited;
+        compile_stats.worst_ns = std::max(compile_stats.worst_ns, waited);
+        ++compile_stats.waited_dispatches;
+    }
+    return pipeline;
+}
+
+bool PipelineCache::PrefetchComputePipeline() {
+    const auto mode = GetAsyncMode();
+    if (mode != AsyncMode::Skip && mode != AsyncMode::SkipAll) {
+        return false;
+    }
+    const size_t before = compute_pipelines.size();
+    LookUpComputePipeline(true);
+    return compute_pipelines.size() != before;
+}
+
+const ComputePipeline* PipelineCache::LookUpComputePipeline(bool prefetch) {
     if (!RefreshComputeKey()) {
         return nullptr;
     }
     const auto [it, is_new] = compute_pipelines.try_emplace(compute_key);
+    if (!is_new && !prefetch && !prefetched.empty() && prefetched.erase(it->second.get()) != 0) {
+        ++compile_stats.prefetch_used;
+    }
     if (is_new) {
         const auto pipeline_hash = std::hash<ComputePipelineKey>{}(compute_key);
         LOG_INFO(Render_Vulkan, "Compiling compute pipeline {:#x}", pipeline_hash);
 
         ComputePipeline::SerializationSupport sdata{};
         const u64 start = VideoCore::PerfStats::NowNs();
-        it.value() = std::make_unique<ComputePipeline>(instance, scheduler, desc_heap, profile,
-                                                       *pipeline_cache, compute_key, *infos[0],
-                                                       modules[0], sdata, false);
-        const u64 driver_ns = VideoCore::PerfStats::NowNs() - start;
+        it.value() = std::make_unique<ComputePipeline>(
+            instance, scheduler, desc_heap, profile, *pipeline_cache, compute_key, *infos[0],
+            modules[0], sdata, false, prefetch ? compiler.get() : nullptr);
+        const u64 gpu_thread_ns = VideoCore::PerfStats::NowNs() - start;
         const u64 recompile_ns = std::exchange(pending_recompile_ns, 0);
         ++compile_stats.compute;
-        compile_stats.driver_ns += driver_ns;
-        compile_stats.worst_ns = std::max(compile_stats.worst_ns, recompile_ns + driver_ns);
-        LOG_INFO(Render_Vulkan, "Compute pipeline {:#x}: recompile {:.2f} ms, driver {:.2f} ms",
-                 pipeline_hash, recompile_ns / 1e6, driver_ns / 1e6);
+        if (prefetch) {
+            ++compile_stats.prefetched;
+            prefetched.insert(it.value().get());
+            LOG_INFO(Render_Vulkan,
+                     "Compute pipeline {:#x}: recompile {:.2f} ms, ahead on the "
+                     "workers",
+                     pipeline_hash, recompile_ns / 1e6);
+        } else {
+            new_compute_pipeline = true;
+            compile_stats.driver_ns += gpu_thread_ns;
+            compile_stats.worst_ns = std::max(compile_stats.worst_ns, recompile_ns + gpu_thread_ns);
+            LOG_INFO(Render_Vulkan, "Compute pipeline {:#x}: recompile {:.2f} ms, driver {:.2f} ms",
+                     pipeline_hash, recompile_ns / 1e6, gpu_thread_ns / 1e6);
+        }
         RegisterPipelineData(compute_key, sdata);
         ++num_new_pipelines;
 

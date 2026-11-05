@@ -5,6 +5,7 @@
 
 #include <variant>
 #include <tsl/robin_map.h>
+#include <tsl/robin_set.h>
 #include "shader_recompiler/profile.h"
 #include "shader_recompiler/recompiler.h"
 #include "shader_recompiler/specialization.h"
@@ -89,6 +90,17 @@ public:
 
     const ComputePipeline* GetComputePipeline();
 
+    /// Look-ahead: creates the pipeline for the draw or dispatch the registers describe now on
+    /// the workers, ahead of the GPU thread reaching it. Returns true if it was new. Only
+    /// does anything in the async modes that skip draws.
+    bool PrefetchGraphicsPipeline();
+    bool PrefetchComputePipeline();
+
+    /// True once after a dispatch made a new compute pipeline on the GPU thread.
+    bool TakeNewComputePipeline() {
+        return std::exchange(new_compute_pipeline, false);
+    }
+
     using Result = std::tuple<const Shader::Info*, vk::ShaderModule, u64>;
     Result GetProgram(Shader::HwStage hw_stage, Shader::SwStage sw_stage,
                       const Shader::ShaderParams& params, Shader::Backend::Bindings& binding);
@@ -104,6 +116,9 @@ public:
     }
 
 private:
+    const GraphicsPipeline* LookUpGraphicsPipeline(DrawIndirectParams params, bool prefetch);
+    const ComputePipeline* LookUpComputePipeline(bool prefetch);
+
     bool RefreshGraphicsKey();
     bool RefreshGraphicsStages();
     bool RefreshComputeKey();
@@ -192,8 +207,16 @@ private:
         u64 waited_draws{};
         /// Of those, ones whose creation the GPU thread took over from the queue.
         u64 ran_now{};
+        /// Dispatches that waited for a compute pipeline made ahead on the workers.
+        u64 waited_dispatches{};
+        /// Pipelines made by the look-ahead, and how many of them a draw later found.
+        u64 prefetched{};
+        u64 prefetch_used{};
         u64 last_log_ns{};
     } compile_stats;
+    /// Pipelines the look-ahead made that no draw or dispatch has found yet.
+    tsl::robin_set<const Pipeline*> prefetched;
+    bool new_compute_pipeline{};
     /// Recompile time of the shaders gathered for the pipeline being looked up.
     u64 pending_recompile_ns{};
 

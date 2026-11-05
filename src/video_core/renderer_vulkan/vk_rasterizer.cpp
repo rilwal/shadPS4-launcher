@@ -60,6 +60,36 @@ Rasterizer::Rasterizer(const Instance& instance_, Scheduler& scheduler_, Runtime
 
 Rasterizer::~Rasterizer() = default;
 
+bool Rasterizer::WouldDraw() const {
+    // FilterDraw's checks without its side effects: the draws it handles itself use no
+    // pipeline of ours.
+    const auto& regs = liverpool->regs;
+    using Mode = AmdGpu::ColorControl::OperationMode;
+    const auto mode = regs.color_control.mode;
+    if (mode == Mode::EliminateFastClear || mode == Mode::FmaskDecompress ||
+        mode == Mode::Resolve || regs.primitive_type == AmdGpu::PrimitiveType::None) {
+        return false;
+    }
+    const auto depth_copy =
+        regs.depth_render_override.force_z_dirty && regs.depth_render_override.force_z_valid &&
+        regs.depth_buffer.DepthValid() && regs.depth_buffer.DepthWriteValid() &&
+        regs.depth_buffer.DepthAddress() != regs.depth_buffer.DepthWriteAddress();
+    const auto stencil_copy =
+        regs.depth_render_override.force_stencil_dirty &&
+        regs.depth_render_override.force_stencil_valid && regs.depth_buffer.StencilValid() &&
+        regs.depth_buffer.StencilWriteValid() &&
+        regs.depth_buffer.StencilAddress() != regs.depth_buffer.StencilWriteAddress();
+    return !(mode == Mode::Disable && (depth_copy || stencil_copy));
+}
+
+bool Rasterizer::PrefetchDraw() {
+    return WouldDraw() && pipeline_cache.PrefetchGraphicsPipeline();
+}
+
+bool Rasterizer::PrefetchDispatch() {
+    return pipeline_cache.PrefetchComputePipeline();
+}
+
 bool Rasterizer::FilterDraw() {
     const auto& regs = liverpool->regs;
     if (regs.color_control.mode == AmdGpu::ColorControl::OperationMode::EliminateFastClear) {
@@ -268,6 +298,10 @@ void Rasterizer::Draw(bool is_indexed, u32 index_offset) {
     if (!pipeline) {
         return;
     }
+    if (!pipeline->IsReady() && liverpool->LookAhead()) {
+        // The look-ahead used the shaders' infos for later draws; set them up for this one.
+        pipeline = pipeline_cache.GetGraphicsPipeline();
+    }
     if (SkipPendingDraw(pipeline)) {
         return;
     }
@@ -329,6 +363,9 @@ void Rasterizer::DrawIndirect(bool is_indexed, VAddr arg_address, u32 offset, u3
     const GraphicsPipeline* pipeline = pipeline_cache.GetGraphicsPipeline(params);
     if (!pipeline) {
         return;
+    }
+    if (!pipeline->IsReady() && liverpool->LookAhead()) {
+        pipeline = pipeline_cache.GetGraphicsPipeline(params);
     }
     if (SkipPendingDraw(pipeline)) {
         return;
@@ -405,6 +442,10 @@ void Rasterizer::DispatchDirect() {
     if (!pipeline) {
         return;
     }
+    if (pipeline_cache.TakeNewComputePipeline() && liverpool->LookAhead()) {
+        // The look-ahead used the shader's info for later dispatches; set it up for this one.
+        pipeline = pipeline_cache.GetComputePipeline();
+    }
 
     const auto& cs = pipeline->GetStage(Shader::SwStage::Compute);
     if (ExecuteShaderHLE(cs, liverpool->regs, cs_program, *this)) {
@@ -439,6 +480,10 @@ void Rasterizer::DispatchIndirect(VAddr address, u32 offset, u32 size) {
     const ComputePipeline* pipeline = pipeline_cache.GetComputePipeline();
     if (!pipeline) {
         return;
+    }
+    if (pipeline_cache.TakeNewComputePipeline() && liverpool->LookAhead()) {
+        // The look-ahead used the shader's info for later dispatches; set it up for this one.
+        pipeline = pipeline_cache.GetComputePipeline();
     }
 
     if (!BindResources(pipeline)) {

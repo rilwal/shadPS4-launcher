@@ -4,6 +4,7 @@
 #include <boost/container/small_vector.hpp>
 
 #include "shader_recompiler/info.h"
+#include "video_core/perf_stats.h"
 #include "video_core/renderer_vulkan/vk_compute_pipeline.h"
 #include "video_core/renderer_vulkan/vk_instance.h"
 #include "video_core/renderer_vulkan/vk_resource_heaps.h"
@@ -15,18 +16,31 @@ ComputePipeline::ComputePipeline(const Instance& instance, Scheduler& scheduler,
                                  DescriptorHeap& desc_heap, const Shader::Profile& profile,
                                  vk::PipelineCache pipeline_cache, ComputePipelineKey compute_key_,
                                  const Shader::Info& info_, vk::ShaderModule module,
-                                 SerializationSupport& sdata, bool preloading /*=false*/)
+                                 SerializationSupport& sdata, bool preloading /*=false*/,
+                                 PipelineCompiler* compiler /*=nullptr*/)
     : Pipeline{instance, scheduler, desc_heap, profile, pipeline_cache, true},
       compute_key{compute_key_} {
     auto& info = stages[int(Shader::SwStage::Compute)];
     info = &info_;
     const auto debug_str = GetDebugString();
 
-    const vk::PipelineShaderStageRequiredSubgroupSizeCreateInfo subgroup_size_ci = {
+    // Everything vkCreateComputePipelines reads, kept together so that a worker can create the
+    // pipeline after the constructor has returned.
+    struct Build {
+        vk::Device device;
+        vk::PipelineCache cache;
+        std::string name;
+        vk::PipelineShaderStageRequiredSubgroupSizeCreateInfo subgroup_size_ci;
+        StageHeapMappings heap_mappings;
+        vk::PipelineCreateFlags2CreateInfo flags2;
+        vk::ComputePipelineCreateInfo ci;
+    };
+    auto build = std::make_unique<Build>();
+    build->subgroup_size_ci = vk::PipelineShaderStageRequiredSubgroupSizeCreateInfo{
         .requiredSubgroupSize = 64,
     };
     const vk::PipelineShaderStageCreateInfo shader_ci = {
-        .pNext = instance.IsSubgroupSize64Supported() ? &subgroup_size_ci : nullptr,
+        .pNext = instance.IsSubgroupSize64Supported() ? &build->subgroup_size_ci : nullptr,
         .stage = vk::ShaderStageFlagBits::eCompute,
         .module = module,
         .pName = "main",
@@ -35,7 +49,7 @@ ComputePipeline::ComputePipeline(const Instance& instance, Scheduler& scheduler,
     const auto device = instance.GetDevice();
     // With the descriptor heap there are no layouts: the shader maps its own bindings.
     const bool uses_heap = instance.UsesDescriptorHeap();
-    StageHeapMappings heap_mappings;
+    auto& heap_mappings = build->heap_mappings;
     vk::PipelineShaderStageCreateInfo stage_ci = shader_ci;
     if (uses_heap) {
         heap_mappings.Build(*info, HeapGeometry::Of(instance), profile.needs_buffer_offsets);
@@ -113,22 +127,47 @@ ComputePipeline::ComputePipeline(const Instance& instance, Scheduler& scheduler,
         SetObjectName(device, *pipeline_layout, "Compute PipelineLayout {}", debug_str);
     }
 
-    const vk::PipelineCreateFlags2CreateInfo flags2 = {
+    build->device = device;
+    build->cache = pipeline_cache;
+    build->name = debug_str;
+    build->flags2 = vk::PipelineCreateFlags2CreateInfo{
         .flags = vk::PipelineCreateFlagBits2::eDescriptorHeapEXT,
     };
-    const vk::ComputePipelineCreateInfo compute_pipeline_ci = {
-        .pNext = uses_heap ? &flags2 : nullptr,
+    build->ci = vk::ComputePipelineCreateInfo{
+        .pNext = uses_heap ? &build->flags2 : nullptr,
         .stage = stage_ci,
         .layout = uses_heap ? vk::PipelineLayout{} : *pipeline_layout,
     };
-    auto [pipeline_result, pipe] =
-        instance.GetDevice().createComputePipelineUnique(pipeline_cache, compute_pipeline_ci);
-    ASSERT_MSG(pipeline_result == vk::Result::eSuccess, "Failed to create compute pipeline: {}",
-               vk::to_string(pipeline_result));
-    pipeline = std::move(pipe);
-    SetObjectName(device, *pipeline, "Compute Pipeline {}", debug_str);
+    const auto create = [this](const Build& b) {
+        const u64 start = VideoCore::PerfStats::NowNs();
+        auto [pipeline_result, pipe] = b.device.createComputePipelineUnique(b.cache, b.ci);
+        ASSERT_MSG(pipeline_result == vk::Result::eSuccess, "Failed to create compute pipeline: {}",
+                   vk::to_string(pipeline_result));
+        driver_ns = VideoCore::PerfStats::NowNs() - start;
+        pipeline = std::move(pipe);
+        SetObjectName(b.device, *pipeline, "Compute Pipeline {}", b.name);
+    };
+    if (!compiler) {
+        create(*build);
+        return;
+    }
+    // Created ahead of its dispatch on the workers; the dispatch waits for it if it must.
+    state.store(State::Pending, std::memory_order_relaxed);
+    compile_ticket =
+        compiler->Submit([this, build = std::move(build), create, compiler](bool drop) {
+            if (drop) {
+                Finish(State::Dropped);
+                return;
+            }
+            create(*build);
+            // The pipeline may be destroyed from here on, so nothing below touches it.
+            Finish(State::Ready);
+            compiler->Notify();
+        });
 }
 
-ComputePipeline::~ComputePipeline() = default;
+ComputePipeline::~ComputePipeline() {
+    WaitIdle();
+}
 
 } // namespace Vulkan

@@ -16,6 +16,7 @@
 #include "core/platform.h"
 #include "video_core/amdgpu/liverpool.h"
 #include "video_core/amdgpu/pm4_cmds.h"
+#include "video_core/perf_stats.h"
 #include "video_core/renderdoc.h"
 #include "video_core/renderer_vulkan/vk_rasterizer.h"
 
@@ -272,8 +273,197 @@ Liverpool::Task Liverpool::ProcessCeUpdate(std::span<const u32> ccb) {
     FIBER_EXIT;
 }
 
+bool Liverpool::LookAhead() {
+    if (!EmulatorSettings.IsCompileLookahead() || in_lookahead || looked_ahead || !rasterizer ||
+        curr_qid != GfxQueueId || gfx_frames.empty()) {
+        return false;
+    }
+    looked_ahead = true;
+    in_lookahead = true;
+    const auto saved_regs = std::make_unique<Regs>(regs);
+    const auto saved_cs = mapped_queues[GfxQueueId].cs_state;
+    const u64 start = VideoCore::PerfStats::NowNs();
+
+    LookAheadBudget budget{.packets = 200'000, .pipelines = 256};
+    const u32 initial_pipelines = budget.pipelines;
+    // Each level is on its current packet (the draw, or the indirect buffer being run), so
+    // reading starts after it, innermost level first.
+    for (auto it = gfx_frames.rbegin(); it != gfx_frames.rend(); ++it) {
+        const auto rest = **it;
+        if (rest.empty()) {
+            continue;
+        }
+        const auto* header = reinterpret_cast<const PM4Header*>(rest.data());
+        const size_t size = header->type == 3 ? header->type3.NumWords() + 1 : 1;
+        if (size > rest.size() || !ScanAhead(rest.subspan(size), budget, 0)) {
+            break;
+        }
+    }
+
+    regs = *saved_regs;
+    mapped_queues[GfxQueueId].cs_state = saved_cs;
+    in_lookahead = false;
+    LOG_INFO(Render, "Look-ahead read {} packets and made {} pipelines in {:.2f} ms",
+             200'000 - budget.packets, initial_pipelines - budget.pipelines,
+             (VideoCore::PerfStats::NowNs() - start) / 1e6);
+    return true;
+}
+
+bool Liverpool::ScanAhead(std::span<const u32> dcb, LookAheadBudget& budget, u32 depth) {
+    const auto write_regs = [this](u32 reg_addr, const u32* payload, u32 count) {
+        if (reg_addr + count <= Regs::NumRegs) {
+            std::memcpy(&regs.reg_array[reg_addr], payload, count * sizeof(u32));
+        }
+    };
+    const auto prefetched = [&budget](bool made) {
+        if (made && --budget.pipelines == 0) {
+            return false;
+        }
+        return true;
+    };
+    while (!dcb.empty()) {
+        if (budget.packets-- == 0) {
+            return false;
+        }
+        const auto* header = reinterpret_cast<const PM4Header*>(dcb.data());
+        if (header->type == 2) {
+            dcb = dcb.subspan(1);
+            continue;
+        }
+        if (header->type != 3) {
+            // Anything else would stop the real parser too.
+            return false;
+        }
+        const u32 count = header->type3.NumWords();
+        if (count + 1 > dcb.size()) {
+            return true;
+        }
+        const auto* payload = reinterpret_cast<const u32*>(header + 2);
+        switch (header->type3.opcode) {
+        case PM4ItOpcode::ClearState:
+            regs.SetDefaults();
+            break;
+        case PM4ItOpcode::SetConfigReg: {
+            const auto* set_data = reinterpret_cast<const PM4CmdSetData*>(header);
+            write_regs(Regs::ConfigRegWordOffset + set_data->reg_offset, payload, count - 1);
+            break;
+        }
+        case PM4ItOpcode::SetContextReg: {
+            const auto* set_data = reinterpret_cast<const PM4CmdSetData*>(header);
+            write_regs(Regs::ContextRegWordOffset + set_data->reg_offset, payload, count - 1);
+            break;
+        }
+        case PM4ItOpcode::SetShReg: {
+            const auto* set_data = reinterpret_cast<const PM4CmdSetData*>(header);
+            const auto set_size = (count - 1) * sizeof(u32);
+            if (set_data->reg_offset >= 0x200 &&
+                set_data->reg_offset <= (0x200 + sizeof(ComputeProgram) / 4)) {
+                if (set_size <= sizeof(ComputeProgram) - (set_data->reg_offset - 0x200) * 4) {
+                    auto* addr = reinterpret_cast<u32*>(&mapped_queues[GfxQueueId].cs_state) +
+                                 (set_data->reg_offset - 0x200);
+                    std::memcpy(addr, payload, set_size);
+                }
+            } else {
+                write_regs(Regs::ShRegWordOffset + set_data->reg_offset, payload, count - 1);
+            }
+            break;
+        }
+        case PM4ItOpcode::SetUconfigReg: {
+            const auto* set_data = reinterpret_cast<const PM4CmdSetData*>(header);
+            write_regs(Regs::UconfigRegWordOffset + set_data->reg_offset, payload, count - 1);
+            break;
+        }
+        case PM4ItOpcode::IndexType: {
+            const auto* index_type = reinterpret_cast<const PM4CmdDrawIndexType*>(header);
+            regs.index_buffer_type.raw = index_type->raw;
+            break;
+        }
+        case PM4ItOpcode::DrawIndex2: {
+            const auto* draw_index = reinterpret_cast<const PM4CmdDrawIndex2*>(header);
+            regs.num_indices = draw_index->index_count;
+            regs.draw_initiator = draw_index->draw_initiator;
+            if (!prefetched(rasterizer->PrefetchDraw())) {
+                return false;
+            }
+            break;
+        }
+        case PM4ItOpcode::DrawIndexOffset2: {
+            const auto* draw_index_off = reinterpret_cast<const PM4CmdDrawIndexOffset2*>(header);
+            regs.num_indices = draw_index_off->index_count;
+            regs.draw_initiator = draw_index_off->draw_initiator;
+            if (!prefetched(rasterizer->PrefetchDraw())) {
+                return false;
+            }
+            break;
+        }
+        case PM4ItOpcode::DrawIndexAuto: {
+            const auto* draw_index = reinterpret_cast<const PM4CmdDrawIndexAuto*>(header);
+            regs.num_indices = draw_index->index_count;
+            regs.draw_initiator = draw_index->draw_initiator;
+            if (!prefetched(rasterizer->PrefetchDraw())) {
+                return false;
+            }
+            break;
+        }
+        case PM4ItOpcode::DispatchDirect: {
+            const auto* dispatch_direct = reinterpret_cast<const PM4CmdDispatchDirect*>(header);
+            auto& cs_program = mapped_queues[GfxQueueId].cs_state;
+            cs_program.dim_x = dispatch_direct->dim_x;
+            cs_program.dim_y = dispatch_direct->dim_y;
+            cs_program.dim_z = dispatch_direct->dim_z;
+            cs_program.dispatch_initiator = dispatch_direct->dispatch_initiator;
+            if ((cs_program.dispatch_initiator & 1) != 0 &&
+                !prefetched(rasterizer->PrefetchDispatch())) {
+                return false;
+            }
+            break;
+        }
+        case PM4ItOpcode::IndirectBuffer: {
+            const auto* indirect_buffer = reinterpret_cast<const PM4CmdIndirectBuffer*>(header);
+            const std::span<const u32> target{indirect_buffer->Address<const u32>(),
+                                              indirect_buffer->ib_size};
+            if (indirect_buffer->chain) {
+                dcb = target;
+                continue;
+            }
+            if (depth < 8 && !ScanAhead(target, budget, depth + 1)) {
+                return false;
+            }
+            break;
+        }
+        case PM4ItOpcode::CondExec: {
+            const auto* cond_exec = reinterpret_cast<const PM4CmdCondExec*>(header);
+            if (*cond_exec->Address() == false) {
+                const size_t skip = count + 1 + cond_exec->exec_count.Value();
+                if (skip > dcb.size()) {
+                    return true;
+                }
+                dcb = dcb.subspan(skip);
+                continue;
+            }
+            break;
+        }
+        default:
+            // Indirect draws, memory writes, waits and events: their effects aren't known yet,
+            // so the guess carries on without them.
+            break;
+        }
+        dcb = dcb.subspan(count + 1);
+    }
+    return true;
+}
+
 Liverpool::Task Liverpool::ProcessGraphics(std::span<const u32> dcb) {
     FIBER_ENTER(dcb_task_name);
+
+    // A new submission starts with no level open, and may look ahead once.
+    if (gfx_frames.empty()) {
+        looked_ahead = false;
+    }
+    gfx_frames.push_back(&dcb);
+    SCOPE_EXIT {
+        gfx_frames.pop_back();
+    };
 
     auto base_addr = reinterpret_cast<uintptr_t>(dcb.data());
     while (!dcb.empty()) {

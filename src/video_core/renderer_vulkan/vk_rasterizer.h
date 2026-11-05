@@ -54,6 +54,11 @@ public:
     void DispatchDirect();
     void DispatchIndirect(VAddr address, u32 offset, u32 size);
 
+    /// Look-ahead: makes the pipeline the next draw or dispatch in the registers will use, on
+    /// the workers. Returns true if it was new.
+    bool PrefetchDraw();
+    bool PrefetchDispatch();
+
     void ScopeMarker(fmt::string_view fmt, fmt::format_args args, auto&& func) {
         if (host_markers_enabled) {
             ScopeMarkerBegin(fmt::vformat(fmt, args));
@@ -120,6 +125,8 @@ private:
     void UpdateColorBlendingState(const GraphicsPipeline* pipeline) const;
 
     bool FilterDraw();
+    /// What FilterDraw would return, without doing the work it does for the draws it takes.
+    bool WouldDraw() const;
 
     /// Decides what to do with a draw whose pipeline is still being created: true to skip it.
     /// Skips only when every target it draws to was also drawn in one of the last frames, so

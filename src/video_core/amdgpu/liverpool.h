@@ -97,6 +97,12 @@ public:
         rasterizer = rasterizer_;
     }
 
+    /// Reads ahead from the draw or dispatch being run to the end of its submission, so the
+    /// pipelines of the draws and dispatches still to come start compiling on the workers.
+    /// Registers are restored after. Runs at most once per submission, only on the graphics
+    /// queue and only with the compile_lookahead setting. Returns true if it ran.
+    bool LookAhead();
+
     template <bool wait_done = false>
     void SendCommand(auto&& func) {
         if constexpr (wait_done) {
@@ -188,6 +194,13 @@ private:
     using CmdBuffer = std::pair<std::span<const u32>, std::span<const u32>>;
     CmdBuffer CopyCmdBuffers(std::span<const u32> dcb, std::span<const u32> ccb);
     Task ProcessGraphics(std::span<const u32> dcb);
+    /// One level of LookAhead: register writes, draws and dispatches in `dcb`, following
+    /// indirect buffers. Returns false once the budget is spent.
+    struct LookAheadBudget {
+        u32 packets;
+        u32 pipelines;
+    };
+    bool ScanAhead(std::span<const u32> dcb, LookAheadBudget& budget, u32 depth);
     Task ProcessCeUpdate(std::span<const u32> ccb);
     template <bool is_indirect = false>
     Task ProcessCompute(std::span<const u32> acb, u32 vqid);
@@ -225,6 +238,12 @@ private:
         u32 de_count{};
         static std::array<u8, 48_KB> constants_heap;
     } cblock{};
+
+    /// The command buffer of each graphics task level being run, innermost last, each at the
+    /// packet it's on, for LookAhead.
+    std::vector<std::span<const u32>*> gfx_frames;
+    bool looked_ahead{};
+    bool in_lookahead{};
 
     Vulkan::Rasterizer* rasterizer{};
     Libraries::VideoOut::VideoOutPort* vo_port{};

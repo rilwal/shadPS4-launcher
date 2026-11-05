@@ -457,6 +457,13 @@ const std::vector<Entry>& Entries() {
             "pipeline for each combination. Experimental, and needs the descriptor heap.",
             [] { return EmulatorSettings.IsShaderObjects(); },
             [](bool v) { EmulatorSettings.SetShaderObjects(v, G); }));
+        e.push_back(Toggle(
+            "compile-lookahead", "Compile ahead", "Accuracy",
+            "When a draw needs new shaders, read ahead through the frame's commands and start "
+            "compiling the shaders of later draws too. Experimental, and only with a "
+            "background shader compiling mode.",
+            [] { return EmulatorSettings.IsCompileLookahead(); },
+            [](bool v) { EmulatorSettings.SetCompileLookahead(v, G); }));
 
         // System
         e.push_back(Toggle(
