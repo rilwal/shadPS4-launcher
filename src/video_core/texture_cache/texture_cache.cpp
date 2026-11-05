@@ -218,7 +218,13 @@ void TextureCache::InvalidateMemory(VAddr addr, size_t size) {
     }
 }
 
-void TextureCache::InvalidateMemoryFromGPU(VAddr address, size_t max_size) {
+void TextureCache::InvalidateMemoryFromGPU(VAddr address, size_t max_size, bool whole_range) {
+    if (whole_range) {
+        ForEachImageInRegion(address, max_size, [&](ImageId image_id, Image& image) {
+            image.flags |= ImageFlagBits::GpuDirty;
+        });
+        return;
+    }
     // Mark the image at the written address, then follow images stored right after it
     // (e.g. the chroma planes after a luma plane).
     const VAddr end = address + max_size;
@@ -634,17 +640,19 @@ ImageId TextureCache::FindImage(ImageDesc& desc, bool exact_fmt) {
     int view_slice{-1};
     if (!image_id) {
         for (const auto& cache_id : image_ids) {
-            view_mip = -1;
-            view_slice = -1;
-
             const auto& merged_info = image_id ? slot_images[image_id].info : info;
             auto [overlap_image_id, overlap_view_mip, overlap_view_slice] =
                 ResolveOverlap(merged_info, desc.type, cache_id, image_id);
-            if (overlap_image_id) {
-                image_id = overlap_image_id;
+            if (!overlap_image_id) {
+                continue;
+            }
+            // A later image that only overlaps by chance gives back the image already found,
+            // or none: it keeps the mip and slice found for that image.
+            if (overlap_image_id != image_id || overlap_view_mip >= 0 || overlap_view_slice >= 0) {
                 view_mip = overlap_view_mip;
                 view_slice = overlap_view_slice;
             }
+            image_id = overlap_image_id;
         }
     }
 
