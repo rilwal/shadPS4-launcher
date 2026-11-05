@@ -477,6 +477,16 @@ const std::vector<Entry>& Entries() {
             "formats as they run. Experimental.",
             [] { return EmulatorSettings.IsFewerShaderVariants(); },
             [](bool v) { EmulatorSettings.SetFewerShaderVariants(v, G); }));
+        e.push_back(Choice(
+            "shader-precompile-threads", "Compile found shaders early", "Accuracy",
+            "Compile the shaders \"Find shaders early\" finds before the game first draws with "
+            "them, on this many threads. More threads catch up sooner but take more CPU from the "
+            "game. Needs the descriptor heap. Experimental.",
+            {{"0", "Off"}, {"1", "1 thread"}, {"2", "2 threads"}, {"4", "4 threads"}},
+            [] { return std::to_string(EmulatorSettings.GetShaderPrecompileThreads()); },
+            [](const std::string& value) {
+                EmulatorSettings.SetShaderPrecompileThreads(static_cast<u32>(std::stoi(value)), G);
+            }));
 
         // System
         e.push_back(Toggle(

@@ -3,8 +3,11 @@
 
 #pragma once
 
+#include <condition_variable>
 #include <map>
+#include <mutex>
 #include <string>
+#include <thread>
 #include <variant>
 #include <tsl/robin_map.h>
 #include <tsl/robin_set.h>
@@ -57,6 +60,11 @@ struct Program {
 
     Shader::Info info;
     ModuleList modules{};
+    /// Translated ahead of its first use with guessed draw state, as variant 0. Cleared at the
+    /// first use, which is counted as served or not.
+    bool prepared{};
+    /// Variant 0's SPIR-V while prepared, registered with the cache if a draw uses it.
+    std::vector<u32> prepared_spv;
 
     Program() = default;
     Program(Shader::HwStage stage, Shader::SwStage l_stage, Shader::ShaderParams params)
@@ -332,6 +340,54 @@ private:
 
     /// Last, so its workers stop before the pipelines and the cache they use are destroyed.
     std::unique_ptr<PipelineCompiler> compiler;
+
+    /// Translating the shaders the scan finds before their first use (shader_precompile_threads).
+    /// Workers translate the newest found first, since a game tends to use what it just loaded;
+    /// the GPU thread takes in the results before looking up a program.
+    void StartPrecompile(u32 num_threads);
+    void StopPrecompile();
+    void RunPrecompile(std::stop_token stop);
+    void PrecompileOne(u64 hash, Shader::HwStage hw_stage);
+    /// Moves finished precompiles into the program and pipeline caches. GPU thread.
+    void TakePrecompiled();
+    /// Learns which binary type is which stage from programs the game uses. GPU thread.
+    void NotePrecompileType(u64 hash, Shader::HwStage hw_stage);
+    /// A prepared program's first use: whether its guess served the draw.
+    void NotePreparedUse(Program& program, u64 hash, bool served,
+                         const Shader::StageSpecialization& spec, u64 perm_hash);
+    struct Precompiled {
+        u64 hash;
+        std::unique_ptr<Program> program;
+        std::unique_ptr<ComputePipeline> compute;
+        u64 perm_hash;
+    };
+    struct Precompile {
+        std::mutex mutex;
+        std::condition_variable_any cv;
+        /// Waiting for a worker, newest last.
+        std::vector<std::pair<u64, Shader::HwStage>> queue;
+        /// Found shaders whose binary type isn't known as a stage yet.
+        std::vector<std::pair<u64, u8>> untyped;
+        /// Programs queued, translated or already used by the game.
+        tsl::robin_set<u64> seen;
+        /// Per binary type: the stage it was seen as and how often.
+        std::array<Shader::HwStage, 16> type_stage;
+        std::array<u32, 16> type_votes{};
+        std::array<bool, 16> type_conflict{};
+        size_t found_cursor{};
+        std::vector<Precompiled> done;
+        std::atomic<bool> has_done{};
+        // For the compile summary, since the last one.
+        u32 translated{};
+        u32 shader_objects{};
+        u32 compute_pipelines{};
+        u64 worker_ns{};
+        u32 served{};
+        u32 missed{};
+        u32 duplicate{};
+        bool active{};
+        std::vector<std::jthread> threads;
+    } precompile;
 };
 
 } // namespace Vulkan

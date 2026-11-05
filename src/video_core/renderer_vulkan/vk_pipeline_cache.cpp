@@ -12,6 +12,7 @@
 #include "common/io_file.h"
 #include "common/path_util.h"
 #include "common/scope_exit.h"
+#include "common/thread.h"
 #include "core/debug_state.h"
 #include "core/emulator_settings.h"
 #include "shader_recompiler/backend/spirv/emit_spirv.h"
@@ -24,6 +25,7 @@
 #include "video_core/renderer_vulkan/liverpool_to_vk.h"
 #include "video_core/renderer_vulkan/vk_instance.h"
 #include "video_core/renderer_vulkan/vk_pipeline_serialization.h"
+#include "video_core/renderer_vulkan/vk_resource_heaps.h"
 #include "video_core/renderer_vulkan/vk_scheduler.h"
 #include "video_core/renderer_vulkan/vk_shader_util.h"
 
@@ -501,9 +503,20 @@ PipelineCache::PipelineCache(const Instance& instance_, Scheduler& scheduler_,
     ASSERT_MSG(cache_result == vk::Result::eSuccess, "Failed to create pipeline cache: {}",
                vk::to_string(cache_result));
     pipeline_cache = std::move(cache);
+
+    if (const u32 threads = EmulatorSettings.GetShaderPrecompileThreads(); threads != 0) {
+        if (!shader_scanner || !shader_scanner->Running() || !profile.uses_descriptor_heap) {
+            LOG_WARNING(Render_Vulkan, "Compiling found shaders early needs the shader scan and "
+                                       "the descriptor heap; it's off");
+        } else {
+            StartPrecompile(threads);
+        }
+    }
 }
 
-PipelineCache::~PipelineCache() = default;
+PipelineCache::~PipelineCache() {
+    StopPrecompile();
+}
 
 void PipelineCache::TickCompileStats() {
     constexpr u64 IntervalNs = 5'000'000'000ULL;
@@ -580,6 +593,22 @@ void PipelineCache::FlushCompileStats(u64 now_ns) {
         }
     }
     LogGuessStats();
+    if (precompile.active) {
+        std::scoped_lock lock{precompile.mutex};
+        if (precompile.translated != 0 || precompile.served != 0 || precompile.missed != 0) {
+            LOG_INFO(Render_Vulkan,
+                     "Compiled early over {:.1f} s: {} shaders ({} shader objects, {} compute "
+                     "pipelines) in {:.0f} ms of worker time; first uses: {} served, {} needed "
+                     "another variant; {} came too late; {} queued, {} waiting for their type",
+                     seconds, precompile.translated, precompile.shader_objects,
+                     precompile.compute_pipelines, precompile.worker_ns / 1e6, precompile.served,
+                     precompile.missed, precompile.duplicate, precompile.queue.size(),
+                     precompile.untyped.size());
+            precompile.translated = precompile.shader_objects = precompile.compute_pipelines = 0;
+            precompile.served = precompile.missed = precompile.duplicate = 0;
+            precompile.worker_ns = 0;
+        }
+    }
     if (const auto gpu = scheduler.TakeGpuTime(); gpu.submits != 0) {
         LOG_INFO(Render_Vulkan,
                  "GPU over {:.1f} s: busy {:.1f} ms ({:.1f} ms per frame over {} frames), {} "
@@ -1191,10 +1220,16 @@ PipelineCache::Result PipelineCache::GetProgram(HwStage hw_stage, SwStage sw_sta
                                                 const Shader::ShaderParams& params,
                                                 Shader::Backend::Bindings& binding) {
     auto runtime_info = BuildRuntimeInfo(hw_stage, sw_stage);
+    if (precompile.active) {
+        TakePrecompiled();
+    }
     auto [it_pgm, new_program] = program_cache.try_emplace(params.hash);
     if (new_program) {
         if (shader_scanner) {
             shader_scanner->NoteFirstUse(params.hash);
+        }
+        if (precompile.active) {
+            NotePrecompileType(params.hash, hw_stage);
         }
         it_pgm.value() = std::make_unique<Program>(hw_stage, sw_stage, params);
         auto& program = it_pgm.value();
@@ -1227,6 +1262,10 @@ PipelineCache::Result PipelineCache::GetProgram(HwStage hw_stage, SwStage sw_sta
     vk::ShaderModule module{};
 
     const auto it = std::ranges::find(program->modules, spec, &Program::Module::spec);
+    if (program->prepared) {
+        NotePreparedUse(*program, params.hash, it != program->modules.end(), spec,
+                        it != program->modules.end() ? it->hash : 0);
+    }
     if (it == program->modules.end()) {
         ++compile_stats.permutations;
         // Counts variants that only exist because an earlier stage moved the bindings.
@@ -1286,6 +1325,247 @@ PipelineCache::Result PipelineCache::GetProgram(HwStage hw_stage, SwStage sw_sta
         fetch_shader = &fetch;
     }
     return std::make_tuple(&program->info, module, perm_hash);
+}
+
+/// A binary type not yet seen as any stage.
+constexpr auto UnseenStage = static_cast<HwStage>(~0u);
+
+void PipelineCache::StartPrecompile(u32 num_threads) {
+    precompile.type_stage.fill(UnseenStage);
+    precompile.active = true;
+    for (u32 i = 0; i < num_threads; ++i) {
+        precompile.threads.emplace_back([this](std::stop_token stop) { RunPrecompile(stop); });
+    }
+    LOG_INFO(Render_Vulkan, "Compiling found shaders early on {} threads", num_threads);
+}
+
+void PipelineCache::StopPrecompile() {
+    if (!precompile.active) {
+        return;
+    }
+    for (auto& thread : precompile.threads) {
+        thread.request_stop();
+    }
+    precompile.cv.notify_all();
+    precompile.threads.clear();
+    const auto device = instance.GetDevice();
+    for (auto& done : precompile.done) {
+        for (const auto& m : done.program->modules) {
+            if (shader_objects) {
+                shader_objects->Forget(m.module);
+            }
+            device.destroyShaderModule(m.module);
+        }
+    }
+    precompile.done.clear();
+    precompile.active = false;
+}
+
+void PipelineCache::RunPrecompile(std::stop_token stop) {
+    Common::SetCurrentThreadName("shadPS4:Precompile");
+    Common::SetCurrentThreadPriority(Common::ThreadPriority::Low);
+    while (!stop.stop_requested()) {
+        std::pair<u64, HwStage> job;
+        {
+            std::unique_lock lock{precompile.mutex};
+            // The scan has no way to wake the workers, so they look for new finds now and then.
+            const auto take_found = [&] {
+                for (const u64 hash : shader_scanner->TakeFound(precompile.found_cursor)) {
+                    if (!precompile.seen.insert(hash).second) {
+                        continue;
+                    }
+                    const auto type = shader_scanner->TypeOf(hash).value_or(0) & 0xf;
+                    const auto stage = precompile.type_stage[type];
+                    if (precompile.type_conflict[type]) {
+                        continue;
+                    }
+                    if (precompile.type_votes[type] >= 3) {
+                        if (stage == HwStage::Fragment || stage == HwStage::Compute) {
+                            precompile.queue.emplace_back(hash, stage);
+                        }
+                    } else {
+                        precompile.untyped.emplace_back(hash, type);
+                    }
+                }
+            };
+            take_found();
+            while (precompile.queue.empty()) {
+                precompile.cv.wait_for(lock, stop, std::chrono::milliseconds{250},
+                                       [&] { return !precompile.queue.empty(); });
+                if (stop.stop_requested()) {
+                    return;
+                }
+                take_found();
+            }
+            job = precompile.queue.back();
+            precompile.queue.pop_back();
+        }
+        PrecompileOne(job.first, job.second);
+    }
+}
+
+void PipelineCache::PrecompileOne(u64 hash, HwStage hw_stage) {
+    const u64 start = VideoCore::PerfStats::NowNs();
+    const auto found = shader_scanner->Find(hash);
+    const auto sw_stage = hw_stage == HwStage::Compute ? SwStage::Compute : SwStage::Fragment;
+    if (!found || found->header.empty()) {
+        return;
+    }
+    auto runtime_info = GuessRuntimeInfo(hw_stage, sw_stage, found->header);
+    if (!runtime_info) {
+        return;
+    }
+    // Nothing is known of the draw's user data; the first use fills it in.
+    static constexpr std::array<u32, Shader::ShaderParams::NumShaderUserData> NoUserData{};
+    const Shader::ShaderParams params{
+        .user_data = NoUserData,
+        .code = found->code,
+        .hash = hash,
+    };
+    auto program = std::make_unique<Program>(hw_stage, sw_stage, params);
+    auto& info = program->info;
+    info.guess_state = true;
+    thread_local Shader::Pools worker_pools;
+    Shader::Backend::Bindings binding{};
+    const auto ir_program =
+        Shader::TranslateProgram(found->code, worker_pools, info, *runtime_info, profile);
+    auto spv = Shader::Backend::SPIRV::EmitSPIRV(profile, *runtime_info, ir_program, binding);
+    auto spec = Shader::StageSpecialization(info, *runtime_info, profile, {});
+    info.guess_state = false;
+
+    const auto device = instance.GetDevice();
+    const auto module = CompileSPV(spv, device);
+    Vulkan::SetObjectName(device, module, "{} (found early)", GetShaderName(hw_stage, hash, 0));
+    const u64 perm_hash = HashCombine(hash, XXH3_64bits(spv.data(), spv.size() * sizeof(u32)));
+    program->AddPermut(module, std::move(spec), perm_hash);
+
+    // The driver's part: a shader object for a fragment shader, which every pipeline using it
+    // shares; a whole pipeline for a compute shader, which is the shader alone.
+    Precompiled done{.hash = hash, .perm_hash = perm_hash};
+    bool made_object = false;
+    if (hw_stage == HwStage::Fragment && shader_objects) {
+        shader_objects->Register(module, spv);
+        StageHeapMappings mappings;
+        mappings.Build(info, HeapGeometry::Of(instance));
+        const vk::PipelineShaderStageRequiredSubgroupSizeCreateInfo subgroup_size_ci = {
+            .requiredSubgroupSize = 64,
+        };
+        mappings.info.pNext = instance.IsSubgroupSize64Supported() ? &subgroup_size_ci : nullptr;
+        u64 driver_ns = 0;
+        shader_objects->Get(module, vk::ShaderStageFlagBits::eFragment, &mappings.info, driver_ns);
+        made_object = true;
+    } else if (hw_stage == HwStage::Compute) {
+        ComputePipeline::SerializationSupport sdata{};
+        done.compute = std::make_unique<ComputePipeline>(
+            instance, scheduler, desc_heap, profile, *pipeline_cache, ComputePipelineKey{perm_hash},
+            info, module, sdata, false, nullptr);
+    } else if (shader_objects) {
+        shader_objects->Register(module, spv);
+    }
+    program->prepared = true;
+    program->prepared_spv = std::move(spv);
+    done.program = std::move(program);
+
+    std::scoped_lock lock{precompile.mutex};
+    ++precompile.translated;
+    precompile.shader_objects += made_object ? 1 : 0;
+    precompile.compute_pipelines += done.compute ? 1 : 0;
+    precompile.worker_ns += VideoCore::PerfStats::NowNs() - start;
+    precompile.done.push_back(std::move(done));
+    precompile.has_done.store(true, std::memory_order_release);
+}
+
+void PipelineCache::TakePrecompiled() {
+    if (!precompile.has_done.load(std::memory_order_acquire)) {
+        return;
+    }
+    std::vector<Precompiled> done;
+    {
+        std::scoped_lock lock{precompile.mutex};
+        done.swap(precompile.done);
+        precompile.has_done.store(false, std::memory_order_relaxed);
+    }
+    const auto device = instance.GetDevice();
+    for (auto& item : done) {
+        const auto [it, fresh] = program_cache.try_emplace(item.hash);
+        if (!fresh) {
+            // The game got there first.
+            for (const auto& m : item.program->modules) {
+                if (shader_objects) {
+                    shader_objects->Forget(m.module);
+                }
+                device.destroyShaderModule(m.module);
+            }
+            ++precompile.duplicate;
+            continue;
+        }
+        it.value() = std::move(item.program);
+        if (item.compute) {
+            compute_pipelines.try_emplace(ComputePipelineKey{item.perm_hash},
+                                          std::move(item.compute));
+        }
+    }
+}
+
+void PipelineCache::NotePrecompileType(u64 hash, HwStage hw_stage) {
+    const auto type = shader_scanner->TypeOf(hash);
+    std::scoped_lock lock{precompile.mutex};
+    precompile.seen.insert(hash);
+    if (!type) {
+        return;
+    }
+    const u8 t = *type & 0xf;
+    auto& stage = precompile.type_stage[t];
+    if (precompile.type_conflict[t]) {
+        return;
+    }
+    if (stage != UnseenStage && stage != hw_stage) {
+        precompile.type_conflict[t] = true;
+        LOG_WARNING(Render_Vulkan,
+                    "Shader binary type {} is used as both {} and {}; not "
+                    "compiling it early",
+                    t, stage, hw_stage);
+        std::erase_if(precompile.untyped, [t](const auto& u) { return u.second == t; });
+        return;
+    }
+    stage = hw_stage;
+    if (++precompile.type_votes[t] != 3) {
+        return;
+    }
+    LOG_INFO(Render_Vulkan, "Shader binary type {} is {} shaders", t, hw_stage);
+    if (hw_stage != HwStage::Fragment && hw_stage != HwStage::Compute) {
+        std::erase_if(precompile.untyped, [t](const auto& u) { return u.second == t; });
+        return;
+    }
+    for (const auto& [h, ut] : precompile.untyped) {
+        if (ut == t && !program_cache.contains(h)) {
+            precompile.queue.emplace_back(h, hw_stage);
+        }
+    }
+    std::erase_if(precompile.untyped, [t](const auto& u) { return u.second == t; });
+    precompile.cv.notify_all();
+}
+
+void PipelineCache::NotePreparedUse(Program& program, u64 hash, bool served,
+                                    const Shader::StageSpecialization& spec, u64 perm_hash) {
+    program.prepared = false;
+    if (shader_scanner) {
+        shader_scanner->NoteFirstUse(hash);
+    }
+    if (served) {
+        ++precompile.served;
+        RegisterShaderMeta(program.info, spec.fetch_shader_data, spec, perm_hash, 0);
+        RegisterShaderBinary(std::move(program.prepared_spv), perm_hash);
+        LOG_INFO(Render_Vulkan, "{} shader {:#x} was compiled early and served its first use",
+                 program.info.hw_stage, hash);
+    } else {
+        ++precompile.missed;
+        LOG_INFO(Render_Vulkan,
+                 "{} shader {:#x} was compiled early, but its first use differs in: {}",
+                 program.info.hw_stage, hash,
+                 fmt::join(SpecDifferences(spec, program.modules[0].spec), ", "));
+    }
+    program.prepared_spv = {};
 }
 
 std::optional<Shader::RuntimeInfo> PipelineCache::GuessRuntimeInfo(

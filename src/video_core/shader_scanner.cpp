@@ -311,7 +311,10 @@ bool ShaderScanner::TryAdd(u64 info_addr) {
         std::scoped_lock lock{mutex};
         if (shaders.try_emplace(info.shader_hash, std::move(shader)).second) {
             ++pass_new;
-            with_registers += has_header ? 1 : 0;
+            if (has_header) {
+                ++with_registers;
+                found_order.push_back(info.shader_hash);
+            }
             return true;
         }
         return false;
@@ -345,6 +348,25 @@ std::optional<ShaderScanner::Shader> ShaderScanner::Find(u64 hash) {
         return std::nullopt;
     }
     return it->second;
+}
+
+std::optional<u8> ShaderScanner::TypeOf(u64 hash) {
+    std::scoped_lock lock{mutex};
+    const auto it = shaders.find(hash);
+    if (it == shaders.end()) {
+        return std::nullopt;
+    }
+    return it->second.type;
+}
+
+std::vector<u64> ShaderScanner::TakeFound(size_t& cursor) {
+    std::scoped_lock lock{mutex};
+    if (cursor >= found_order.size()) {
+        return {};
+    }
+    std::vector<u64> found(found_order.begin() + cursor, found_order.end());
+    cursor = found_order.size();
+    return found;
 }
 
 void ShaderScanner::NoteFirstUse(u64 hash) {

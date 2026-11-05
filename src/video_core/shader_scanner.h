@@ -55,6 +55,13 @@ public:
     /// The shader with this hash, if the scan found it.
     std::optional<Shader> Find(u64 hash);
 
+    /// The binary type of the shader with this hash, if the scan found it.
+    std::optional<u8> TypeOf(u64 hash);
+
+    /// Hashes of the shaders found with their stage registers, in the order found, from
+    /// `cursor` on; moves `cursor` past them.
+    std::vector<u64> TakeFound(size_t& cursor);
+
     /// Notes the first draw or dispatch with a program, for the summary: whether the scan had
     /// found it, and how long before.
     void NoteFirstUse(u64 hash);
@@ -92,6 +99,8 @@ private:
     tsl::robin_map<u64, Shader> shaders;
     std::vector<double> leads;
     u32 with_registers{};
+    /// Hashes of the shaders with stage registers, in the order found.
+    std::vector<u64> found_order;
     u32 first_uses{};
     u32 found_ahead{};
     /// Scan totals, for the per-pass log.

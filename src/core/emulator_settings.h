@@ -464,6 +464,10 @@ struct GPUSettings {
     /// as render targets of the same number class but different formats. With the descriptor
     /// heap, formatted buffer loads also read the buffer's format at run time.
     Setting<bool> fewer_shader_variants{false};
+    /// Threads that translate and compile the shaders shader_prescan finds before their first
+    /// draw, with the draw state guessed from each shader's own registers; 0 turns it off. Needs
+    /// the descriptor heap. A draw whose state differs from the guess compiles as before.
+    Setting<u32> shader_precompile_threads{0};
 
     std::vector<OverrideItem> GetOverrideableFields() const {
         return std::vector<OverrideItem>{
@@ -497,6 +501,8 @@ struct GPUSettings {
             make_override<GPUSettings>("pipeline_compile_probe",
                                        &GPUSettings::pipeline_compile_probe),
             make_override<GPUSettings>("gpu_timing", &GPUSettings::gpu_timing),
+            make_override<GPUSettings>("shader_precompile_threads",
+                                       &GPUSettings::shader_precompile_threads),
             make_override<GPUSettings>("descriptor_heap", &GPUSettings::descriptor_heap),
             make_override<GPUSettings>("shader_objects", &GPUSettings::shader_objects),
             make_override<GPUSettings>("compile_lookahead", &GPUSettings::compile_lookahead),
@@ -513,7 +519,7 @@ NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE(
     full_screen_mode, present_mode, hdr_allowed, fsr_enabled, rcas_enabled, rcas_attenuation,
     userfaultfd, inline_fetch_shader, fast_shader_math, async_pipelines, async_pipeline_wait_ms,
     async_pipelines_ab_seconds, pipeline_compile_probe, descriptor_heap, shader_objects,
-    compile_lookahead, shader_prescan, fewer_shader_variants, gpu_timing)
+    compile_lookahead, shader_prescan, fewer_shader_variants, gpu_timing, shader_precompile_threads)
 
 // -------------------------------
 // Vulkan settings
@@ -831,6 +837,7 @@ public:
     SETTING_FORWARD_BOOL(m_gpu, ShaderPrescan, shader_prescan)
     SETTING_FORWARD_BOOL(m_gpu, FewerShaderVariants, fewer_shader_variants)
     SETTING_FORWARD_BOOL(m_gpu, GpuTiming, gpu_timing)
+    SETTING_FORWARD(m_gpu, ShaderPrecompileThreads, shader_precompile_threads)
 
     u32 GetVblankFrequency() {
         if (m_gpu.vblank_frequency.value < 30) {
