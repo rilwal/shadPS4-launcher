@@ -318,6 +318,7 @@ bool BufferCache::LandGpuModifiedMemory() {
     }
     ++readback_stats.landings;
     readback_stats.landing_bytes += total_size_bytes;
+    landing->tick = scheduler.CurrentTick();
     landings.push_back(landing);
     scheduler.DeferPriorityOperation([this, ring_offset, total_size_bytes, ring_end,
                                       landing = std::move(landing), writes = std::move(writes)] {
@@ -417,6 +418,10 @@ void BufferCache::WaitForLandings(VAddr device_addr, u64 size) {
     for (const auto& landing : landings) {
         if (!landing->done.load(std::memory_order_acquire) &&
             landing->ranges.Intersects(device_addr, size)) {
+            // Fenced signals submit lazily, so the copy may still be unsubmitted. The priority
+            // op only runs once the GPU is done with it, and this thread is the one that
+            // submits: Wait() flushes first if needed, or this would deadlock.
+            scheduler.Wait(landing->tick);
             landing->done.wait(false, std::memory_order_acquire);
         }
     }
