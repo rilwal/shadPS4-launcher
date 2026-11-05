@@ -94,6 +94,14 @@ TextureCache::TextureCache(const Vulkan::Instance& instance_, Vulkan::Scheduler&
 TextureCache::~TextureCache() = default;
 
 bool TextureCache::ProcessDownloadImages(bool priority) {
+    {
+        // The staging pool belongs to this thread, so priority downloads free their buffer here.
+        std::scoped_lock lk{priority_frees_mutex};
+        for (const auto& download : priority_frees) {
+            runtime.GetStagingPool().FreeDeferred(download);
+        }
+        priority_frees.clear();
+    }
     std::unique_lock lk{download_images_mutex};
     if (download_images.empty()) {
         return false;
@@ -153,14 +161,20 @@ void TextureCache::DownloadImageMemory(ImageId image_id, DownloadMemoryFlags fla
 
     tile_manager.TileImage(image, buffer_copies, download.buffer, download.offset);
 
-    const auto write_data = [this, image_addr, copy_size, download, discard_buffer_cache, is_sync] {
+    ASSERT(!(is_priority && discard_buffer_cache));
+    const auto write_data = [this, image_addr, copy_size, download, discard_buffer_cache, is_sync,
+                             is_priority] {
         download.Invalidate();
         Core::Memory::Instance()->TryWriteBacking(std::bit_cast<u8*>(image_addr), download.mapped,
                                                   copy_size);
         if (discard_buffer_cache) {
             buffer_cache.UnmarkRegionAsGpuModified(image_addr, copy_size, true);
         }
-        if (!is_sync) {
+        if (is_priority) {
+            // This runs on the priority thread, which must not touch the staging pool.
+            std::scoped_lock lk{priority_frees_mutex};
+            priority_frees.push_back(download);
+        } else if (!is_sync) {
             runtime.GetStagingPool().FreeDeferred(download);
         }
     };

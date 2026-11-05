@@ -143,8 +143,9 @@ void BufferCache::UnmarkRegionAsGpuModified(VAddr device_addr, u64 size, bool is
 void BufferCache::ReadMemory(VAddr device_addr, u64 size, bool is_write, bool async,
                              bool assume_locks) {
     const auto flush_request = [this, device_addr, size, is_write, async] {
-        if (tracks_gpu_pages) {
-            // Remembered so fenced readbacks land this memory early from now on.
+        if (tracks_gpu_pages && !is_write && !async) {
+            // A CPU read fault: remembered so fenced readbacks land this memory early from now
+            // on. Write faults, unmaps and GC evictions also come here, but don't count.
             const VAddr page_start = Common::AlignDown(device_addr, BYTES_PER_PAGE);
             cpu_read_ranges.Add(page_start,
                                 Common::AlignUp(device_addr + size, BYTES_PER_PAGE) - page_start);
@@ -201,8 +202,9 @@ void BufferCache::DownloadMemory(const Buffer* arena, VAddr device_addr, u64 siz
         gpu_modified_ranges.Subtract(address, size);
     });
     if (total_size_bytes == 0) {
-        if (tracks_gpu_pages) {
-            // Everything here has landed; nothing is left to protect.
+        if (tracks_gpu_pages && !async_downloads.Intersects(device_addr, size)) {
+            // Everything here has landed; nothing is left to protect. Unless an async download
+            // took it and hasn't written guest memory yet: then the fault retries until it has.
             memory_tracker->UnmarkRegionAsGpuModified(device_addr, size, false);
         }
         return;
@@ -230,10 +232,16 @@ void BufferCache::DownloadMemory(const Buffer* arena, VAddr device_addr, u64 siz
 
         if (async) {
             staging_pool.FreeDeferred(download);
+            if (--num_async_downloads == 0) {
+                async_downloads.Clear();
+            }
         }
     };
 
     if (async) {
+        // Pending operations run on this thread, at a submit.
+        async_downloads.Add(device_addr, size);
+        ++num_async_downloads;
         scheduler.DeferOperation(std::move(write_data));
     } else {
         const auto stall_start = std::chrono::steady_clock::now();

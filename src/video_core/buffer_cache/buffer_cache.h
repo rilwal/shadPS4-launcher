@@ -200,6 +200,9 @@ private:
     RangeSet gpu_modified_ranges;
     /// Pages the CPU has faulted on to read GPU data. Fenced readbacks land only these early.
     RangeSet cpu_read_ranges;
+    /// Ranges taken by async downloads whose data isn't in guest memory yet (GPU thread only).
+    RangeSet async_downloads;
+    u32 num_async_downloads{};
     std::deque<std::shared_ptr<Landing>> landings;
     /// Host memory the landings are copied through: allocated at the head on the GPU thread,
     /// freed at the tail by the priority thread (both are running byte totals).

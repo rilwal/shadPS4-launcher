@@ -230,6 +230,25 @@ bool Liverpool::DeferFenceSignal(Common::UniqueFunction<void>&& signal, bool thr
     return true;
 }
 
+void Liverpool::ForgetDeferredLabels(VAddr address, u64 size) {
+    if (deferred_labels.empty() || size == 0) {
+        return;
+    }
+    // The command processor wrote here itself, after the deferred signals: its own waits must
+    // now read this value from memory, as they would without deferral.
+    const VAddr end = address + size;
+    if (size / sizeof(u32) <= deferred_labels.size()) {
+        for (VAddr dword = Common::AlignDown(address, sizeof(u32)); dword < end;
+             dword += sizeof(u32)) {
+            deferred_labels.erase(dword);
+        }
+    } else {
+        std::erase_if(deferred_labels, [address, end](const auto& entry) {
+            return entry.first >= address && entry.first < end;
+        });
+    }
+}
+
 bool Liverpool::TestWait(const PM4CmdWaitRegMem* wait) {
     if (wait->mem_space.Value() == PM4CmdWaitRegMem::MemSpace::Memory && !deferred_labels.empty()) {
         const auto it = deferred_labels.find(wait->Address<VAddr>());
@@ -879,6 +898,10 @@ Liverpool::Task Liverpool::ProcessGraphics(std::span<const u32> dcb) {
                     break;
                 }
                 ASSERT(dma_data->command.das == 0);
+                if (dma_data->dst_sel == DmaDataDst::Memory ||
+                    dma_data->dst_sel == DmaDataDst::MemoryUsingL2) {
+                    ForgetDeferredLabels(dma_data->DstAddress<VAddr>(), dma_data->NumBytes());
+                }
                 if (dma_data->src_sel == DmaDataSrc::Data && dma_data->dst_sel == DmaDataDst::Gds) {
                     rasterizer->FillBuffer(dma_data->dst_addr_lo, dma_data->NumBytes(),
                                            dma_data->data, true);
@@ -919,6 +942,7 @@ Liverpool::Task Liverpool::ProcessGraphics(std::span<const u32> dcb) {
                     if (rasterizer) {
                         rasterizer->OnFence();
                     }
+                    ForgetDeferredLabels(std::bit_cast<VAddr>(address), data_size);
                     std::memcpy(address, write_data->data, data_size);
                 } else {
                     UNREACHABLE();
@@ -1181,6 +1205,10 @@ Liverpool::Task Liverpool::ProcessCompute(std::span<const u32> acb, u32 vqid) {
                 break;
             }
             ASSERT(dma_data->command.das == 0);
+            if (dma_data->dst_sel == DmaDataDst::Memory ||
+                dma_data->dst_sel == DmaDataDst::MemoryUsingL2) {
+                ForgetDeferredLabels(dma_data->DstAddress<VAddr>(), dma_data->NumBytes());
+            }
             if (dma_data->src_sel == DmaDataSrc::Data && dma_data->dst_sel == DmaDataDst::Gds) {
                 rasterizer->FillBuffer(dma_data->dst_addr_lo, dma_data->NumBytes(), dma_data->data,
                                        true);
@@ -1309,6 +1337,7 @@ Liverpool::Task Liverpool::ProcessCompute(std::span<const u32> acb, u32 vqid) {
                 if (rasterizer) {
                     rasterizer->OnFence();
                 }
+                ForgetDeferredLabels(write_data->Address<VAddr>(), data_size);
                 std::memcpy(write_data->Address<void*>(), write_data->data, data_size);
             } else {
                 UNREACHABLE();
@@ -1354,6 +1383,9 @@ Liverpool::Task Liverpool::ProcessCompute(std::span<const u32> acb, u32 vqid) {
                 deferrable &&
                 DeferFenceSignal(
                     [rel = *release_mem, signal_irq] {
+                        // Unlike the immediate path's memcpy, this skips write tracking: on the
+                        // priority thread a write fault would wait on the GPU thread. So the
+                        // buffer cache doesn't see the label change, as for EOP labels.
                         rel.SignalFence(
                             [](void* address, u64 data, u32 num_bytes) {
                                 auto* memory = Core::Memory::Instance();

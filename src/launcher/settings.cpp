@@ -403,11 +403,7 @@ const std::vector<Entry>& Entries() {
                              "Switch the running experiment to its second variant "
                              "(Fenced, when readbacks are Precise or Fenced).",
                              [] { return Common::AbSwitch::IsB(); },
-                             [](bool v) {
-                                 if (v != Common::AbSwitch::IsB()) {
-                                     Common::AbSwitch::Toggle();
-                                 }
-                             }),
+                             [](bool v) { Common::AbSwitch::Set(v); }),
                          Nothing));
         e.push_back(Live(Choice(
                              "ab-auto-switch", "A/B test: auto switch", "Accuracy",
@@ -509,11 +505,10 @@ const std::vector<Entry>& Entries() {
             "Japanese-style buttons: Circle confirms and Cross cancels, in games that ask.",
             [] { return EmulatorSettings.IsCircleEnter(); },
             [](bool v) { EmulatorSettings.SetCircleEnter(v, G); }));
-        e.push_back(Toggle(
-            "motion-controls", "Motion controls", "Controls",
-            "Pass the controller's gyro and accelerometer to games.",
-            [] { return EmulatorSettings.IsMotionControlsEnabled(); },
-            [](bool v) { EmulatorSettings.SetMotionControlsEnabled(v, G); }));
+        e.push_back(Toggle("motion-controls", "Motion controls", "Controls",
+                           "Pass the controller's gyro and accelerometer to games.",
+                           [] { return EmulatorSettings.IsMotionControlsEnabled(); },
+                           [](bool v) { EmulatorSettings.SetMotionControlsEnabled(v, G); }));
         e.push_back(Live(Toggle(
                              "background-input", "Input in the background", "Controls",
                              "Keep reading the controller while the game window isn't focused.",

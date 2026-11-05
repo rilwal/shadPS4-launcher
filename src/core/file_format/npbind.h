@@ -65,6 +65,11 @@ public:
     // Get npcommid data
     std::vector<std::string> GetNpCommIds() const;
 
+    // The trophy file each npcommid is for, in the same order: N for trophyNN.trp, from the
+    // entry's trophy field. Usually its position, but not always: Uncharted: The Nathan Drake
+    // Collection numbers its three files from 01. The position where the field isn't a number.
+    std::vector<s32> GetTrophyNumbers() const;
+
     // Get specific body
     const NPBindBody& GetBody(size_t index) const {
         return m_bodies.at(index);

@@ -17,6 +17,7 @@
 #include "common/multi_level_page_table.h"
 #include "common/slot_vector.h"
 #include "shader_recompiler/resource.h"
+#include "video_core/renderer_vulkan/vk_staging_buffer_pool.h"
 #include "video_core/texture_cache/blit_helper.h"
 #include "video_core/texture_cache/image.h"
 #include "video_core/texture_cache/image_view.h"
@@ -429,6 +430,9 @@ private:
     Common::LRUCache<Sampler> sampler_lru_cache;
     const bool readback_linear_images;
     std::mutex download_images_mutex;
+    /// Staging buffers of priority downloads, freed back on the GPU thread.
+    std::mutex priority_frees_mutex;
+    std::vector<Vulkan::StagingBufferRef> priority_frees;
     absl::flat_hash_map<VAddr, MetaDataInfo> surface_metas;
 };
 DECLARE_ENUM_FLAG_OPERATORS(TextureCache::DownloadMemoryFlags)
