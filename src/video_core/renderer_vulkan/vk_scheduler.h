@@ -5,6 +5,7 @@
 
 #include <condition_variable>
 #include <mutex>
+#include <optional>
 #include <thread>
 #include <queue>
 
@@ -456,7 +457,19 @@ public:
 
     static std::mutex submit_mutex;
 
+    /// GPU time of each submission, from timestamps at its start and end, while gpu_timing is
+    /// on. Submissions run one after another, so the sum is how long the GPU was busy.
+    struct GpuTime {
+        u64 busy_ns{};
+        u64 worst_ns{};
+        u32 submits{};
+    };
+    /// What finished since the last call.
+    GpuTime TakeGpuTime();
+
 private:
+    void ReadGpuTimes();
+
     void EndSession();
 
     void SubmitExecution(SubmitInfo& info);
@@ -489,6 +502,20 @@ private:
     RenderState render_state;
     bool is_rendering = false;
     tracy::VkCtxScope* profiler_scope{};
+    /// Two timestamps per submission, used as a ring.
+    static constexpr u32 NumTimedSubmits = 256;
+    vk::UniqueQueryPool timestamp_pool;
+    u32 next_timed{};
+    /// The submission being recorded is timed from this query pair.
+    std::optional<u32> current_timed;
+    bool ending_submit{};
+    struct TimedSubmit {
+        u32 pair;
+        u64 tick;
+    };
+    std::queue<TimedSubmit> timed_submits;
+    std::mutex gpu_time_mutex;
+    GpuTime gpu_time;
 };
 
 } // namespace Vulkan

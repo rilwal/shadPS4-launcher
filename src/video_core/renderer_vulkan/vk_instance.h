@@ -353,6 +353,11 @@ public:
         return properties.pipelineCacheUUID;
     }
 
+    /// Nanoseconds per GPU timestamp tick.
+    float TimestampPeriod() const {
+        return properties.limits.timestampPeriod;
+    }
+
     /// Returns the minimum required alignment for uniforms
     vk::DeviceSize UniformMinAlignment() const {
         return properties.limits.minUniformBufferOffsetAlignment;

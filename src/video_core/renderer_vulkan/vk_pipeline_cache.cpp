@@ -578,6 +578,14 @@ void PipelineCache::FlushCompileStats(u64 now_ns) {
         }
     }
     LogGuessStats();
+    if (const auto gpu = scheduler.TakeGpuTime(); gpu.submits != 0) {
+        LOG_INFO(Render_Vulkan,
+                 "GPU over {:.1f} s: busy {:.1f} ms ({:.1f} ms per frame over {} frames), {} "
+                 "submits, longest {:.2f} ms",
+                 seconds, gpu.busy_ns / 1e6,
+                 frames.count != 0 ? gpu.busy_ns / 1e6 / frames.count : 0.0, frames.count,
+                 gpu.submits, gpu.worst_ns / 1e6);
+    }
     const u64 probes = bg.probes.exchange(0, std::memory_order_relaxed);
     const u64 probe_optimized_ns = bg.probe_optimized_ns.exchange(0, std::memory_order_relaxed);
     const u64 probe_unoptimized_ns = bg.probe_unoptimized_ns.exchange(0, std::memory_order_relaxed);

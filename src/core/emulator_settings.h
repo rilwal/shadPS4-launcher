@@ -444,6 +444,9 @@ struct GPUSettings {
     Setting<u32> async_pipelines_ab_seconds{0};
     /// Also time an unoptimized creation of every new graphics pipeline and log both.
     Setting<bool> pipeline_compile_probe{false};
+    /// Times each GPU submission with timestamps and logs the GPU's busy time with the compile
+    /// stats.
+    Setting<bool> gpu_timing{false};
     /// Binds shader resources through VK_EXT_descriptor_heap where the driver has it, so a
     /// shader doesn't depend on the other stages of its pipeline. Read at boot.
     Setting<bool> descriptor_heap{false};
@@ -493,6 +496,7 @@ struct GPUSettings {
                                        &GPUSettings::async_pipelines_ab_seconds),
             make_override<GPUSettings>("pipeline_compile_probe",
                                        &GPUSettings::pipeline_compile_probe),
+            make_override<GPUSettings>("gpu_timing", &GPUSettings::gpu_timing),
             make_override<GPUSettings>("descriptor_heap", &GPUSettings::descriptor_heap),
             make_override<GPUSettings>("shader_objects", &GPUSettings::shader_objects),
             make_override<GPUSettings>("compile_lookahead", &GPUSettings::compile_lookahead),
@@ -509,7 +513,7 @@ NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE(
     full_screen_mode, present_mode, hdr_allowed, fsr_enabled, rcas_enabled, rcas_attenuation,
     userfaultfd, inline_fetch_shader, fast_shader_math, async_pipelines, async_pipeline_wait_ms,
     async_pipelines_ab_seconds, pipeline_compile_probe, descriptor_heap, shader_objects,
-    compile_lookahead, shader_prescan, fewer_shader_variants)
+    compile_lookahead, shader_prescan, fewer_shader_variants, gpu_timing)
 
 // -------------------------------
 // Vulkan settings
@@ -826,6 +830,7 @@ public:
     SETTING_FORWARD_BOOL(m_gpu, CompileLookahead, compile_lookahead)
     SETTING_FORWARD_BOOL(m_gpu, ShaderPrescan, shader_prescan)
     SETTING_FORWARD_BOOL(m_gpu, FewerShaderVariants, fewer_shader_variants)
+    SETTING_FORWARD_BOOL(m_gpu, GpuTiming, gpu_timing)
 
     u32 GetVblankFrequency() {
         if (m_gpu.vblank_frequency.value < 30) {

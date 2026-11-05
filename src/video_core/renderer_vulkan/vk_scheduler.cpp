@@ -4,6 +4,7 @@
 #include "common/assert.h"
 #include "common/debug.h"
 #include "common/thread.h"
+#include "core/emulator_settings.h"
 #include "imgui/renderer/texture_manager.h"
 #include "video_core/renderer_vulkan/vk_instance.h"
 #include "video_core/renderer_vulkan/vk_scheduler.h"
@@ -17,6 +18,18 @@ Scheduler::Scheduler(const Instance& instance)
 #if TRACY_GPU_ENABLED
     profiler_scope = reinterpret_cast<tracy::VkCtxScope*>(std::malloc(sizeof(tracy::VkCtxScope)));
 #endif
+    if (EmulatorSettings.IsGpuTiming()) {
+        auto [result, pool] = instance.GetDevice().createQueryPoolUnique({
+            .queryType = vk::QueryType::eTimestamp,
+            .queryCount = NumTimedSubmits * 2,
+        });
+        if (result == vk::Result::eSuccess) {
+            timestamp_pool = std::move(pool);
+        } else {
+            LOG_WARNING(Render_Vulkan, "Can't create a timestamp query pool: {}",
+                        vk::to_string(result));
+        }
+    }
     BeginSession();
     priority_pending_ops_thread =
         std::jthread(std::bind_front(&Scheduler::PriorityPendingOpsThread, this));
@@ -151,6 +164,16 @@ void Scheduler::BeginSession() {
     session.primary = command_pool.Commit();
     Check(session.primary.begin(begin_info));
 
+    // The first session of a submission starts its timing, if a query pair is free.
+    if (timestamp_pool && sessions.size() == 1 && timed_submits.size() < NumTimedSubmits) {
+        const u32 pair = next_timed;
+        next_timed = (next_timed + 1) % NumTimedSubmits;
+        session.primary.resetQueryPool(*timestamp_pool, pair * 2, 2);
+        session.primary.writeTimestamp(vk::PipelineStageFlagBits::eTopOfPipe, *timestamp_pool,
+                                       pair * 2);
+        current_timed = pair;
+    }
+
     // Invalidate dynamic state so it gets applied to the new command buffer.
     dynamic_state.Invalidate();
 
@@ -179,6 +202,10 @@ void Scheduler::EndSession() {
     }
 
     EndRendering();
+    if (ending_submit && current_timed) {
+        session.primary.writeTimestamp(vk::PipelineStageFlagBits::eBottomOfPipe, *timestamp_pool,
+                                       *current_timed * 2 + 1);
+    }
     Check(session.primary.end());
 }
 
@@ -198,7 +225,9 @@ void Scheduler::SubmitExecution(SubmitInfo& info) {
         on_submit(info);
     }
 
+    ending_submit = true;
     EndSession();
+    ending_submit = false;
 
     std::vector<vk::CommandBuffer> cmd_buffers;
     cmd_buffers.reserve(sessions.size() * 2);
@@ -241,10 +270,40 @@ void Scheduler::SubmitExecution(SubmitInfo& info) {
     ASSERT_MSG(submit_result != vk::Result::eErrorDeviceLost, "Device lost during submit");
 
     work_semaphore.Refresh();
+    if (current_timed) {
+        timed_submits.push({*current_timed, signal_value});
+        current_timed.reset();
+    }
+    ReadGpuTimes();
     BeginSession();
 
     // Apply pending operations
     PopPendingOperations();
+}
+
+void Scheduler::ReadGpuTimes() {
+    const double period = instance.TimestampPeriod();
+    while (!timed_submits.empty() && work_semaphore.IsFree(timed_submits.front().tick)) {
+        const u32 pair = timed_submits.front().pair;
+        timed_submits.pop();
+        std::array<u64, 2> stamps{};
+        const auto result = instance.GetDevice().getQueryPoolResults(
+            *timestamp_pool, pair * 2, 2, sizeof(stamps), stamps.data(), sizeof(u64),
+            vk::QueryResultFlagBits::e64);
+        if (result != vk::Result::eSuccess || stamps[1] < stamps[0]) {
+            continue;
+        }
+        const u64 ns = static_cast<u64>(double(stamps[1] - stamps[0]) * period);
+        std::scoped_lock lock{gpu_time_mutex};
+        gpu_time.busy_ns += ns;
+        gpu_time.worst_ns = std::max(gpu_time.worst_ns, ns);
+        ++gpu_time.submits;
+    }
+}
+
+Scheduler::GpuTime Scheduler::TakeGpuTime() {
+    std::scoped_lock lock{gpu_time_mutex};
+    return std::exchange(gpu_time, GpuTime{});
 }
 
 void Scheduler::PriorityPendingOpsThread(std::stop_token stoken) {
