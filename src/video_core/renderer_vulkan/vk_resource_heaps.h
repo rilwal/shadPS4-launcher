@@ -11,6 +11,7 @@
 
 #include "common/types.h"
 #include "shader_recompiler/resource.h"
+#include "shader_recompiler/runtime_buffer_format.h"
 #include "video_core/renderer_vulkan/vk_common.h"
 
 namespace Shader {
@@ -58,6 +59,10 @@ struct HeapStageWrites {
     u32 num_bindings{};
     std::array<u8, Shader::StageTable::BufOffsetsSize> buf_offsets{};
     std::array<u16, Shader::StageTable::StridesSize / sizeof(u16)> strides{};
+    /// Formats of the buffers whose loads read them at run time.
+    std::array<Shader::RuntimeBufferFormat, Shader::NUM_BUFFERS> formats{};
+    /// One more than the highest buffer with a format.
+    u32 num_formats{};
 };
 
 /// What the rasterizer gathered for one draw or dispatch.

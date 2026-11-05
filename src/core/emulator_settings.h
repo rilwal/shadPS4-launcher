@@ -458,7 +458,8 @@ struct GPUSettings {
     /// draw. Linux only for now.
     Setting<bool> shader_prescan{false};
     /// Compiles one shader for draws that only differ in what doesn't change its code, such
-    /// as render targets of the same number class but different formats.
+    /// as render targets of the same number class but different formats. With the descriptor
+    /// heap, formatted buffer loads also read the buffer's format at run time.
     Setting<bool> fewer_shader_variants{false};
 
     std::vector<OverrideItem> GetOverrideableFields() const {

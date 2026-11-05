@@ -76,6 +76,14 @@ Id EmitBufferStride(EmitContext& ctx, u32 handle) {
                                   ctx.ConstU32(16U));
 }
 
+Id EmitBufferFormat(EmitContext& ctx, u32 handle) {
+    const u32 binding = ctx.buffers[handle].binding;
+    const Id pointer{ctx.OpAccessChain(
+        ctx.TypePointer(spv::StorageClass::Uniform, ctx.U32[4]), ctx.stage_table_block,
+        ctx.ConstU32(StageTable::FormatsMember), ctx.ConstU32(binding))};
+    return ctx.OpLoad(ctx.U32[4], pointer);
+}
+
 Id EmitReadConstBuffer(EmitContext& ctx, u32 handle, Id index) {
     const auto& buffer = ctx.buffers[handle];
     if (const Id offset = buffer.Offset(PointerSize::B32); Sirit::ValidId(offset)) {

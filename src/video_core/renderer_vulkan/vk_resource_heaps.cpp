@@ -282,6 +282,9 @@ void ResourceHeaps::Bind(const HeapDraw& draw, const Shader::PushData& push_data
         static_assert(sizeof(stage.strides) == Shader::StageTable::StridesSize);
         std::memcpy(table + Shader::StageTable::StridesOffset, stage.strides.data(),
                     sizeof(stage.strides));
+        static_assert(sizeof(stage.formats) == Shader::StageTable::FormatsSize);
+        std::memcpy(table + Shader::StageTable::FormatsOffset, stage.formats.data(),
+                    stage.num_formats * sizeof(Shader::RuntimeBufferFormat));
         u32* indices = reinterpret_cast<u32*>(table + Shader::StageTable::IndicesOffset);
         resource_infos.resize(num_resources);
         resource_ranges.resize(num_resources);

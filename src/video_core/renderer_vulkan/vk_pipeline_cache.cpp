@@ -144,7 +144,8 @@ static std::vector<std::string> SpecDifferences(const Shader::StageSpecializatio
         const auto& y = b.buffers[i];
         check(x.stride == y.stride, "buf{}.stride", i);
         check(x.is_formatted == y.is_formatted, "buf{}.is_formatted", i);
-        if (x.is_formatted && y.is_formatted) {
+        check(x.runtime_format == y.runtime_format, "buf{}.runtime_format", i);
+        if (x.is_formatted && y.is_formatted && !x.runtime_format && !y.runtime_format) {
             check(x.data_format == y.data_format && x.num_format == y.num_format, "buf{}.format",
                   i);
             check(x.dst_select == y.dst_select, "buf{}.dst_select", i);
@@ -476,6 +477,8 @@ PipelineCache::PipelineCache(const Instance& instance_, Scheduler& scheduler_,
         .support_bda = instance_.IsBufferDeviceAddressSupported(),
         .uses_descriptor_heap = instance_.UsesDescriptorHeap(),
         .fewer_shader_variants = EmulatorSettings.IsFewerShaderVariants(),
+        .runtime_buffer_formats =
+            instance_.UsesDescriptorHeap() && EmulatorSettings.IsFewerShaderVariants(),
     };
     // A quarter of the cores: the game's own threads and the GPU thread need the rest.
     const u32 compile_threads = std::clamp(std::thread::hardware_concurrency() / 4, 1u, 4u);

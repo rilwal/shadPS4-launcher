@@ -6,6 +6,8 @@
 #include "shader_recompiler/ir/ir_emitter.h"
 #include "shader_recompiler/ir/program.h"
 #include "shader_recompiler/ir/reinterpret.h"
+#include "shader_recompiler/profile.h"
+#include "shader_recompiler/runtime_buffer_format.h"
 #include "video_core/amdgpu/resource.h"
 
 namespace Shader::Optimization {
@@ -106,6 +108,90 @@ static IR::Value LoadBufferFormat(IR::IREmitter& ir, const IR::Value handle, con
     return swizzled;
 }
 
+/// Reads a formatted element whose format is in the stage table (see RuntimeBufferFormat),
+/// without branches: each component is extracted by its offset and width, then converted
+/// every way its kind could need, and the kind picks one.
+static IR::Value LoadRuntimeBufferFormat(IR::IREmitter& ir, const IR::Value handle,
+                                         const IR::U32 address, const IR::BufferInstInfo info) {
+    using Kind = RuntimeBufferFormat::Kind;
+    const IR::Value format = ir.BufferFormat(handle);
+    const IR::U32 offsets{ir.CompositeExtract(format, 0)};
+    const IR::U32 widths{ir.CompositeExtract(format, 1)};
+    const IR::U32 kind_swizzle{ir.CompositeExtract(format, 2)};
+    const IR::U32 kind{ir.BitFieldExtract(kind_swizzle, ir.Imm32(0u), ir.Imm32(4u))};
+    const auto is_kind = [&](Kind k) { return ir.IEqual(kind, ir.Imm32(static_cast<u32>(k))); };
+
+    // The address is in bytes. Aligned like the specialised path's loads, no component crosses
+    // a dword, and four dwords from the element's dword cover every format.
+    const IR::U32 address_mask{ir.CompositeExtract(format, 3)};
+    const IR::U32 aligned{ir.BitwiseAnd(address, ir.BitwiseNot(address_mask))};
+    const IR::U32 dword_address{ir.ShiftRightLogical(aligned, ir.Imm32(2u))};
+    const IR::U32 byte_shift{
+        ir.ShiftLeftLogical(ir.BitwiseAnd(aligned, ir.Imm32(3u)), ir.Imm32(3u))};
+    const IR::Value raw = ir.LoadBufferU32(4, handle, dword_address, info);
+    const std::array<IR::U32, 4> dwords{
+        IR::U32{ir.CompositeExtract(raw, 0)}, IR::U32{ir.CompositeExtract(raw, 1)},
+        IR::U32{ir.CompositeExtract(raw, 2)}, IR::U32{ir.CompositeExtract(raw, 3)}};
+
+    const IR::F32 zero = ir.Imm32(0.f);
+    const IR::F32 one = ir.Imm32(1.f);
+    std::array<IR::F32, 4> components;
+    for (u32 i = 0; i < 4; ++i) {
+        const IR::U32 width{ir.BitFieldExtract(widths, ir.Imm32(i * 8), ir.Imm32(8u))};
+        const IR::U32 bit{
+            ir.IAdd(byte_shift, ir.BitFieldExtract(offsets, ir.Imm32(i * 8), ir.Imm32(8u)))};
+        const IR::U32 dword_index{ir.ShiftRightLogical(bit, ir.Imm32(5u))};
+        const IR::U32 dword{ir.Select(
+            ir.IEqual(dword_index, ir.Imm32(0u)), dwords[0],
+            ir.Select(ir.IEqual(dword_index, ir.Imm32(1u)), dwords[1],
+                      ir.Select(ir.IEqual(dword_index, ir.Imm32(2u)), dwords[2], dwords[3])))};
+        const IR::U32 bit_in_dword{ir.BitwiseAnd(bit, ir.Imm32(31u))};
+        const IR::U32 u{ir.BitFieldExtract(dword, bit_in_dword, width)};
+        const IR::U32 s{ir.BitFieldExtract(dword, bit_in_dword, width, true)};
+
+        // Normalising divisors, kept in range where the width can't be normalised.
+        const IR::U32 norm_width{ir.UMin(ir.UMax(width, ir.Imm32(1u)), ir.Imm32(31u))};
+        const IR::F32 unorm_max{ir.ConvertUToF(
+            32, 32, ir.ISub(ir.ShiftLeftLogical(ir.Imm32(1u), norm_width), ir.Imm32(1u)))};
+        const IR::F32 snorm_max{ir.ConvertUToF(
+            32, 32,
+            ir.UMax(ir.ISub(ir.ShiftLeftLogical(ir.Imm32(1u), ir.ISub(norm_width, ir.Imm32(1u))),
+                            ir.Imm32(1u)),
+                    ir.Imm32(1u)))};
+        const IR::F32 as_uint{ir.ConvertUToF(32, 32, u)};
+        const IR::F32 as_sint{ir.ConvertSToF(32, 32, s)};
+        const IR::F32 unorm{ir.FPDiv(as_uint, unorm_max)};
+        const IR::F32 snorm{ir.FPMax(ir.FPDiv(as_sint, snorm_max), ir.Imm32(-1.f))};
+        const IR::F32 half{ir.CompositeExtract(ir.Unpack2x16(AmdGpu::NumberFormat::Float, u), 0)};
+
+        IR::F32 value{ir.BitCast<IR::F32, IR::U32>(u)};
+        value = IR::F32{ir.Select(is_kind(Kind::Sint), ir.BitCast<IR::F32, IR::U32>(s), value)};
+        value = IR::F32{ir.Select(is_kind(Kind::Unorm), unorm, value)};
+        value = IR::F32{ir.Select(is_kind(Kind::Snorm), snorm, value)};
+        value = IR::F32{ir.Select(is_kind(Kind::Half), half, value)};
+        value = IR::F32{ir.Select(is_kind(Kind::Uscaled), as_uint, value)};
+        value = IR::F32{ir.Select(is_kind(Kind::Sscaled), as_sint, value)};
+        // Components the format doesn't have read as zero before the swizzle.
+        components[i] = IR::F32{ir.Select(ir.IEqual(width, ir.Imm32(0u)), zero, value)};
+    }
+
+    std::array<IR::Value, 4> swizzled;
+    for (u32 i = 0; i < 4; ++i) {
+        const IR::U32 select{ir.BitFieldExtract(
+            kind_swizzle, ir.Imm32(RuntimeBufferFormat::SwizzleShift + i * 3), ir.Imm32(3u))};
+        const auto is = [&](AmdGpu::CompSwizzle c) {
+            return ir.IEqual(select, ir.Imm32(static_cast<u32>(c)));
+        };
+        IR::Value value = ir.Select(is(AmdGpu::CompSwizzle::One), one, zero);
+        value = ir.Select(is(AmdGpu::CompSwizzle::Red), components[0], value);
+        value = ir.Select(is(AmdGpu::CompSwizzle::Green), components[1], value);
+        value = ir.Select(is(AmdGpu::CompSwizzle::Blue), components[2], value);
+        value = ir.Select(is(AmdGpu::CompSwizzle::Alpha), components[3], value);
+        swizzled[i] = value;
+    }
+    return ir.CompositeConstruct(swizzled[0], swizzled[1], swizzled[2], swizzled[3]);
+}
+
 static void StoreBufferFormat(IR::IREmitter& ir, const IR::Value handle, const IR::U32 address,
                               const IR::Value& value, const IR::BufferInstInfo info,
                               const FormatInfo& format_info) {
@@ -189,13 +275,20 @@ static void StoreBufferFormat(IR::IREmitter& ir, const IR::Value handle, const I
     }
 }
 
-static void LowerBufferFormatInst(IR::Block& block, IR::Inst& inst, Info& info) {
+static void LowerBufferFormatInst(IR::Block& block, IR::Inst& inst, Info& info,
+                                  const Profile& profile) {
     IR::IREmitter ir{block, IR::Block::InstructionList::s_iterator_to(inst)};
     const auto flags = inst.Flags<IR::BufferInstInfo>();
     const auto desc{info.buffers[inst.Arg(0).U32()]};
     const auto buffer{desc.GetSharp(info)};
 
     const auto is_inst_typed = flags.inst_data_fmt != AmdGpu::DataFormat::FormatInvalid;
+    if (!is_inst_typed && IsBufferFormatLoad(inst) &&
+        UsesRuntimeBufferFormat(profile.runtime_buffer_formats, desc, buffer)) {
+        inst.ReplaceUsesWithAndRemove(
+            LoadRuntimeBufferFormat(ir, inst.Arg(0), IR::U32{inst.Arg(1)}, flags));
+        return;
+    }
     const auto data_format =
         is_inst_typed ? AmdGpu::RemapDataFormat(flags.inst_data_fmt.Value()) : buffer.GetDataFmt();
     const auto format_info = FormatInfo{
@@ -233,12 +326,12 @@ static void LowerBufferFormatInst(IR::Block& block, IR::Inst& inst, Info& info) 
     }
 }
 
-void LowerBufferFormatToRaw(IR::Program& program) {
+void LowerBufferFormatToRaw(IR::Program& program, const Profile& profile) {
     auto& info = program.info;
     for (IR::Block* const block : program.blocks) {
         for (IR::Inst& inst : block->Instructions()) {
             if (IsBufferFormatLoad(inst) || IsBufferFormatStore(inst)) {
-                LowerBufferFormatInst(*block, inst, info);
+                LowerBufferFormatInst(*block, inst, info, profile);
             }
         }
     }

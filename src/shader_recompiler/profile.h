@@ -60,6 +60,9 @@ struct Profile {
     /// Leaves out of specialisations what doesn't change the code: the exact format of
     /// render targets (only its number class), and sRGB where no sampler forces degamma.
     bool fewer_shader_variants{};
+    /// Formatted buffer loads read the buffer's format from the stage table, so shaders
+    /// aren't compiled again for each format. Needs the descriptor heap.
+    bool runtime_buffer_formats{};
 
     bool operator==(const Profile&) const = default;
 };

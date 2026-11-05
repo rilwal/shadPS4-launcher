@@ -803,16 +803,21 @@ void EmitContext::DefinePushDataBlock() {
 void EmitContext::DefineStageTable() {
     static_assert(StageTable::BufOffsetsSize == 4 * 16);
     static_assert(StageTable::StridesOffset == StageTable::StridesMember * 16);
-    constexpr u32 num_strides = StageTable::StridesSize / 16;
-    std::array<Id, StageTable::StridesMember + num_strides> members;
+    static_assert(StageTable::FormatsOffset == StageTable::FormatsMember * 16);
+    constexpr u32 num_formats = StageTable::FormatsSize / 16;
+    std::array<Id, StageTable::FormatsMember + 1> members;
     members.fill(U32[4]);
+    const Id formats_type{TypeArray(U32[4], ConstU32(num_formats))};
+    Decorate(formats_type, spv::Decoration::ArrayStride, 16U);
+    members.back() = formats_type;
     const Id table_type{Name(TypeStruct(members), "StageTable")};
     Decorate(table_type, spv::Decoration::Block);
     for (u32 i = 0; i < members.size(); ++i) {
         MemberName(table_type, i,
-                   i < StageTable::StridesMember
-                       ? fmt::format("buf_offsets{}", i)
-                       : fmt::format("strides{}", i - StageTable::StridesMember));
+                   i < StageTable::StridesMember ? fmt::format("buf_offsets{}", i)
+                   : i < StageTable::FormatsMember
+                       ? fmt::format("strides{}", i - StageTable::StridesMember)
+                       : std::string{"formats"});
         MemberDecorate(table_type, i, spv::Decoration::Offset, i * 16U);
     }
     stage_table_block = DefineVar(table_type, spv::StorageClass::Uniform);

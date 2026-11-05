@@ -12,6 +12,7 @@
 #include "shader_recompiler/ir/reinterpret.h"
 #include "shader_recompiler/profile.h"
 #include "shader_recompiler/resource.h"
+#include "shader_recompiler/runtime_buffer_format.h"
 #include "video_core/amdgpu/resource.h"
 
 namespace Shader::Optimization {
@@ -547,14 +548,17 @@ void PatchGlobalDataShareAccess(IR::Inst& inst, Info& info, Descriptors& descrip
 }
 
 IR::U32 CalculateBufferAddress(IR::IREmitter& ir, const IR::Inst& inst, const Info& info,
-                               const AmdGpu::Buffer& buffer, u32 stride, bool runtime_stride) {
+                               const AmdGpu::Buffer& buffer, u32 stride, bool runtime_stride,
+                               bool byte_address) {
     const auto inst_info = inst.Flags<IR::BufferInstInfo>();
     const u32 inst_offset = inst_info.inst_offset.Value();
     const auto is_inst_typed = inst_info.inst_data_fmt != AmdGpu::DataFormat::FormatInvalid;
     const auto data_format = is_inst_typed
                                  ? AmdGpu::RemapDataFormat(inst_info.inst_data_fmt.Value())
                                  : buffer.GetDataFmt();
-    const u32 shift = BufferAddressShift(inst, data_format);
+    // Loads that read their format at run time get a byte address, as the element size
+    // isn't known here.
+    const u32 shift = byte_address ? 0 : BufferAddressShift(inst, data_format);
     const u32 mask = (1 << shift) - 1;
     const IR::U32 soffset = IR::GetBufferSOffsetArg(&inst);
 
@@ -639,9 +643,13 @@ void PatchBufferArgs(IR::Inst& inst, Info& info, const Profile& profile) {
     }
 
     IR::IREmitter ir{*inst.GetParent(), IR::Block::InstructionList::s_iterator_to(inst)};
+    const bool runtime_format =
+        inst.GetOpcode() == IR::Opcode::LoadBufferFormatF32 &&
+        inst.Flags<IR::BufferInstInfo>().inst_data_fmt == AmdGpu::DataFormat::FormatInvalid &&
+        UsesRuntimeBufferFormat(profile.runtime_buffer_formats, buffer_res, buffer);
     inst.SetArg(IR::LoadBufferArgs::Address,
                 CalculateBufferAddress(ir, inst, info, buffer, buffer.stride,
-                                       profile.uses_descriptor_heap));
+                                       profile.uses_descriptor_heap, runtime_format));
 }
 
 void PatchImageSampleArgs(IR::Inst& inst, Info& info, const ImageResource& image_res,

@@ -473,7 +473,8 @@ const std::vector<Entry>& Entries() {
         e.push_back(Toggle(
             "fewer-shader-variants", "Fewer shader variants", "Accuracy",
             "Compile one shader for draws that differ only in ways that don't change it, such as "
-            "the exact format they draw to. Experimental.",
+            "the exact format they draw to. With the descriptor heap, shaders also read buffer "
+            "formats as they run. Experimental.",
             [] { return EmulatorSettings.IsFewerShaderVariants(); },
             [](bool v) { EmulatorSettings.SetFewerShaderVariants(v, G); }));
 

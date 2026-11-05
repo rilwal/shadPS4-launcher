@@ -935,6 +935,7 @@ bool Rasterizer::IsComputeImageClear(const Pipeline* pipeline) {
 void Rasterizer::BindBuffers(const Shader::Info& stage, Shader::Backend::Bindings& binding,
                              Shader::PushData& push_data) {
     const u64 alignment = instance.StorageMinAlignment();
+    const bool runtime_formats = pipeline_cache.GetProfile().runtime_buffer_formats;
     for (const auto& desc : stage.buffers) {
         const auto src_access =
             vk::AccessFlagBits2::eShaderRead |
@@ -1015,9 +1016,16 @@ void Rasterizer::BindBuffers(const Shader::Info& stage, Shader::Backend::Binding
                 }
                 push_data.AddOffset(binding.buffer, adjust);
                 if (heaps) {
-                    // Shaders read strides from the stage's table.
-                    heap_stages.back().strides[binding.buffer] =
-                        static_cast<u16>(vsharp.GetStride());
+                    // Shaders read strides from the stage's table, and formats too where
+                    // their loads read them at run time.
+                    auto& heap_stage = heap_stages.back();
+                    heap_stage.strides[binding.buffer] = static_cast<u16>(vsharp.GetStride());
+                    if (Shader::UsesRuntimeBufferFormat(runtime_formats, desc, vsharp)) {
+                        heap_stage.formats[binding.buffer] =
+                            *Shader::DescribeRuntimeBufferFormat(vsharp);
+                        heap_stage.num_formats =
+                            std::max(heap_stage.num_formats, binding.buffer + 1);
+                    }
                 }
                 AddBufferInfo(buffer, offset_aligned, size + adjust);
                 bound_buffers.emplace_back(buffer, offset, size, src_access);
