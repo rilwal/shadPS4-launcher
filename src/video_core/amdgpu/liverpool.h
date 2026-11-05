@@ -195,10 +195,14 @@ private:
     CmdBuffer CopyCmdBuffers(std::span<const u32> dcb, std::span<const u32> ccb);
     Task ProcessGraphics(std::span<const u32> dcb);
     /// One level of LookAhead: register writes, draws and dispatches in `dcb`, following
-    /// indirect buffers. Returns false once the budget is spent.
+    /// indirect buffers. Returns false once the budget is spent or the reading has to stop.
     struct LookAheadBudget {
         u32 packets;
         u32 pipelines;
+        /// The DE counter as the reading goes, to know which constant engine dumps exist yet.
+        u32 de_count;
+        /// Stopped at a draw whose descriptors the constant engine hasn't written yet.
+        bool waits_for_ce;
     };
     bool ScanAhead(std::span<const u32> dcb, LookAheadBudget& budget, u32 depth);
     Task ProcessCeUpdate(std::span<const u32> ccb);

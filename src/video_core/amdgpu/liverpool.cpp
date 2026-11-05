@@ -29,7 +29,8 @@ static const char* ccb_task_name{"CCB_TASK"};
 static_assert(Liverpool::NumComputeRings <= MAX_NAMES);
 
 #define NAME_NUM(z, n, name) BOOST_PP_STRINGIZE(name) BOOST_PP_STRINGIZE(n),
-#define NAME_ARRAY(name, num) {BOOST_PP_REPEAT(num, NAME_NUM, name)}
+#define NAME_ARRAY(name, num)                                                                      \
+    { BOOST_PP_REPEAT(num, NAME_NUM, name) }
 
 static const char* acb_task_name[] = NAME_ARRAY(ACB_TASK, MAX_NAMES);
 
@@ -284,7 +285,7 @@ bool Liverpool::LookAhead() {
     const auto saved_cs = mapped_queues[GfxQueueId].cs_state;
     const u64 start = VideoCore::PerfStats::NowNs();
 
-    LookAheadBudget budget{.packets = 200'000, .pipelines = 256};
+    LookAheadBudget budget{.packets = 200'000, .pipelines = 256, .de_count = cblock.de_count};
     const u32 initial_pipelines = budget.pipelines;
     // Each level is on its current packet (the draw, or the indirect buffer being run), so
     // reading starts after it, innermost level first.
@@ -303,9 +304,10 @@ bool Liverpool::LookAhead() {
     regs = *saved_regs;
     mapped_queues[GfxQueueId].cs_state = saved_cs;
     in_lookahead = false;
-    LOG_INFO(Render, "Look-ahead read {} packets and made {} pipelines in {:.2f} ms",
+    LOG_INFO(Render, "Look-ahead read {} packets and made {} pipelines in {:.2f} ms{}",
              200'000 - budget.packets, initial_pipelines - budget.pipelines,
-             (VideoCore::PerfStats::NowNs() - start) / 1e6);
+             (VideoCore::PerfStats::NowNs() - start) / 1e6,
+             budget.waits_for_ce ? ", up to the constant engine" : "");
     return true;
 }
 
@@ -431,6 +433,18 @@ bool Liverpool::ScanAhead(std::span<const u32> dcb, LookAheadBudget& budget, u32
             }
             break;
         }
+        case PM4ItOpcode::IncrementDeCounter:
+            ++budget.de_count;
+            break;
+        case PM4ItOpcode::WaitOnCeCounter:
+            // The draws after this read descriptor tables that the constant engine dumps to
+            // memory. Where it hasn't got that far, memory still holds older tables, and
+            // guesses made from them would be wrong.
+            if (cblock.ce_count <= budget.de_count) {
+                budget.waits_for_ce = true;
+                return false;
+            }
+            break;
         case PM4ItOpcode::CondExec: {
             const auto* cond_exec = reinterpret_cast<const PM4CmdCondExec*>(header);
             if (*cond_exec->Address() == false) {

@@ -42,7 +42,8 @@ constexpr static std::array DescriptorHeapSizes = {
 };
 
 /// Names the parts of two specializations of one shader that differ, so the log shows what each
-/// new variant was compiled for.
+/// new variant was compiled for. `a` is the new one: like the lookup, only resources it binds
+/// are compared.
 static std::vector<std::string> SpecDifferences(const Shader::StageSpecialization& a,
                                                 const Shader::StageSpecialization& b) {
     std::vector<std::string> out;
@@ -134,7 +135,7 @@ static std::vector<std::string> SpecDifferences(const Shader::StageSpecializatio
     }
     u32 binding{};
     for (u32 i = 0; i < a.buffers.size() && i < b.buffers.size(); ++i) {
-        if (!b.bitset[binding++]) {
+        if (!a.bitset[binding++]) {
             continue;
         }
         const auto& x = a.buffers[i];
@@ -155,7 +156,7 @@ static std::vector<std::string> SpecDifferences(const Shader::StageSpecializatio
     }
     binding = static_cast<u32>(a.buffers.size());
     for (u32 i = 0; i < a.images.size() && i < b.images.size(); ++i) {
-        if (!b.bitset[binding++]) {
+        if (!a.bitset[binding++]) {
             continue;
         }
         const auto& x = a.images[i];
