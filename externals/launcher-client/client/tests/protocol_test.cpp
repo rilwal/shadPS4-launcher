@@ -113,6 +113,8 @@ static void sent() {
 	full.rarity_of       = "players";
 	full.unlocked        = true;
 	full.unlocked_at     = 1700000000;
+	full.current         = 0;
+	full.total           = 0;
 	check_sent(protocol::achievements(&full, 1));
 	// Without points or rarity, which most emulators don't know
 	lc_achievement bare {};

@@ -21,6 +21,8 @@ struct Trophy {
     std::string name;
     std::string description;
     std::string grade; // "bronze", "silver", "gold", "platinum"
+    // Its set's title, for a game with several (each game of a collection)
+    std::string set;
     bool hidden = false;
     bool dlc = false;
     std::optional<s64> unlocked_at; // Unix seconds
