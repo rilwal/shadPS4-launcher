@@ -123,11 +123,27 @@ private:
     /// Logs where pipeline compiles spent their time, with game frame hitches.
     void FlushCompileStats(u64 now_ns);
 
-    /// Whether new graphics pipelines are created on the workers (setting, or the A/B timer).
-    [[nodiscard]] bool UseAsyncPipelines() const;
+    /// How new graphics pipelines get created (the async_pipelines setting).
+    enum class AsyncMode : u32 {
+        /// On the GPU thread, which waits.
+        Off = 0,
+        /// On the workers; draws are skipped until the pipeline is ready.
+        Skip = 1,
+        /// Unoptimized on the GPU thread, then optimized on the workers, replacing it.
+        Tiered = 2,
+    };
+
+    [[nodiscard]] static const char* AsyncModeName(AsyncMode mode);
+
+    /// The mode for new graphics pipelines (setting, or the A/B timer).
+    [[nodiscard]] AsyncMode GetAsyncMode() const;
+
+    [[nodiscard]] bool UseAsyncPipelines() const {
+        return GetAsyncMode() != AsyncMode::Off;
+    }
 
     /// How the next new graphics pipeline gets created, with its stats callbacks.
-    PipelineCompileOptions MakeCompileOptions(u64 pipeline_hash, u64 recompile_ns, bool async);
+    PipelineCompileOptions MakeCompileOptions(u64 pipeline_hash, u64 recompile_ns, AsyncMode mode);
 
     /// Waits a little for a background pipeline, within a budget per frame's worth of time, so
     /// quick ones are drawn at once.

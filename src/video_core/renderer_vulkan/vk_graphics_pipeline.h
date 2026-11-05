@@ -115,7 +115,7 @@ private:
     void BuildDescSetLayout(bool preloading);
 
     /// Creates the pipeline in the driver.
-    void Create(const Build& build);
+    void Create(const Build& build, bool optimize = true);
 
     /// Times an unoptimized creation of the same pipeline, then throws it away.
     static void Probe(const Build& build, u64 optimized_ns,

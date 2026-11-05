@@ -418,9 +418,10 @@ const std::vector<Entry>& Entries() {
         e.push_back(
             Live(Choice(
                      "async-pipelines", "Shader compiling", "Accuracy",
-                     "Compile new shaders on other threads instead of pausing the game. What "
-                     "a shader draws is missing until it's ready, usually for a frame or two.",
-                     {{"0", "Pause the game"}, {"1", "In the background"}},
+                     "How new shaders get compiled. Pausing the game stutters. In the background, "
+                     "what a shader draws is missing until it's ready. Quick first compiles a "
+                     "slower version at once, then swaps in the full one.",
+                     {{"0", "Pause the game"}, {"1", "In the background"}, {"2", "Quick first"}},
                      [] { return std::to_string(EmulatorSettings.GetAsyncPipelines()); },
                      [](const std::string& value) {
                          EmulatorSettings.SetAsyncPipelines(static_cast<u32>(std::stoi(value)), G);
@@ -429,8 +430,8 @@ const std::vector<Entry>& Entries() {
         e.push_back(
             Live(Choice(
                      "async-pipelines-ab", "Shader compiling: A/B test", "Accuracy",
-                     "Switch shader compiling between pausing and the background on a "
-                     "timer, to compare them in one run. The log says which is on.",
+                     "Switch shader compiling between pausing and the mode above on a timer, to "
+                     "compare them in one run. The log says which is on.",
                      {{"0", "Off"}, {"10", "Every 10 s"}, {"30", "Every 30 s"}},
                      [] { return std::to_string(EmulatorSettings.GetAsyncPipelinesAbSeconds()); },
                      [](const std::string& value) {

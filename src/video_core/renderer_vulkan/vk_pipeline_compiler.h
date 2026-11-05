@@ -68,10 +68,15 @@ private:
 struct PipelineCompileOptions {
     /// Creates it on these workers instead of at once; draws skip it until it's ready.
     PipelineCompiler* compiler{};
+    /// With `compiler`: creates an unoptimized pipeline at once instead, then an optimized one
+    /// on the workers that replaces it. No draw is skipped.
+    bool tiered{};
     /// Also times an unoptimized creation of it on these workers, for comparison.
     PipelineCompiler* prober{};
     /// Called on the thread that created it, with the driver's time.
     std::function<void(u64)> on_created{};
+    /// Tiered only: called on a worker once the optimized pipeline replaced the first one.
+    std::function<void(u64)> on_upgraded{};
     /// Called on a worker after a probe, with the optimized and unoptimized driver times.
     std::function<void(u64, u64)> on_probed{};
 };

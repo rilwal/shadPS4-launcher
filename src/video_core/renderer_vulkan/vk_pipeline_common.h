@@ -34,7 +34,8 @@ public:
     virtual ~Pipeline();
 
     vk::Pipeline Handle() const noexcept {
-        return *pipeline;
+        const VkPipeline upgraded = upgraded_handle.load(std::memory_order_acquire);
+        return upgraded != VK_NULL_HANDLE ? vk::Pipeline{upgraded} : *pipeline;
     }
 
     /// False while a worker still creates it (draws that use it are skipped until then), or if
@@ -87,9 +88,17 @@ protected:
         state.notify_all();
     }
 
-    /// Waits for a background creation, so it never outlives the pipeline.
+    /// Waits for background work on the pipeline, so it never outlives it.
     void WaitIdle() const noexcept {
         state.wait(State::Pending, std::memory_order_acquire);
+        upgrading.wait(true, std::memory_order_acquire);
+    }
+
+    /// Publishes an optimized pipeline that replaces the first one. Both stay alive, as
+    /// recorded commands may still use the first.
+    void Upgrade(vk::UniquePipeline optimized) noexcept {
+        upgraded = std::move(optimized);
+        upgraded_handle.store(*upgraded, std::memory_order_release);
     }
 
     const Instance& instance;
@@ -103,6 +112,10 @@ protected:
     bool uses_push_descriptors{};
     bool is_compute;
     std::atomic<State> state{State::Ready};
+    /// An optimized version is being created in the background.
+    std::atomic<bool> upgrading{false};
+    vk::UniquePipeline upgraded;
+    std::atomic<VkPipeline> upgraded_handle{VK_NULL_HANDLE};
     u64 driver_ns{};
 };
 

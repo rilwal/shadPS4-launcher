@@ -456,6 +456,35 @@ GraphicsPipeline::GraphicsPipeline(
         .layout = *pipeline_layout,
     };
 
+    if (options.compiler && options.tiered) {
+        Create(b, false);
+        if (options.on_created) {
+            options.on_created(driver_ns);
+        }
+        upgrading.store(true, std::memory_order_relaxed);
+        options.compiler->Submit([this, build = std::move(build),
+                                  on_upgraded = std::move(options.on_upgraded)](bool drop) {
+            u64 optimized_ns = 0;
+            if (!drop) {
+                const u64 start = VideoCore::PerfStats::NowNs();
+                auto [result, pipe] =
+                    build->device.createGraphicsPipelineUnique(build->cache, build->pipeline_info);
+                optimized_ns = VideoCore::PerfStats::NowNs() - start;
+                if (result == vk::Result::eSuccess) {
+                    SetObjectName(build->device, *pipe, "Graphics Pipeline {}", build->name);
+                    Upgrade(std::move(pipe));
+                }
+            }
+            // The pipeline may be destroyed from here on, so nothing below touches it.
+            upgrading.store(false, std::memory_order_release);
+            upgrading.notify_all();
+            if (!drop && on_upgraded) {
+                on_upgraded(optimized_ns);
+            }
+        });
+        return;
+    }
+
     if (!options.compiler) {
         Create(b);
         if (options.on_created) {
@@ -498,9 +527,13 @@ GraphicsPipeline::~GraphicsPipeline() {
     WaitIdle();
 }
 
-void GraphicsPipeline::Create(const Build& b) {
+void GraphicsPipeline::Create(const Build& b, bool optimize) {
+    auto info = b.pipeline_info;
+    if (!optimize) {
+        info.flags |= vk::PipelineCreateFlagBits::eDisableOptimization;
+    }
     const u64 start = VideoCore::PerfStats::NowNs();
-    auto [pipeline_result, pipe] = b.device.createGraphicsPipelineUnique(b.cache, b.pipeline_info);
+    auto [pipeline_result, pipe] = b.device.createGraphicsPipelineUnique(b.cache, info);
     ASSERT_MSG(pipeline_result == vk::Result::eSuccess, "Failed to create graphics pipeline: {}",
                vk::to_string(pipeline_result));
     driver_ns = VideoCore::PerfStats::NowNs() - start;

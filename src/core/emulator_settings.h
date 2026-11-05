@@ -434,7 +434,8 @@ struct GPUSettings {
     Setting<bool> userfaultfd{false};
     Setting<bool> inline_fetch_shader{false};
     Setting<bool> fast_shader_math{false};
-    /// 1 = create new graphics pipelines on compile threads and skip their draws until ready.
+    /// New graphics pipelines: 0 = created on the GPU thread, 1 = on compile threads with their
+    /// draws skipped until ready, 2 = unoptimized at once, replaced by an optimized one later.
     Setting<u32> async_pipelines{0};
     /// Most the GPU thread waits for background pipelines per 60 Hz frame's worth of time.
     Setting<u32> async_pipeline_wait_ms{2};
