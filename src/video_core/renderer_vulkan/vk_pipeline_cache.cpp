@@ -392,13 +392,14 @@ void PipelineCache::FlushCompileStats(u64 now_ns) {
                  "{:.1f} ms, driver {:.1f} ms, worst pipeline {:.1f} ms. "
                  "Async {}: {} sent to workers, {} created there (driver {:.1f} ms, worst "
                  "{:.1f} ms, ready at worst {:.1f} ms after the draw), {} draws skipped, "
-                 "{} draws waited for a new target, waited {:.1f} ms, {} pending",
+                 "{} draws waited for a new target ({} ran on the GPU thread), waited {:.1f} ms, "
+                 "{} pending",
                  seconds, frames.count, frames.count / seconds, frames.hitches,
                  frames.worst_ns / 1e6, stats.graphics, stats.compute, stats.shaders,
                  stats.permutations, stats.binding_permutations, stats.recompile_ns / 1e6,
                  stats.driver_ns / 1e6, stats.worst_ns / 1e6, AsyncModeName(GetAsyncMode()),
                  stats.background, bg_created, bg_driver_ns / 1e6, bg_worst_driver_ns / 1e6,
-                 bg_worst_latency_ns / 1e6, stats.skipped_draws, stats.waited_draws,
+                 bg_worst_latency_ns / 1e6, stats.skipped_draws, stats.waited_draws, stats.ran_now,
                  stats.waited_ns / 1e6, compiler->Pending());
     }
     if (shader_objects) {
@@ -516,6 +517,10 @@ PipelineCompileOptions PipelineCache::MakeCompileOptions(u64 pipeline_hash, u64 
 
 void PipelineCache::WaitUntilReady(const GraphicsPipeline& pipeline) {
     const u64 start = VideoCore::PerfStats::NowNs();
+    // Its job may sit behind the ones for skipped draws, so run it here if it hasn't started.
+    if (pipeline.CompileTicket() != 0 && compiler->RunNow(pipeline.CompileTicket())) {
+        ++compile_stats.ran_now;
+    }
     compiler->WaitFor([&pipeline] { return pipeline.IsReady(); }, std::chrono::hours{1});
     const u64 waited = VideoCore::PerfStats::NowNs() - start;
     compile_stats.waited_ns += waited;

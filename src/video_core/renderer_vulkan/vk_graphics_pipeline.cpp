@@ -508,22 +508,22 @@ GraphicsPipeline::GraphicsPipeline(
         }
         // Workers create the shaders that don't exist yet; draws skip or wait until then.
         state.store(State::Pending, std::memory_order_relaxed);
-        options.compiler->Submit([this, build = std::move(build), shader_objects,
-                                  compiler = options.compiler,
-                                  on_created = std::move(options.on_created)](bool drop) {
-            if (drop) {
-                Finish(State::Dropped);
-                return;
-            }
-            CreateShaderObjects(*build, *shader_objects);
-            const u64 created_ns = driver_ns;
-            // The pipeline may be destroyed from here on, so nothing below touches it.
-            Finish(State::Ready);
-            compiler->Notify();
-            if (on_created) {
-                on_created(created_ns);
-            }
-        });
+        compile_ticket = options.compiler->Submit(
+            [this, build = std::move(build), shader_objects, compiler = options.compiler,
+             on_created = std::move(options.on_created)](bool drop) {
+                if (drop) {
+                    Finish(State::Dropped);
+                    return;
+                }
+                CreateShaderObjects(*build, *shader_objects);
+                const u64 created_ns = driver_ns;
+                // The pipeline may be destroyed from here on, so nothing below touches it.
+                Finish(State::Ready);
+                compiler->Notify();
+                if (on_created) {
+                    on_created(created_ns);
+                }
+            });
         return;
     }
 
@@ -596,25 +596,26 @@ GraphicsPipeline::GraphicsPipeline(
     }
 
     state.store(State::Pending, std::memory_order_relaxed);
-    options.compiler->Submit([this, build = std::move(build), compiler = options.compiler,
-                              prober = options.prober, on_created = std::move(options.on_created),
-                              on_probed = std::move(options.on_probed)](bool drop) {
-        if (drop) {
-            Finish(State::Dropped);
-            return;
-        }
-        Create(*build);
-        const u64 optimized_ns = driver_ns;
-        // The pipeline may be destroyed from here on, so nothing below touches it.
-        Finish(State::Ready);
-        compiler->Notify();
-        if (on_created) {
-            on_created(optimized_ns);
-        }
-        if (prober) {
-            Probe(*build, optimized_ns, on_probed);
-        }
-    });
+    compile_ticket = options.compiler->Submit(
+        [this, build = std::move(build), compiler = options.compiler, prober = options.prober,
+         on_created = std::move(options.on_created),
+         on_probed = std::move(options.on_probed)](bool drop) {
+            if (drop) {
+                Finish(State::Dropped);
+                return;
+            }
+            Create(*build);
+            const u64 optimized_ns = driver_ns;
+            // The pipeline may be destroyed from here on, so nothing below touches it.
+            Finish(State::Ready);
+            compiler->Notify();
+            if (on_created) {
+                on_created(optimized_ns);
+            }
+            if (prober) {
+                Probe(*build, optimized_ns, on_probed);
+            }
+        });
 }
 
 void GraphicsPipeline::CreateShaderObjects(const Build& b, ShaderObjects& objects) {

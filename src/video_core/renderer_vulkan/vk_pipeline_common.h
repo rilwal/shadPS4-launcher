@@ -44,6 +44,11 @@ public:
         return state.load(std::memory_order_acquire) == State::Ready;
     }
 
+    /// The compile job creating it in the background, 0 if there's none.
+    [[nodiscard]] u64 CompileTicket() const noexcept {
+        return compile_ticket;
+    }
+
     /// Time the driver took to create it, once it's ready.
     [[nodiscard]] u64 DriverNs() const noexcept {
         return driver_ns;
@@ -117,6 +122,7 @@ protected:
     vk::UniquePipeline upgraded;
     std::atomic<VkPipeline> upgraded_handle{VK_NULL_HANDLE};
     u64 driver_ns{};
+    u64 compile_ticket{};
 };
 
 } // namespace Vulkan

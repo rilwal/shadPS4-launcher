@@ -190,6 +190,8 @@ private:
         u64 waited_ns{};
         /// Draws that waited for their pipeline, as they draw to a new target.
         u64 waited_draws{};
+        /// Of those, ones whose creation the GPU thread took over from the queue.
+        u64 ran_now{};
         u64 last_log_ns{};
     } compile_stats;
     /// Recompile time of the shaders gathered for the pipeline being looked up.

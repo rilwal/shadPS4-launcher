@@ -1,6 +1,7 @@
 // SPDX-FileCopyrightText: Copyright 2026 shadPS4 Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+#include <algorithm>
 #include <fmt/format.h>
 
 #include "common/thread.h"
@@ -25,17 +26,41 @@ PipelineCompiler::~PipelineCompiler() {
         thread.join();
     }
     // Workers drop what's left at shutdown, so this only runs if there were no workers.
-    for (auto& job : queue) {
+    for (auto& [_, job] : queue) {
         job(true);
     }
 }
 
-void PipelineCompiler::Submit(Job job) {
+PipelineCompiler::Ticket PipelineCompiler::Submit(Job job) {
+    Ticket ticket;
     {
         std::scoped_lock lock{mutex};
-        queue.push_back(std::move(job));
+        ticket = next_ticket++;
+        queue.emplace_back(ticket, std::move(job));
     }
     work_cv.notify_one();
+    return ticket;
+}
+
+bool PipelineCompiler::RunNow(Ticket ticket) {
+    Job job;
+    {
+        std::scoped_lock lock{mutex};
+        const auto it = std::ranges::find(queue, ticket, &std::pair<Ticket, Job>::first);
+        if (it == queue.end()) {
+            return false;
+        }
+        job = std::move(it->second);
+        queue.erase(it);
+        ++running;
+    }
+    job(false);
+    {
+        std::scoped_lock lock{mutex};
+        --running;
+    }
+    done_cv.notify_all();
+    return true;
 }
 
 void PipelineCompiler::WaitIdle() {
@@ -66,7 +91,7 @@ void PipelineCompiler::Run(u32 index) {
             if (queue.empty()) {
                 return;
             }
-            job = std::move(queue.front());
+            job = std::move(queue.front().second);
             queue.pop_front();
             ++running;
             drop = stopping;

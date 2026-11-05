@@ -31,7 +31,14 @@ public:
     PipelineCompiler(const PipelineCompiler&) = delete;
     PipelineCompiler& operator=(const PipelineCompiler&) = delete;
 
-    void Submit(Job job);
+    /// Names a submitted job, so the thread that needs its result can run it itself.
+    using Ticket = u64;
+
+    Ticket Submit(Job job);
+
+    /// Runs the job on the calling thread if no worker has started it yet, instead of waiting
+    /// behind the jobs queued before it. Returns false if it had already started or finished.
+    bool RunNow(Ticket ticket);
 
     /// Waits until `done()` holds or `timeout` passes, checking each time a job finishes.
     /// Returns `done()`.
@@ -60,7 +67,8 @@ private:
     std::mutex mutex;
     std::condition_variable work_cv;
     std::condition_variable done_cv;
-    std::deque<Job> queue;
+    std::deque<std::pair<Ticket, Job>> queue;
+    Ticket next_ticket{1};
     size_t running{};
     bool stopping{};
     std::vector<std::thread> threads;
