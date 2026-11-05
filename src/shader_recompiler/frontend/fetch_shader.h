@@ -38,7 +38,8 @@ struct VertexAttribute {
         if (info.guess_state) {
             // No V# to read: assume 32-bit floats with as many components as the fetch loads,
             // the rest filled the way the formats fill them.
-            auto buffer = AmdGpu::Buffer::Null();
+            // Non-empty, so the specialisation takes it as bound like the draw's.
+            auto buffer = AmdGpu::Buffer::Placeholder(1);
             static constexpr std::array<AmdGpu::DataFormat, 5> Formats = {
                 AmdGpu::DataFormat::FormatInvalid, AmdGpu::DataFormat::Format32,
                 AmdGpu::DataFormat::Format32_32, AmdGpu::DataFormat::Format32_32_32,

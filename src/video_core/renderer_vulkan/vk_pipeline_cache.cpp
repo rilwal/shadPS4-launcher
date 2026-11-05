@@ -233,6 +233,22 @@ static u32 MapOutputs(std::span<Shader::OutputMap, 3> outputs, const AmdGpu::VsO
     return num_outputs;
 }
 
+/// The render target a pixel shader is taken to export to where nothing says what's bound:
+/// 8-bit unorm in RGBA order. Used for guesses, and with run-time target swizzles for exported
+/// locations the draw leaves unbound, so that the two agree.
+static Shader::PsColorBuffer UnboundTarget(AmdGpu::ShaderExportFormat export_format) {
+    Shader::PsColorBuffer target{
+        .data_format = AmdGpu::DataFormat::Format8_8_8_8,
+        .num_format = AmdGpu::NumberFormat::Unorm,
+        .num_conversion = AmdGpu::NumberConversion::None,
+        .export_format = export_format,
+        .blend_self_scale = 0,
+    };
+    target.swizzle.array = {AmdGpu::CompSwizzle::Red, AmdGpu::CompSwizzle::Green,
+                            AmdGpu::CompSwizzle::Blue, AmdGpu::CompSwizzle::Alpha};
+    return target;
+}
+
 const Shader::RuntimeInfo& PipelineCache::BuildRuntimeInfo(HwStage stage, SwStage l_stage) {
     auto& info = runtime_infos[u32(l_stage)];
     const auto& regs = liverpool->regs;
@@ -356,6 +372,12 @@ const Shader::RuntimeInfo& PipelineCache::BuildRuntimeInfo(HwStage stage, SwStag
                 // The shader exports what its export format says whatever the draw binds;
                 // exports to a location without an attachment are dropped.
                 target.export_format = regs.color_export_format.GetFormat(i);
+                // An exported location the draw leaves unbound takes the same stand-in as a
+                // guess: its exports are dropped either way.
+                if (target.data_format == AmdGpu::DataFormat::FormatInvalid &&
+                    target.export_format != AmdGpu::ShaderExportFormat::Zero) {
+                    target = UnboundTarget(target.export_format);
+                }
             }
             info.hw.fs.color_buffers[i] =
                 profile.fewer_shader_variants ? ShaderColorBuffer(target) : target;
@@ -1964,15 +1986,7 @@ std::optional<Shader::RuntimeInfo> PipelineCache::GuessRuntimeInfo(
             if (export_format == AmdGpu::ShaderExportFormat::Zero) {
                 continue;
             }
-            Shader::PsColorBuffer target{
-                .data_format = AmdGpu::DataFormat::Format8_8_8_8,
-                .num_format = AmdGpu::NumberFormat::Unorm,
-                .num_conversion = AmdGpu::NumberConversion::None,
-                .export_format = export_format,
-                .blend_self_scale = 0,
-            };
-            target.swizzle.array = {AmdGpu::CompSwizzle::Red, AmdGpu::CompSwizzle::Green,
-                                    AmdGpu::CompSwizzle::Blue, AmdGpu::CompSwizzle::Alpha};
+            const auto target = UnboundTarget(export_format);
             fs.color_buffers[i] =
                 profile.fewer_shader_variants ? ShaderColorBuffer(target) : target;
         }

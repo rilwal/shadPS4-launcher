@@ -102,6 +102,18 @@ struct BufferResource {
 
     constexpr AmdGpu::Buffer GetSharp(const auto& info) const noexcept {
         AmdGpu::Buffer buffer;
+        if (info.guess_state && buffer_type == BufferType::Guest) {
+            // No V# to read: a bound buffer whose format the shader can read at run time, so
+            // the specialisation is the one a draw with a describable format makes.
+            buffer = AmdGpu::Buffer::Placeholder(1);
+            buffer.data_format = u32(AmdGpu::DataFormat::Format32_32_32_32);
+            buffer.num_format = u32(AmdGpu::NumberFormat::Float);
+            buffer.dst_sel_x = u32(AmdGpu::CompSwizzle::Red);
+            buffer.dst_sel_y = u32(AmdGpu::CompSwizzle::Green);
+            buffer.dst_sel_z = u32(AmdGpu::CompSwizzle::Blue);
+            buffer.dst_sel_w = u32(AmdGpu::CompSwizzle::Alpha);
+            return buffer;
+        }
         if (!sharp_fetch.Fetch(info.flattened_ud_buf.data(), &buffer)) {
             return AmdGpu::Buffer::Null();
         }
@@ -145,6 +157,8 @@ struct ImageResource {
         AmdGpu::Image image{};
         if (info.guess_state) {
             image = AmdGpu::Image::Null(is_depth);
+            // Non-null, so the specialisation takes it as bound like the draw's.
+            image.base_address = 1;
             image.type = u64(post_op == SharpFetchPostOp::ConvertCubeTo2DArray
                                  ? AmdGpu::ImageType::Color2DArray
                                  : guess_type);
