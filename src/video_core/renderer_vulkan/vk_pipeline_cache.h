@@ -282,6 +282,11 @@ private:
                                                         Shader::SwStage sw_stage,
                                                         std::span<const u8> header) const;
     void LogGuessStats();
+    /// The guess check for a vertex shader: its register state and fetch shader from its struct.
+    void CheckVertexGuess(const Shader::ShaderParams& params, std::span<const u8> header,
+                          const Shader::Backend::Bindings& start,
+                          const Shader::StageSpecialization& spec, u64 perm_hash);
+    static std::optional<Shader::Gcn::FetchShaderData> GuessFetchShader(std::span<const u8> header);
     /// Learns how pixel shader input semantics map to vertex outputs from a first use. GPU
     /// thread; the guess reads semantic_base from any thread.
     void LearnSemanticBase(u64 hash, const Shader::RuntimeInfo& runtime_info);
@@ -324,6 +329,11 @@ private:
         /// Raw structs logged so far.
         u32 dumped{};
         u32 dumped_vertex{};
+        u32 vertex_checked{};
+        u32 vertex_matched{};
+        u32 vertex_fetch_matched{};
+        u32 vertex_unguessable{};
+        std::map<std::string, u32> vertex_wrong;
         bool changed{};
     } guess_stats;
     vk::UniquePipelineLayout pipeline_layout;

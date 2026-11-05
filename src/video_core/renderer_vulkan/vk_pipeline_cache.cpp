@@ -1342,6 +1342,11 @@ PipelineCache::Result PipelineCache::GetProgram(HwStage hw_stage, SwStage sw_sta
 /// A binary type not yet seen as any stage.
 constexpr auto UnseenStage = static_cast<HwStage>(~0u);
 
+/// The stages whose register state a shader's struct gives.
+static bool PrecompilesStage(HwStage stage) {
+    return stage == HwStage::Fragment || stage == HwStage::Compute || stage == HwStage::Vertex;
+}
+
 void PipelineCache::StartPrecompile(u32 num_threads) {
     precompile.type_stage.fill(UnseenStage);
     precompile.active = true;
@@ -1392,7 +1397,7 @@ void PipelineCache::RunPrecompile(std::stop_token stop) {
                         continue;
                     }
                     if (precompile.type_votes[type] >= 3) {
-                        if (stage == HwStage::Fragment || stage == HwStage::Compute) {
+                        if (PrecompilesStage(stage)) {
                             precompile.queue.emplace_back(hash, stage);
                         }
                     } else {
@@ -1419,13 +1424,22 @@ void PipelineCache::RunPrecompile(std::stop_token stop) {
 void PipelineCache::PrecompileOne(u64 hash, HwStage hw_stage) {
     const u64 start = VideoCore::PerfStats::NowNs();
     const auto found = shader_scanner->Find(hash);
-    const auto sw_stage = hw_stage == HwStage::Compute ? SwStage::Compute : SwStage::Fragment;
+    const auto sw_stage = hw_stage == HwStage::Compute  ? SwStage::Compute
+                          : hw_stage == HwStage::Vertex ? SwStage::Vertex
+                                                        : SwStage::Fragment;
     if (!found || found->header.empty()) {
         return;
     }
     auto runtime_info = GuessRuntimeInfo(hw_stage, sw_stage, found->header);
     if (!runtime_info) {
         return;
+    }
+    std::optional<Shader::Gcn::FetchShaderData> fetch;
+    if (hw_stage == HwStage::Vertex) {
+        fetch = GuessFetchShader(found->header);
+        if (!fetch) {
+            return;
+        }
     }
     // Nothing is known of the draw's user data; the first use fills it in.
     static constexpr std::array<u32, Shader::ShaderParams::NumShaderUserData> NoUserData{};
@@ -1437,6 +1451,7 @@ void PipelineCache::PrecompileOne(u64 hash, HwStage hw_stage) {
     auto program = std::make_unique<Program>(hw_stage, sw_stage, params);
     auto& info = program->info;
     info.guess_state = true;
+    info.guessed_fetch = fetch ? &*fetch : nullptr;
     thread_local Shader::Pools worker_pools;
     Shader::Backend::Bindings binding{};
     const auto ir_program =
@@ -1444,6 +1459,7 @@ void PipelineCache::PrecompileOne(u64 hash, HwStage hw_stage) {
     auto spv = Shader::Backend::SPIRV::EmitSPIRV(profile, *runtime_info, ir_program, binding);
     auto spec = Shader::StageSpecialization(info, *runtime_info, profile, {});
     info.guess_state = false;
+    info.guessed_fetch = nullptr;
 
     const auto device = instance.GetDevice();
     const auto module = CompileSPV(spv, device);
@@ -1455,7 +1471,7 @@ void PipelineCache::PrecompileOne(u64 hash, HwStage hw_stage) {
     // shares; a whole pipeline for a compute shader, which is the shader alone.
     Precompiled done{.hash = hash, .perm_hash = perm_hash};
     bool made_object = false;
-    if (hw_stage == HwStage::Fragment && shader_objects) {
+    if ((hw_stage == HwStage::Fragment || hw_stage == HwStage::Vertex) && shader_objects) {
         shader_objects->Register(module, spv);
         StageHeapMappings mappings;
         mappings.Build(info, HeapGeometry::Of(instance));
@@ -1464,7 +1480,10 @@ void PipelineCache::PrecompileOne(u64 hash, HwStage hw_stage) {
         };
         mappings.info.pNext = instance.IsSubgroupSize64Supported() ? &subgroup_size_ci : nullptr;
         u64 driver_ns = 0;
-        shader_objects->Get(module, vk::ShaderStageFlagBits::eFragment, &mappings.info, driver_ns);
+        shader_objects->Get(module,
+                            hw_stage == HwStage::Vertex ? vk::ShaderStageFlagBits::eVertex
+                                                        : vk::ShaderStageFlagBits::eFragment,
+                            &mappings.info, driver_ns);
         made_object = true;
     } else if (hw_stage == HwStage::Compute) {
         ComputePipeline::SerializationSupport sdata{};
@@ -1545,7 +1564,7 @@ void PipelineCache::NotePrecompileType(u64 hash, HwStage hw_stage) {
         return;
     }
     LOG_INFO(Render_Vulkan, "Shader binary type {} is {} shaders", t, hw_stage);
-    if (hw_stage != HwStage::Fragment && hw_stage != HwStage::Compute) {
+    if (!PrecompilesStage(hw_stage)) {
         std::erase_if(precompile.untyped, [t](const auto& u) { return u.second == t; });
         return;
     }
@@ -1599,6 +1618,54 @@ static std::optional<std::vector<u16>> PsInputSemantics(std::span<const u8> head
     std::vector<u16> semantics(count);
     std::memcpy(semantics.data(), header.data() + start, count * sizeof(u16));
     return semantics;
+}
+
+/// The fetch shader the game makes for a vertex shader, from the shader's struct: after the
+/// seven stage registers, a word with the input count in its low byte, the input usage slots,
+/// then 4 bytes per input (semantic, first VGPR, component count, reserved). The game's fetch
+/// shader loads input i from the V# at dword 4i of the vertex buffer table that usage slot
+/// type 0x17 points at.
+std::optional<Shader::Gcn::FetchShaderData> PipelineCache::GuessFetchShader(
+    std::span<const u8> header) {
+    constexpr size_t CountOffset = 8 + 7 * sizeof(u32);
+    constexpr u8 UsagePtrVertexBufferTable = 0x17;
+    if (header.size() < CountOffset + 4) {
+        return std::nullopt;
+    }
+    u32 common;
+    std::memcpy(&common, header.data(), sizeof(common));
+    const u32 num_usage_slots = common >> 24;
+    const u32 count = header[CountOffset];
+    const size_t slots = CountOffset + 4;
+    const size_t inputs = slots + num_usage_slots * 4;
+    if (inputs + count * 4 > header.size()) {
+        return std::nullopt;
+    }
+    Shader::Gcn::FetchShaderData fetch;
+    if (count == 0) {
+        return fetch;
+    }
+    std::optional<u8> table_sgpr;
+    for (u32 i = 0; i < num_usage_slots; ++i) {
+        if (header[slots + i * 4] == UsagePtrVertexBufferTable) {
+            table_sgpr = header[slots + i * 4 + 2];
+        }
+    }
+    if (!table_sgpr) {
+        return std::nullopt;
+    }
+    for (u32 i = 0; i < count; ++i) {
+        const u8* input = header.data() + inputs + i * 4;
+        fetch.attributes.push_back({
+            .dest_vgpr = input[1],
+            .num_elements = input[2],
+            .sgpr_base = *table_sgpr,
+            .dword_offset = static_cast<u8>(i * 4),
+        });
+    }
+    // Only for telling an empty one apart; a load and the jump back per input.
+    fetch.size = (count + 1) * 2 * sizeof(u32);
+    return fetch;
 }
 
 void PipelineCache::LearnSemanticBase(u64 hash, const Shader::RuntimeInfo& runtime_info) {
@@ -1712,6 +1779,27 @@ std::optional<Shader::RuntimeInfo> PipelineCache::GuessRuntimeInfo(
         }
         return info;
     }
+    case HwStage::Vertex: {
+        // PgmLo, PgmHi, Rsrc1, Rsrc2, VsOutConfig, PosFormat, PaClVsOutCntl.
+        if (header.size() < RegsOffset + 7 * sizeof(u32) || sw_stage != SwStage::Vertex) {
+            return std::nullopt;
+        }
+        const auto pgm = settings(AmdGpu::ShaderProgram{}.settings);
+        info.props.fp_denorm_mode32 = pgm.fp_denorm_mode32;
+        info.props.fp_denorm_mode16_64 = pgm.fp_denorm_mode64;
+        info.props.fp_round_mode32 = pgm.fp_round_mode32;
+        info.props.fp_round_mode16_64 = pgm.fp_round_mode64;
+        info.props.num_allocated_vgprs = (pgm.num_vgprs + 1) * 4;
+        info.props.num_user_data = pgm.num_user_regs;
+        info.props.num_input_vgprs = pgm.vgpr_comp_cnt;
+        info.props.dx10_clamp = pgm.dx10_clamp;
+        // Unknown without the draw, assumed off: user clip planes, clipping disabled, a
+        // [-w, w] depth range on drivers without depth clip control, instancing, indirect draws
+        // and emulated rect and quad lists.
+        info.hw.vs.num_outputs =
+            MapOutputs(info.hw.vs.outputs, std::bit_cast<AmdGpu::VsOutputControl>(reg(6)));
+        return info;
+    }
     case HwStage::Compute: {
         // PgmLo, PgmHi, Rsrc1, Rsrc2, NumThreadX, NumThreadY, NumThreadZ.
         if (header.size() < RegsOffset + 7 * sizeof(u32)) {
@@ -1768,6 +1856,10 @@ void PipelineCache::CheckGuess(HwStage hw_stage, SwStage sw_stage,
                      hw_stage, params.hash, found->header.size(), bytes,
                      spec.fetch_shader_data.vertex_offset_sgpr,
                      spec.fetch_shader_data.instance_offset_sgpr, attributes);
+        }
+        if (sw_stage == SwStage::Vertex && hw_stage == HwStage::Vertex && found &&
+            !found->header.empty()) {
+            CheckVertexGuess(params, found->header, start, spec, perm_hash);
         }
         return;
     }
@@ -1877,6 +1969,41 @@ void PipelineCache::CheckGuess(HwStage hw_stage, SwStage sw_stage,
     }
 }
 
+void PipelineCache::CheckVertexGuess(const Shader::ShaderParams& params, std::span<const u8> header,
+                                     const Shader::Backend::Bindings& start,
+                                     const Shader::StageSpecialization& spec, u64 perm_hash) {
+    ++guess_stats.vertex_checked;
+    auto runtime = GuessRuntimeInfo(HwStage::Vertex, SwStage::Vertex, header);
+    auto fetch = GuessFetchShader(header);
+    if (!runtime || !fetch) {
+        ++guess_stats.vertex_unguessable;
+        return;
+    }
+    if (*fetch == spec.fetch_shader_data) {
+        ++guess_stats.vertex_fetch_matched;
+    }
+    Shader::Info guess(HwStage::Vertex, SwStage::Vertex, params);
+    guess.guess_state = true;
+    guess.guessed_fetch = &*fetch;
+    auto binding = start;
+    const auto ir_program = Shader::TranslateProgram(params.code, pools, guess, *runtime, profile);
+    const auto spv = Shader::Backend::SPIRV::EmitSPIRV(profile, *runtime, ir_program, binding);
+    const u64 hash = HashCombine(params.hash, XXH3_64bits(spv.data(), spv.size() * sizeof(u32)));
+    const auto guess_spec = Shader::StageSpecialization(guess, *runtime, profile, start);
+    const auto wrong = SpecDifferences(spec, guess_spec);
+    for (const auto& part : wrong) {
+        std::string kind;
+        std::ranges::copy_if(part, std::back_inserter(kind),
+                             [](char c) { return !std::isdigit(static_cast<unsigned char>(c)); });
+        ++guess_stats.vertex_wrong[kind];
+    }
+    const bool matched = hash == perm_hash;
+    guess_stats.vertex_matched += matched ? 1 : 0;
+    LOG_INFO(Render_Vulkan, "Guess for vs shader {:#x} with its struct: {}; differs in: {}",
+             params.hash, matched ? "matches" : "differs",
+             wrong.empty() ? std::string{"nothing"} : fmt::format("{}", fmt::join(wrong, ", ")));
+}
+
 void PipelineCache::LogGuessStats() {
     if (!guess_stats.changed) {
         return;
@@ -1898,6 +2025,12 @@ void PipelineCache::LogGuessStats() {
              guess_stats.matched, guess_stats.spec_matched, guess_stats.matched_later,
              list(guess_stats.wrong), guess_stats.full_matched, guess_stats.full_matched_later,
              guess_stats.no_registers, list(guess_stats.registers_wrong));
+    LOG_INFO(Render_Vulkan,
+             "Guessed vertex shaders so far: {} checked, {} same SPIR-V, {} same fetch shader, {} "
+             "without a usable struct; wrong: {}",
+             guess_stats.vertex_checked, guess_stats.vertex_matched,
+             guess_stats.vertex_fetch_matched, guess_stats.vertex_unguessable,
+             list(guess_stats.vertex_wrong));
     LOG_INFO(Render_Vulkan, "Pixel shader input semantics: base {}, {} inputs off it",
              semantic_base.load(std::memory_order_relaxed), semantic_base_misses);
 }

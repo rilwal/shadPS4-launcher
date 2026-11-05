@@ -1153,7 +1153,7 @@ template void Translator::SetDstPk<IR::F32, false>(const InstOperand& operand,
 void Translator::EmitFetch(const GcnInst& inst) {
     const auto code_sgpr_base = inst.src[0].code;
 
-    if (EmulatorSettings.IsInlineFetchShader()) {
+    if (EmulatorSettings.IsInlineFetchShader() && !info.guess_state) {
         // Translate fetch shader inline using regular buffer bindings; useful for debugging.
         const auto* code = GetFetchShaderCode(info, code_sgpr_base);
         GcnCodeSlice slice(code, code + std::numeric_limits<u32>::max());
@@ -1175,7 +1175,7 @@ void Translator::EmitFetch(const GcnInst& inst) {
     info.fetch_shader_sgpr_base = code_sgpr_base;
     ASSERT(ParseFetchShader(info, fetch_data));
 
-    if (EmulatorSettings.IsDumpShaders()) {
+    if (EmulatorSettings.IsDumpShaders() && !info.guess_state) {
         using namespace Common::FS;
         const auto dump_dir = GetUserPath(PathType::ShaderDir) / "dumps";
         if (!std::filesystem::exists(dump_dir)) {

@@ -35,6 +35,26 @@ struct VertexAttribute {
     }
 
     constexpr AmdGpu::Buffer GetSharp(const Shader::Info& info) const noexcept {
+        if (info.guess_state) {
+            // No V# to read: assume 32-bit floats with as many components as the fetch loads,
+            // the rest filled the way the formats fill them.
+            auto buffer = AmdGpu::Buffer::Null();
+            static constexpr std::array<AmdGpu::DataFormat, 5> Formats = {
+                AmdGpu::DataFormat::FormatInvalid, AmdGpu::DataFormat::Format32,
+                AmdGpu::DataFormat::Format32_32, AmdGpu::DataFormat::Format32_32_32,
+                AmdGpu::DataFormat::Format32_32_32_32};
+            buffer.data_format = u32(Formats[std::min<u32>(num_elements, 4)]);
+            buffer.num_format = u32(AmdGpu::NumberFormat::Float);
+            const auto select = [&](u32 i, AmdGpu::CompSwizzle fill) {
+                return u32(i < num_elements ? AmdGpu::CompSwizzle(u32(AmdGpu::CompSwizzle::Red) + i)
+                                            : fill);
+            };
+            buffer.dst_sel_x = select(0, AmdGpu::CompSwizzle::Zero);
+            buffer.dst_sel_y = select(1, AmdGpu::CompSwizzle::Zero);
+            buffer.dst_sel_z = select(2, AmdGpu::CompSwizzle::Zero);
+            buffer.dst_sel_w = select(3, AmdGpu::CompSwizzle::One);
+            return buffer;
+        }
         auto buffer = info.ReadUdReg<AmdGpu::Buffer>(sgpr_base, dword_offset);
         buffer.base_address += inst_offset;
         if (data_format) {

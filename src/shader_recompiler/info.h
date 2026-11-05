@@ -138,6 +138,9 @@ struct Info : InfoPersistent {
     /// Translates without the draw's state, as if all user data were zero: to measure how
     /// often a shader found ahead of its first draw translates the same with nothing known.
     bool guess_state{};
+    /// With guess_state, the fetch shader to assume (a Gcn::FetchShaderData), since there's
+    /// no user data to find the real one with.
+    const void* guessed_fetch{};
 
     std::array<Interpolation, IR::NumParams> fs_interpolation{};
 
