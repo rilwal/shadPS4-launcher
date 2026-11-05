@@ -309,7 +309,8 @@ private:
             } else if (state_op == StateOp::Clear) {
                 return PageOp::Track;
             }
-        } else if (type == Type::GPU && readbacks_mode == GpuReadbacksMode::Precise) {
+        } else if (type == Type::GPU && (readbacks_mode == GpuReadbacksMode::Precise ||
+                                         readbacks_mode == GpuReadbacksMode::Fenced)) {
             if (state_op == StateOp::Set) {
                 return PageOp::Track;
             } else if (state_op == StateOp::Clear) {

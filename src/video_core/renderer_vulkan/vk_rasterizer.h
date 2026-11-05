@@ -3,8 +3,13 @@
 
 #pragma once
 
+#include <atomic>
+#include <chrono>
+
+#include "common/ab_switch.h"
 #include "common/recursive_lock.h"
 #include "common/shared_first_mutex.h"
+#include "common/unique_function.h"
 #include "video_core/buffer_cache/buffer_cache.h"
 #include "video_core/page_manager.h"
 #include "video_core/renderer_vulkan/vk_pipeline_cache.h"
@@ -84,6 +89,23 @@ public:
     void OnSubmit();
     void OnFence();
 
+    /// Fenced readbacks: copies what the GPU wrote since the last fence back to guest memory
+    /// and queues `signal` (the fence's label write and interrupt) to run once it has landed,
+    /// so the guest only sees the fence once the data is there, as on hardware. With
+    /// `throttle`, also keeps the command processor at most a couple of such fences ahead.
+    /// When nothing was written since the last fence and no signal is pending, it signals
+    /// right away instead. Returns false (without signaling) when readbacks aren't Fenced.
+    bool DeferFenceSignal(Common::UniqueFunction<void>&& signal, bool throttle);
+
+    /// Submits pending work when a deferred fence signal is waiting on it. The command
+    /// processor calls this before it waits, as what it waits for may be that signal.
+    void FlushFenceSignals();
+
+    /// Whether fences currently use Fenced readbacks (see the A/B switch).
+    [[nodiscard]] bool IsFencedReadbacks() const {
+        return readbacks_ab ? Common::AbSwitch::IsB() : fenced_readbacks;
+    }
+
     PipelineCache& GetPipelineCache() {
         return pipeline_cache;
     }
@@ -148,6 +170,15 @@ private:
     PipelineCache pipeline_cache;
     const bool host_markers_enabled;
     const bool guest_markers_enabled;
+    /// Readbacks Precise or Fenced: the two can be A/B switched live.
+    bool readbacks_ab{};
+    bool fenced_readbacks{};
+    u64 last_ab_switch_ns{};
+    std::atomic<u32> deferred_signals_in_flight{0};
+    std::chrono::steady_clock::time_point last_landing{};
+    u64 unsubmitted_signal_tick{};
+    std::chrono::steady_clock::time_point unsubmitted_signal_since{};
+    std::atomic<u32> throttled_fences_in_flight{0};
 
     struct ImageBinding {
         VideoCore::ImageId image_id;
