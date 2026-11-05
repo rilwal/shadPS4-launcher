@@ -1692,19 +1692,17 @@ MemoryManager::PhysHandle MemoryManager::Split(PhysMap& map, PhysHandle phys_han
     return map.emplace_hint(std::next(phys_handle), new_area.base, new_area);
 }
 
-std::vector<MemoryManager::ShaderRange> MemoryManager::ShaderCodeRanges() {
+std::vector<std::pair<VAddr, u64>> MemoryManager::MappedRanges() {
     std::shared_lock lk{mutex};
-    std::vector<ShaderRange> ranges;
+    std::vector<std::pair<VAddr, u64>> ranges;
     for (const auto& [base, vma] : vma_map) {
-        const bool is_code = vma.type == VMAType::Code;
-        if (!vma.IsMapped() || (!is_code && !True(vma.prot & MemoryProt::GpuRead))) {
+        if (!vma.IsMapped()) {
             continue;
         }
-        if (!ranges.empty() && ranges.back().base + ranges.back().size == base &&
-            ranges.back().is_code == is_code) {
-            ranges.back().size += vma.size;
+        if (!ranges.empty() && ranges.back().first + ranges.back().second == base) {
+            ranges.back().second += vma.size;
         } else {
-            ranges.push_back({base, vma.size, is_code});
+            ranges.emplace_back(base, vma.size);
         }
     }
     return ranges;

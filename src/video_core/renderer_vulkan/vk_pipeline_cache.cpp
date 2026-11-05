@@ -558,11 +558,12 @@ void PipelineCache::FlushCompileStats(u64 now_ns) {
     }
     if (shader_scanner) {
         const auto scan = shader_scanner->TakeCounts();
-        if (scan.first_uses != 0) {
+        if (scan.first_uses != 0 || scan.scanned_mb != 0) {
             LOG_INFO(Render_Vulkan,
                      "Shader scan over {:.1f} s: {} of {} new programs found ahead (median "
-                     "{:.1f} s ahead), {} known",
-                     seconds, scan.found_ahead, scan.first_uses, scan.median_lead_s, scan.known);
+                     "{:.1f} s ahead), {} known; read {} MB in {:.0f} ms",
+                     seconds, scan.found_ahead, scan.first_uses, scan.median_lead_s, scan.known,
+                     scan.scanned_mb, scan.scan_ms);
         }
     }
     const u64 probes = bg.probes.exchange(0, std::memory_order_relaxed);

@@ -307,14 +307,9 @@ public:
 
     void InvalidateMemory(VAddr addr, u64 size) const;
 
-    /// Mapped ranges that can hold shader code: memory the GPU can read, and the game's own
-    /// code segments. Only a snapshot: ranges may be unmapped right after.
-    struct ShaderRange {
-        VAddr base;
-        u64 size;
-        bool is_code;
-    };
-    std::vector<ShaderRange> ShaderCodeRanges();
+    /// Every mapped range as {base, size}, adjacent areas merged. Only a snapshot: ranges may
+    /// be unmapped right after.
+    std::vector<std::pair<VAddr, u64>> MappedRanges();
 
 private:
     VMAHandle FindVMA(VAddr target) {

@@ -454,8 +454,8 @@ struct GPUSettings {
     /// starts compiling the pipelines of later draws and dispatches on the workers. Only with
     /// the async_pipelines modes that skip draws.
     Setting<bool> compile_lookahead{false};
-    /// Looks through the game's GPU-visible memory for shaders as it loads them, ahead of
-    /// their first draw. Linux only for now.
+    /// Looks through the game's memory for shaders as it loads them, ahead of their first
+    /// draw. Linux only for now.
     Setting<bool> shader_prescan{false};
 
     std::vector<OverrideItem> GetOverrideableFields() const {

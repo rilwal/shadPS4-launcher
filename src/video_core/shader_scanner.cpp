@@ -31,6 +31,7 @@ constexpr u64 ChunkSize = 4_MB;
 /// Shaders are at most a few tens of KB; anything larger isn't one.
 constexpr u32 MaxCodeLength = 1_MB;
 constexpr auto ScanInterval = std::chrono::seconds{3};
+constexpr u32 FullPassEvery = 8;
 
 } // Anonymous namespace
 
@@ -91,18 +92,29 @@ void ShaderScanner::Run(std::stop_token stop) {
 
 void ShaderScanner::ScanOnce() {
     const u64 start = PerfStats::NowNs();
-    const auto ranges = Core::Memory::Instance()->ShaderCodeRanges();
+    auto ranges = Core::Memory::Instance()->MappedRanges();
+    // Most passes only read ranges mapped since the last one; every few passes read everything,
+    // for shaders loaded into memory that was already mapped.
+    const bool full = pass_index++ % FullPassEvery == 0;
     std::vector<u8> chunk;
     u64 scanned = 0;
     pass_new = 0;
     for (const auto& range : ranges) {
-        ScanRange(range.base, range.size, chunk);
-        scanned += range.size;
+        if (!full && std::ranges::binary_search(last_ranges, range)) {
+            continue;
+        }
+        ScanRange(range.first, range.second, chunk);
+        scanned += range.second;
     }
+    last_ranges = std::move(ranges);
+    const u64 elapsed = PerfStats::NowNs() - start;
+    scan_ns.fetch_add(elapsed, std::memory_order_relaxed);
+    scan_bytes.fetch_add(scanned, std::memory_order_relaxed);
     if (pass_new > 0) {
         std::scoped_lock lock{mutex};
-        LOG_INFO(Render, "Shader scan read {} MB in {:.1f} ms: {} new shaders, {} known",
-                 scanned >> 20, (PerfStats::NowNs() - start) / 1e6, pass_new, shaders.size());
+        LOG_INFO(Render, "Shader scan ({}) read {} MB in {:.1f} ms: {} new shaders, {} known",
+                 full ? "full" : "new ranges", scanned >> 20, elapsed / 1e6, pass_new,
+                 shaders.size());
     }
 }
 
@@ -199,6 +211,8 @@ void ShaderScanner::NoteFirstUse(u64 hash) {
     if (it != shaders.end()) {
         ++found_ahead;
         leads.push_back((now - it->second.found_ns) / 1e9);
+    } else {
+        LOG_INFO(Render, "Shader scan hadn't found program {:#x} before its first use", hash);
     }
 }
 
@@ -208,6 +222,8 @@ ShaderScanner::Counts ShaderScanner::TakeCounts() {
         .first_uses = std::exchange(first_uses, 0),
         .found_ahead = std::exchange(found_ahead, 0),
         .known = static_cast<u32>(shaders.size()),
+        .scan_ms = scan_ns.exchange(0, std::memory_order_relaxed) / 1e6,
+        .scanned_mb = scan_bytes.exchange(0, std::memory_order_relaxed) >> 20,
     };
     if (!leads.empty()) {
         std::ranges::nth_element(leads, leads.begin() + leads.size() / 2);

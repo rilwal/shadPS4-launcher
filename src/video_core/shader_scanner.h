@@ -3,6 +3,7 @@
 
 #pragma once
 
+#include <atomic>
 #include <mutex>
 #include <optional>
 #include <thread>
@@ -13,10 +14,10 @@
 
 namespace VideoCore {
 
-/// Looks through the game's GPU-visible memory and code for shader binaries while it runs, so
-/// shaders are known before their first draw. Runs on its own low-priority thread and reads
-/// guest memory through /proc/self/mem, so page protection (write tracking, readbacks) never
-/// faults and a range unmapped meanwhile just fails to read.
+/// Looks through the game's memory for shader binaries while it runs, so shaders are known
+/// before their first draw. Runs on its own low-priority thread and reads guest memory through
+/// /proc/self/mem, so page protection (write tracking, readbacks) never faults and a range unmapped
+/// meanwhile just fails to read.
 class ShaderScanner {
 public:
     struct Shader {
@@ -50,6 +51,9 @@ public:
         /// Median time from finding to first use, over the found ones.
         double median_lead_s{};
         u32 known{};
+        /// Time and memory the scan spent reading.
+        double scan_ms{};
+        u64 scanned_mb{};
     };
     /// Counts since the last call (known is the running total).
     Counts TakeCounts();
@@ -69,6 +73,11 @@ private:
     u32 found_ahead{};
     /// Scan totals, for the per-pass log.
     u32 pass_new{};
+    u32 pass_index{};
+    /// Ranges as of the last pass, sorted.
+    std::vector<std::pair<VAddr, u64>> last_ranges;
+    std::atomic<u64> scan_ns{};
+    std::atomic<u64> scan_bytes{};
     std::jthread thread;
 };
 
