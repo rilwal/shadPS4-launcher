@@ -63,6 +63,9 @@ struct Profile {
     /// Formatted buffer loads read the buffer's format from the stage table, so shaders
     /// aren't compiled again for each format. Needs the descriptor heap.
     bool runtime_buffer_formats{};
+    /// Structured buffer accesses read the buffer's stride from the stage table, so shaders
+    /// aren't compiled again for each stride. Needs the descriptor heap.
+    bool runtime_buffer_strides{};
     /// Storage image loads and stores read the image's swizzle from the stage table. Needs
     /// the descriptor heap.
     bool runtime_storage_swizzles{};

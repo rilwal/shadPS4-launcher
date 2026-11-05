@@ -630,7 +630,7 @@ IR::U32 CalculateBufferAddress(IR::IREmitter& ir, const IR::Inst& inst, const In
         const IR::U32 voffset = IR::GetBufferVOffsetArg(&inst);
         offset = ir.IAdd(offset, voffset);
     }
-    // With the descriptor heap the stride comes from the stage's table, so the shader doesn't
+    // With runtime strides the stride comes from the stage's table, so the shader doesn't
     // depend on it. Without an index the stride isn't used.
     const bool has_index = inst_info.index_enable || buffer.add_tid_enable;
     const IR::U32 const_stride = !runtime_stride ? ir.Imm32(stride)
@@ -684,7 +684,7 @@ void PatchBufferArgs(IR::Inst& inst, Info& info, const Profile& profile) {
         UsesRuntimeBufferFormat(profile.runtime_buffer_formats, buffer_res, buffer);
     inst.SetArg(IR::LoadBufferArgs::Address,
                 CalculateBufferAddress(ir, inst, info, buffer, buffer.stride,
-                                       profile.uses_descriptor_heap, runtime_format));
+                                       profile.runtime_buffer_strides, runtime_format));
 }
 
 void PatchImageSampleArgs(IR::Inst& inst, Info& info, const ImageResource& image_res,

@@ -116,8 +116,8 @@ struct StageSpecialization {
                          });
         }
         u32 binding{};
-        // With the descriptor heap, shaders read buffer strides at run time.
-        const bool runtime_stride = profile_.uses_descriptor_heap;
+        // With runtime strides (heap + fewer variants), shaders read buffer strides at run time.
+        const bool runtime_stride = profile_.runtime_buffer_strides;
         const bool runtime_formats = profile_.runtime_buffer_formats;
         ForEachSharp(
             binding, buffers, info->buffers,

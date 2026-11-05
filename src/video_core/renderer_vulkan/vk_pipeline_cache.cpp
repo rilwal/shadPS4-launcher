@@ -486,6 +486,8 @@ PipelineCache::PipelineCache(const Instance& instance_, Scheduler& scheduler_,
         .fewer_shader_variants = EmulatorSettings.IsFewerShaderVariants(),
         .runtime_buffer_formats =
             instance_.UsesDescriptorHeap() && EmulatorSettings.IsFewerShaderVariants(),
+        .runtime_buffer_strides =
+            instance_.UsesDescriptorHeap() && EmulatorSettings.IsFewerShaderVariants(),
         .runtime_storage_swizzles =
             instance_.UsesDescriptorHeap() && EmulatorSettings.IsFewerShaderVariants(),
         .runtime_target_swizzles =
