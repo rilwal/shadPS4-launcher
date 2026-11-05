@@ -6,6 +6,7 @@
 #include "common/io_file.h"
 #include "common/path_util.h"
 #include "common/singleton.h"
+#include "video_core/perf_stats.h"
 #include "core/debug_state.h"
 #include "core/devtools/layer.h"
 #include "core/emulator_settings.h"
@@ -1192,6 +1193,7 @@ void Presenter::Present(Frame* frame, bool is_reusing_frame, bool is_game_frame)
     const bool owed = first_present_owed.exchange(false);
     if (!is_reusing_frame && is_game_frame) {
         DebugState.IncFlipFrameNum();
+        VideoCore::PerfStats::frames.Record();
     }
     if ((!is_reusing_frame && is_game_frame) || owed) {
         Launcher::Session::FirstFrame();

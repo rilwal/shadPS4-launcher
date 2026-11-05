@@ -6,6 +6,7 @@
 #include "common/hash.h"
 #include "common/io_file.h"
 #include "common/path_util.h"
+#include "common/scope_exit.h"
 #include "core/debug_state.h"
 #include "core/emulator_settings.h"
 #include "shader_recompiler/backend/spirv/emit_spirv.h"
@@ -14,6 +15,7 @@
 #include "shader_recompiler/runtime_info.h"
 #include "video_core/amdgpu/liverpool.h"
 #include "video_core/cache_storage.h"
+#include "video_core/perf_stats.h"
 #include "video_core/renderer_vulkan/liverpool_to_vk.h"
 #include "video_core/renderer_vulkan/vk_instance.h"
 #include "video_core/renderer_vulkan/vk_pipeline_serialization.h"
@@ -340,6 +342,35 @@ PipelineCache::PipelineCache(const Instance& instance_, Scheduler& scheduler_,
 
 PipelineCache::~PipelineCache() = default;
 
+void PipelineCache::TickCompileStats() {
+    constexpr u64 IntervalNs = 5'000'000'000ULL;
+    const u64 now = VideoCore::PerfStats::NowNs();
+    if (compile_stats.last_log_ns == 0) {
+        compile_stats.last_log_ns = now;
+        VideoCore::PerfStats::frames.Take();
+        return;
+    }
+    if (now - compile_stats.last_log_ns >= IntervalNs) {
+        FlushCompileStats(now);
+    }
+}
+
+void PipelineCache::FlushCompileStats(u64 now_ns) {
+    auto& stats = compile_stats;
+    const auto frames = VideoCore::PerfStats::frames.Take();
+    const double seconds = double(now_ns - stats.last_log_ns) / 1e9;
+    if (frames.count != 0 || stats.graphics != 0 || stats.compute != 0) {
+        LOG_INFO(Render_Vulkan,
+                 "Frames over {:.1f} s: {} ({:.1f} FPS), {} over 33 ms, worst {:.1f} ms. "
+                 "Compiled {} graphics + {} compute pipelines from {} shaders: recompile "
+                 "{:.1f} ms, driver {:.1f} ms, worst pipeline {:.1f} ms",
+                 seconds, frames.count, frames.count / seconds, frames.hitches,
+                 frames.worst_ns / 1e6, stats.graphics, stats.compute, stats.shaders,
+                 stats.recompile_ns / 1e6, stats.driver_ns / 1e6, stats.worst_ns / 1e6);
+    }
+    stats = CompileStats{.last_log_ns = now_ns};
+}
+
 const GraphicsPipeline* PipelineCache::GetGraphicsPipeline(const DrawIndirectParams params) {
     draw_indirect_params = params;
     if (!RefreshGraphicsKey()) {
@@ -351,9 +382,17 @@ const GraphicsPipeline* PipelineCache::GetGraphicsPipeline(const DrawIndirectPar
         LOG_INFO(Render_Vulkan, "Compiling graphics pipeline {:#x}", pipeline_hash);
 
         GraphicsPipeline::SerializationSupport sdata{};
+        const u64 start = VideoCore::PerfStats::NowNs();
         it.value() = std::make_unique<GraphicsPipeline>(
             instance, scheduler, desc_heap, profile, graphics_key, *pipeline_cache, infos,
             runtime_infos, fetch_shader, modules, sdata, false);
+        const u64 driver_ns = VideoCore::PerfStats::NowNs() - start;
+        const u64 recompile_ns = std::exchange(pending_recompile_ns, 0);
+        ++compile_stats.graphics;
+        compile_stats.driver_ns += driver_ns;
+        compile_stats.worst_ns = std::max(compile_stats.worst_ns, recompile_ns + driver_ns);
+        LOG_INFO(Render_Vulkan, "Graphics pipeline {:#x}: recompile {:.2f} ms, driver {:.2f} ms",
+                 pipeline_hash, recompile_ns / 1e6, driver_ns / 1e6);
 
         RegisterPipelineData(graphics_key, pipeline_hash, sdata);
         ++num_new_pipelines;
@@ -380,9 +419,17 @@ const ComputePipeline* PipelineCache::GetComputePipeline() {
         LOG_INFO(Render_Vulkan, "Compiling compute pipeline {:#x}", pipeline_hash);
 
         ComputePipeline::SerializationSupport sdata{};
+        const u64 start = VideoCore::PerfStats::NowNs();
         it.value() = std::make_unique<ComputePipeline>(instance, scheduler, desc_heap, profile,
                                                        *pipeline_cache, compute_key, *infos[0],
                                                        modules[0], sdata, false);
+        const u64 driver_ns = VideoCore::PerfStats::NowNs() - start;
+        const u64 recompile_ns = std::exchange(pending_recompile_ns, 0);
+        ++compile_stats.compute;
+        compile_stats.driver_ns += driver_ns;
+        compile_stats.worst_ns = std::max(compile_stats.worst_ns, recompile_ns + driver_ns);
+        LOG_INFO(Render_Vulkan, "Compute pipeline {:#x}: recompile {:.2f} ms, driver {:.2f} ms",
+                 pipeline_hash, recompile_ns / 1e6, driver_ns / 1e6);
         RegisterPipelineData(compute_key, sdata);
         ++num_new_pipelines;
 
@@ -629,6 +676,14 @@ vk::ShaderModule PipelineCache::CompileModule(Shader::Info& info, Shader::Runtim
     LOG_INFO(Render_Vulkan, "Compiling {} shader {:#x} {}", info.hw_stage, info.pgm_hash,
              perm_idx != 0 ? "(permutation)" : "");
     DumpShader(code, info.pgm_hash, info.hw_stage, perm_idx, "bin");
+    const u64 start = VideoCore::PerfStats::NowNs();
+    SCOPE_EXIT {
+        // Translation plus shader module creation, which drivers mostly defer to the pipeline.
+        const u64 elapsed = VideoCore::PerfStats::NowNs() - start;
+        pending_recompile_ns += elapsed;
+        compile_stats.recompile_ns += elapsed;
+        ++compile_stats.shaders;
+    };
 
     const auto ir_program = Shader::TranslateProgram(code, pools, info, runtime_info, profile);
     auto spv = Shader::Backend::SPIRV::EmitSPIRV(profile, runtime_info, ir_program, binding);

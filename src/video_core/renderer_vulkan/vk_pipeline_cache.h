@@ -119,6 +119,27 @@ private:
         return num_new_pipelines > 0;
     }
 
+    /// Logs where pipeline compiles spent their time, with game frame hitches.
+    void FlushCompileStats(u64 now_ns);
+
+    /// Time spent compiling, split into our recompiler and the driver. Logged every few
+    /// seconds (GPU thread only).
+    struct CompileStats {
+        u64 graphics{};
+        u64 compute{};
+        u64 shaders{};
+        u64 recompile_ns{};
+        u64 driver_ns{};
+        u64 worst_ns{};
+        u64 last_log_ns{};
+    } compile_stats;
+    /// Recompile time of the shaders gathered for the pipeline being looked up.
+    u64 pending_recompile_ns{};
+
+public:
+    /// Called at submits: logs compile_stats every few seconds.
+    void TickCompileStats();
+
 private:
     const Instance& instance;
     Scheduler& scheduler;
