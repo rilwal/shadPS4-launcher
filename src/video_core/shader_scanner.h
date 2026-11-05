@@ -74,6 +74,7 @@ private:
     /// Scan totals, for the per-pass log.
     u32 pass_new{};
     u32 pass_index{};
+    u64 pass_unreadable{};
     /// Ranges as of the last pass, sorted.
     std::vector<std::pair<VAddr, u64>> last_ranges;
     std::atomic<u64> scan_ns{};

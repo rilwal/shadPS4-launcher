@@ -32,6 +32,7 @@ constexpr u64 ChunkSize = 4_MB;
 constexpr u32 MaxCodeLength = 1_MB;
 constexpr auto ScanInterval = std::chrono::seconds{3};
 constexpr u32 FullPassEvery = 8;
+constexpr u64 UnreadablePieceSize = 64_KB;
 
 } // Anonymous namespace
 
@@ -99,22 +100,31 @@ void ShaderScanner::ScanOnce() {
     std::vector<u8> chunk;
     u64 scanned = 0;
     pass_new = 0;
+    pass_unreadable = 0;
     for (const auto& range : ranges) {
         if (!full && std::ranges::binary_search(last_ranges, range)) {
             continue;
         }
+        const u64 unreadable_before = pass_unreadable;
         ScanRange(range.first, range.second, chunk);
         scanned += range.second;
+        if (pass_index == 1 && pass_unreadable != unreadable_before) {
+            LOG_INFO(Render, "Shader scan can't read {} KB of {:#x}..{:#x}",
+                     (pass_unreadable - unreadable_before) >> 10, range.first,
+                     range.first + range.second);
+        }
     }
     last_ranges = std::move(ranges);
     const u64 elapsed = PerfStats::NowNs() - start;
     scan_ns.fetch_add(elapsed, std::memory_order_relaxed);
     scan_bytes.fetch_add(scanned, std::memory_order_relaxed);
-    if (pass_new > 0) {
+    if (pass_new > 0 || full) {
         std::scoped_lock lock{mutex};
-        LOG_INFO(Render, "Shader scan ({}) read {} MB in {:.1f} ms: {} new shaders, {} known",
-                 full ? "full" : "new ranges", scanned >> 20, elapsed / 1e6, pass_new,
-                 shaders.size());
+        LOG_INFO(Render,
+                 "Shader scan ({}) read {} MB in {:.1f} ms ({} MB unreadable): {} new shaders, "
+                 "{} known",
+                 full ? "full" : "new ranges", scanned >> 20, elapsed / 1e6, pass_unreadable >> 20,
+                 pass_new, shaders.size());
     }
 }
 
@@ -127,8 +137,15 @@ void ShaderScanner::ScanRange(u64 base, u64 size, std::vector<u8>& chunk) {
         }
         chunk.resize(len);
         if (!Read(base + offset, chunk.data(), len)) {
-            // Unmapped meanwhile, or never backed: skip the rest of the range.
-            return;
+            // Part of the chunk can't be read (never backed, or unmapped meanwhile): read what
+            // can be, page by page, and leave the rest zero.
+            for (u64 page = 0; page < len; page += UnreadablePieceSize) {
+                const u64 piece = std::min(UnreadablePieceSize, len - page);
+                if (!Read(base + offset + page, chunk.data() + page, piece)) {
+                    std::memset(chunk.data() + page, 0, piece);
+                    pass_unreadable += piece;
+                }
+            }
         }
         const auto* words = reinterpret_cast<const u32*>(chunk.data());
         const u64 num_words = len / sizeof(u32);
