@@ -95,6 +95,7 @@ std::vector<Trophy> List(const std::map<s32, std::string>& sets, s32 user_id, in
             }
         }
 
+        const std::string set = conf.child("trophyconf").child("title-name").text().as_string();
         for (const auto& node : conf.child("trophyconf").children("trophy")) {
             const s32 id = node.attribute("id").as_int(-1);
             if (id < 0) {
@@ -106,6 +107,7 @@ std::vector<Trophy> List(const std::map<s32, std::string>& sets, s32 user_id, in
             t.description = node.child("detail").text().as_string();
             const std::string_view ttype = node.attribute("ttype").value();
             t.grade = Grade(ttype);
+            t.set = set;
             t.hidden = std::string_view(node.attribute("hidden").value()) == "yes";
             // Trophies of a group (gid) come with add-ons
             t.dlc = node.attribute("gid").as_int(-1) >= 0;
