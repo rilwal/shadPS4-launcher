@@ -6,6 +6,7 @@
 #include "shader_recompiler/ir/ir_emitter.h"
 #include "shader_recompiler/ir/program.h"
 #include "shader_recompiler/ir/reinterpret.h"
+#include "shader_recompiler/ir/runtime_format_decode.h"
 #include "shader_recompiler/profile.h"
 #include "shader_recompiler/runtime_buffer_format.h"
 #include "video_core/amdgpu/resource.h"
@@ -108,19 +109,10 @@ static IR::Value LoadBufferFormat(IR::IREmitter& ir, const IR::Value handle, con
     return swizzled;
 }
 
-/// Reads a formatted element whose format is in the stage table (see RuntimeBufferFormat),
-/// without branches: each component is extracted by its offset and width, then converted
-/// every way its kind could need, and the kind picks one.
+/// Reads a formatted element whose format is in the stage table (see RuntimeBufferFormat).
 static IR::Value LoadRuntimeBufferFormat(IR::IREmitter& ir, const IR::Value handle,
                                          const IR::U32 address, const IR::BufferInstInfo info) {
-    using Kind = RuntimeBufferFormat::Kind;
     const IR::Value format = ir.BufferFormat(handle);
-    const IR::U32 offsets{ir.CompositeExtract(format, 0)};
-    const IR::U32 widths{ir.CompositeExtract(format, 1)};
-    const IR::U32 kind_swizzle{ir.CompositeExtract(format, 2)};
-    const IR::U32 kind{ir.BitFieldExtract(kind_swizzle, ir.Imm32(0u), ir.Imm32(4u))};
-    const auto is_kind = [&](Kind k) { return ir.IEqual(kind, ir.Imm32(static_cast<u32>(k))); };
-
     // The address is in bytes. Aligned like the specialised path's loads, no component crosses
     // a dword, and four dwords from the element's dword cover every format.
     const IR::U32 address_mask{ir.CompositeExtract(format, 3)};
@@ -132,6 +124,21 @@ static IR::Value LoadRuntimeBufferFormat(IR::IREmitter& ir, const IR::Value hand
     const std::array<IR::U32, 4> dwords{
         IR::U32{ir.CompositeExtract(raw, 0)}, IR::U32{ir.CompositeExtract(raw, 1)},
         IR::U32{ir.CompositeExtract(raw, 2)}, IR::U32{ir.CompositeExtract(raw, 3)}};
+    return DecodeRuntimeFormat(ir, dwords, format, byte_shift);
+}
+
+} // namespace Shader::Optimization
+
+namespace Shader {
+
+IR::Value DecodeRuntimeFormat(IR::IREmitter& ir, const std::array<IR::U32, 4>& dwords,
+                              const IR::Value& format, const IR::U32& byte_shift) {
+    using Kind = RuntimeBufferFormat::Kind;
+    const IR::U32 offsets{ir.CompositeExtract(format, 0)};
+    const IR::U32 widths{ir.CompositeExtract(format, 1)};
+    const IR::U32 kind_swizzle{ir.CompositeExtract(format, 2)};
+    const IR::U32 kind{ir.BitFieldExtract(kind_swizzle, ir.Imm32(0u), ir.Imm32(4u))};
+    const auto is_kind = [&](Kind k) { return ir.IEqual(kind, ir.Imm32(static_cast<u32>(k))); };
 
     const IR::F32 zero = ir.Imm32(0.f);
     const IR::F32 one = ir.Imm32(1.f);
@@ -171,8 +178,19 @@ static IR::Value LoadRuntimeBufferFormat(IR::IREmitter& ir, const IR::Value hand
         value = IR::F32{ir.Select(is_kind(Kind::Half), half, value)};
         value = IR::F32{ir.Select(is_kind(Kind::Uscaled), as_uint, value)};
         value = IR::F32{ir.Select(is_kind(Kind::Sscaled), as_sint, value)};
-        // Components the format doesn't have read as zero before the swizzle.
-        components[i] = IR::F32{ir.Select(ir.IEqual(width, ir.Imm32(0u)), zero, value)};
+        // Components the format doesn't have read as zero before the swizzle, and a vertex
+        // attribute's fourth as one.
+        IR::F32 missing = zero;
+        if (i == 3) {
+            const auto bit = [&](u32 mask) {
+                return ir.INotEqual(ir.BitwiseAnd(kind_swizzle, ir.Imm32(mask)), ir.Imm32(0u));
+            };
+            const IR::F32 one_value{ir.Select(bit(RuntimeBufferFormat::FillAlphaIntegerBit),
+                                              ir.BitCast<IR::F32, IR::U32>(ir.Imm32(1u)), one)};
+            missing =
+                IR::F32{ir.Select(bit(RuntimeBufferFormat::FillAlphaOneBit), one_value, zero)};
+        }
+        components[i] = IR::F32{ir.Select(ir.IEqual(width, ir.Imm32(0u)), missing, value)};
     }
 
     std::array<IR::Value, 4> swizzled;
@@ -191,6 +209,10 @@ static IR::Value LoadRuntimeBufferFormat(IR::IREmitter& ir, const IR::Value hand
     }
     return ir.CompositeConstruct(swizzled[0], swizzled[1], swizzled[2], swizzled[3]);
 }
+
+} // namespace Shader
+
+namespace Shader::Optimization {
 
 static void StoreBufferFormat(IR::IREmitter& ir, const IR::Value handle, const IR::U32 address,
                               const IR::Value& value, const IR::BufferInstInfo info,

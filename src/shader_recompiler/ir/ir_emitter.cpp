@@ -448,6 +448,10 @@ U32 IREmitter::TargetSwizzle(const Value& target) {
     return Inst<U32>(Opcode::TargetSwizzle, target);
 }
 
+Value IREmitter::VertexFormat(const Value& attribute) {
+    return Inst(Opcode::VertexFormat, attribute);
+}
+
 U8 IREmitter::LoadBufferU8(const Value& handle, const Value& address, BufferInstInfo info) {
     return Inst<U8>(Opcode::LoadBufferU8, Flags{info}, handle, address);
 }

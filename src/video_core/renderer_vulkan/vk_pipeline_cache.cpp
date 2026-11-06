@@ -146,6 +146,7 @@ static std::vector<std::string> SpecDifferences(const Shader::StageSpecializatio
         check(x.divisor == y.divisor, "attr{}.divisor", i);
         check(x.num_class == y.num_class, "attr{}.num_class", i);
         check(x.dst_select == y.dst_select, "attr{}.dst_select", i);
+        check(x.runtime_format == y.runtime_format, "attr{}.runtime_format", i);
     }
     check(a.vs_attribs.size() == b.vs_attribs.size(), "attr.count");
     check(a.fmasks == b.fmasks, "fmasks");
@@ -549,6 +550,8 @@ PipelineCache::PipelineCache(const Instance& instance_, Scheduler& scheduler_,
         .runtime_storage_swizzles =
             instance_.UsesDescriptorHeap() && EmulatorSettings.IsFewerShaderVariants(),
         .runtime_target_swizzles =
+            instance_.UsesDescriptorHeap() && EmulatorSettings.IsFewerShaderVariants(),
+        .runtime_vertex_formats =
             instance_.UsesDescriptorHeap() && EmulatorSettings.IsFewerShaderVariants(),
     };
     // A quarter of the cores: the game's own threads and the GPU thread need the rest.

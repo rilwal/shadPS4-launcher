@@ -12,7 +12,9 @@
 #include "shader_recompiler/ir/condition.h"
 #include "shader_recompiler/ir/reg.h"
 #include "shader_recompiler/ir/reinterpret.h"
+#include "shader_recompiler/ir/runtime_format_decode.h"
 #include "shader_recompiler/profile.h"
+#include "shader_recompiler/runtime_buffer_format.h"
 #include "shader_recompiler/runtime_info.h"
 #include "video_core/amdgpu/resource.h"
 
@@ -1194,6 +1196,19 @@ void Translator::EmitFetch(const GcnInst& inst) {
 
         // Read the V# of the attribute to figure out component number and type.
         const auto buffer = attrib.GetSharp(info);
+        if (UsesRuntimeVertexFormat(profile.runtime_vertex_formats, buffer)) {
+            // The vertex input gives the element's raw bits; its format is in the stage table.
+            std::array<IR::U32, 4> dwords;
+            for (u32 i = 0; i < 4; ++i) {
+                dwords[i] = ir.BitCast<IR::U32, IR::F32>(ir.GetAttribute(attr, i));
+            }
+            const auto values =
+                DecodeRuntimeFormat(ir, dwords, ir.VertexFormat(ir.Imm32(semantic)), ir.Imm32(0u));
+            for (u32 i = 0; i < attrib.num_elements; i++) {
+                ir.SetVectorReg(dst_reg++, IR::F32{ir.CompositeExtract(values, i)});
+            }
+            continue;
+        }
         const auto values =
             ir.CompositeConstruct(ir.GetAttribute(attr, 0), ir.GetAttribute(attr, 1),
                                   ir.GetAttribute(attr, 2), ir.GetAttribute(attr, 3));

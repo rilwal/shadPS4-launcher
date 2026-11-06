@@ -3,6 +3,7 @@
 
 #pragma once
 
+#include <algorithm>
 #include <array>
 #include <optional>
 
@@ -39,6 +40,10 @@ struct RuntimeBufferFormat {
     u32 address_mask{};
 
     static constexpr u32 SwizzleShift = 4;
+    /// Vertex attributes only: a missing fourth component reads as one, like the vertex
+    /// input fills it, instead of zero; as an integer with the second bit.
+    static constexpr u32 FillAlphaOneBit = 1u << 16;
+    static constexpr u32 FillAlphaIntegerBit = 1u << 17;
 };
 static_assert(sizeof(RuntimeBufferFormat) == 16);
 
@@ -158,6 +163,37 @@ inline std::optional<RuntimeBufferFormat> DescribeRuntimeBufferFormat(
                                << (RuntimeBufferFormat::SwizzleShift + i * 3);
     }
     return format;
+}
+
+/// Size in bytes of an element a runtime format describes.
+inline u32 RuntimeFormatElementSize(const RuntimeBufferFormat& format) {
+    u32 bits = 0;
+    for (u32 i = 0; i < 4; ++i) {
+        const u32 width = (format.widths >> (i * 8)) & 0xff;
+        if (width != 0) {
+            bits = std::max(bits, ((format.offsets >> (i * 8)) & 0xff) + width);
+        }
+    }
+    return bits / 8;
+}
+
+/// Whether a vertex attribute reads its format at run time. The vertex input then reads each
+/// element as its raw byte, u16 or dwords, so the element must be aligned to that. The
+/// specialisation, the translation and the vertex input all decide with this.
+inline bool UsesRuntimeVertexFormat(bool runtime_vertex_formats, const AmdGpu::Buffer& buffer) {
+    if (!runtime_vertex_formats) {
+        return false;
+    }
+    const auto format = DescribeRuntimeBufferFormat(buffer);
+    if (!format) {
+        return false;
+    }
+    const u32 size = RuntimeFormatElementSize(*format);
+    if (size == 0) {
+        return false;
+    }
+    const u32 align = std::min(size, 4u);
+    return buffer.base_address % align == 0 && buffer.GetStride() % align == 0;
 }
 
 /// A storage image's swizzle for the stage table: the destination select of x, y, z and w in

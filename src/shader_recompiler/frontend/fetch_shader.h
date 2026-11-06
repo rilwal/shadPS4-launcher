@@ -40,6 +40,8 @@ struct VertexAttribute {
             // the rest filled the way the formats fill them.
             // Non-empty, so the specialisation takes it as bound like the draw's.
             auto buffer = AmdGpu::Buffer::Placeholder(1);
+            // Aligned, as draws' vertex buffers are, for a runtime format.
+            buffer.base_address = 16;
             static constexpr std::array<AmdGpu::DataFormat, 5> Formats = {
                 AmdGpu::DataFormat::FormatInvalid, AmdGpu::DataFormat::Format32,
                 AmdGpu::DataFormat::Format32_32, AmdGpu::DataFormat::Format32_32_32,

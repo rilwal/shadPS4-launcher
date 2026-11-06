@@ -19,6 +19,9 @@ struct VsAttribSpecialization {
     u32 divisor{};
     AmdGpu::NumberClass num_class{};
     AmdGpu::CompMapping dst_select{};
+    /// The format is read at run time (see UsesRuntimeVertexFormat), and so are the class and
+    /// the select.
+    bool runtime_format{};
 
     bool operator==(const VsAttribSpecialization&) const = default;
 };
@@ -103,8 +106,10 @@ struct StageSpecialization {
             // The divisor isn't in the code (the vertex input applies it), so with fewer
             // variants it's left out.
             const bool keep_divisor = !profile_.fewer_shader_variants;
+            const bool runtime_vertex = profile_.runtime_vertex_formats;
             ForEachSharp(vs_attribs, fetch_shader_data.attributes,
-                         [this, keep_divisor](auto& spec, const auto& desc, AmdGpu::Buffer sharp) {
+                         [this, keep_divisor, runtime_vertex](auto& spec, const auto& desc,
+                                                              AmdGpu::Buffer sharp) {
                              using InstanceIdType = Shader::Gcn::VertexAttribute::InstanceIdType;
                              if (const auto step_rate = desc.GetStepRate();
                                  keep_divisor && step_rate != InstanceIdType::None) {
@@ -114,8 +119,11 @@ struct StageSpecialization {
                                                            ? runtime_info.sw.vs.step_rate_1
                                                            : 1);
                              }
-                             spec.num_class = AmdGpu::GetNumberClass(sharp.GetNumberFmt());
-                             spec.dst_select = sharp.DstSelect();
+                             spec.runtime_format = UsesRuntimeVertexFormat(runtime_vertex, sharp);
+                             if (!spec.runtime_format) {
+                                 spec.num_class = AmdGpu::GetNumberClass(sharp.GetNumberFmt());
+                                 spec.dst_select = sharp.DstSelect();
+                             }
                          });
         }
         u32 binding{};

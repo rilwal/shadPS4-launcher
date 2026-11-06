@@ -586,6 +586,32 @@ bool Rasterizer::BindResources(const Pipeline* pipeline) {
                     stage_writes.target_swizzles[cb] = Shader::EncodeImageSwizzle(order) & 0xfff;
                 }
             }
+            if (stage->sw_stage == Shader::SwStage::Vertex && !pipeline->IsCompute() &&
+                pipeline_cache.GetProfile().runtime_vertex_formats) {
+                // Vertex shaders convert their attributes' raw bits by these.
+                const auto& fetch =
+                    static_cast<const GraphicsPipeline*>(pipeline)->GetFetchShader();
+                const u32 count = std::min<u32>(u32(fetch.attributes.size()),
+                                                u32(stage_writes.vertex_formats.size()));
+                for (u32 i = 0; i < count; ++i) {
+                    const auto buffer = fetch.attributes[i].GetSharp(*stage);
+                    auto& format = stage_writes.vertex_formats[i];
+                    if (!Shader::UsesRuntimeVertexFormat(true, buffer)) {
+                        format = {};
+                        continue;
+                    }
+                    // A missing fourth component reads as the vertex input would fill it: one,
+                    // an integer for integer classes the conversion leaves alone.
+                    format = *Shader::DescribeRuntimeBufferFormat(buffer);
+                    format.kind_swizzle |= Shader::RuntimeBufferFormat::FillAlphaOneBit;
+                    if (AmdGpu::GetNumberClass(buffer.GetNumberFmt()) !=
+                            AmdGpu::NumberClass::Float &&
+                        buffer.GetNumberConversion() == AmdGpu::NumberConversion::None) {
+                        format.kind_swizzle |= Shader::RuntimeBufferFormat::FillAlphaIntegerBit;
+                    }
+                }
+                stage_writes.num_vertex_formats = count;
+            }
             stage_writes.num_writes = set_write_index - stage_writes.first_write;
             stage_writes.num_bindings = binding.unified;
             std::copy(push_data.buf_offsets.begin(), push_data.buf_offsets.end(),

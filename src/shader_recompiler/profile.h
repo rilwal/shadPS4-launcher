@@ -73,6 +73,10 @@ struct Profile {
     /// every target the shader's export format names whether or not the draw binds it. Needs
     /// the descriptor heap.
     bool runtime_target_swizzles{};
+    /// Vertex attributes read their V#'s format from the stage table: the vertex input hands
+    /// the shader each element's raw bits and the shader converts them, so one shader serves
+    /// any format, number class and component order. Needs the descriptor heap.
+    bool runtime_vertex_formats{};
 
     bool operator==(const Profile&) const = default;
 };

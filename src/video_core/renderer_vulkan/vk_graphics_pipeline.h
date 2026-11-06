@@ -95,6 +95,10 @@ public:
                      bool preloading, PipelineCompileOptions options = {});
     ~GraphicsPipeline();
 
+    /// The vertex input format for an attribute's V#: its own, or its raw bits for a runtime
+    /// vertex format.
+    vk::Format VertexInputFormat(const AmdGpu::Buffer& buffer) const;
+
     const Shader::Gcn::FetchShaderData& GetFetchShader() const noexcept {
         return fetch_shader;
     }

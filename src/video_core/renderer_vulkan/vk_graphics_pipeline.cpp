@@ -8,6 +8,7 @@
 #include "common/assert.h"
 #include "shader_recompiler/backend/spirv/emit_spirv_discard_frag.h"
 #include "shader_recompiler/backend/spirv/emit_spirv_quad_rect.h"
+#include "shader_recompiler/runtime_buffer_format.h"
 #include "video_core/perf_stats.h"
 #include "video_core/renderer_vulkan/liverpool_to_vk.h"
 #include "video_core/renderer_vulkan/vk_graphics_pipeline.h"
@@ -756,6 +757,29 @@ void GraphicsPipeline::Probe(const Build& b, u64 optimized_ns,
     }
 }
 
+vk::Format GraphicsPipeline::VertexInputFormat(const AmdGpu::Buffer& buffer) const {
+    if (!Shader::UsesRuntimeVertexFormat(profile.runtime_vertex_formats, buffer)) {
+        return LiverpoolToVK::SurfaceFormat(buffer.GetDataFmt(), buffer.GetNumberFmt());
+    }
+    // The element's raw bits, which the shader converts by the format in its stage table.
+    switch (Shader::RuntimeFormatElementSize(*Shader::DescribeRuntimeBufferFormat(buffer))) {
+    case 1:
+        return vk::Format::eR8Uint;
+    case 2:
+        return vk::Format::eR16Uint;
+    case 4:
+        return vk::Format::eR32Uint;
+    case 8:
+        return vk::Format::eR32G32Uint;
+    case 12:
+        return vk::Format::eR32G32B32Uint;
+    case 16:
+        return vk::Format::eR32G32B32A32Uint;
+    default:
+        UNREACHABLE();
+    }
+}
+
 template <typename Attribute, typename Binding>
 void GraphicsPipeline::GetVertexInputs(
     VertexInputs<Attribute>& attributes, VertexInputs<Binding>& bindings,
@@ -773,7 +797,7 @@ void GraphicsPipeline::GetVertexInputs(
         attributes.push_back(Attribute{
             .location = semantic,
             .binding = semantic,
-            .format = LiverpoolToVK::SurfaceFormat(buffer.GetDataFmt(), buffer.GetNumberFmt()),
+            .format = VertexInputFormat(buffer),
             .offset = 0,
         });
         bindings.push_back(Binding{
