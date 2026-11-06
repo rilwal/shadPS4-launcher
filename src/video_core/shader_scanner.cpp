@@ -50,7 +50,7 @@ constexpr u64 MaxHeaderLength = 2_KB;
 constexpr u64 HeaderPgmLoOffset = 8;
 /// The saved list: magic, version, the uncompressed size, then the entries compressed.
 constexpr u32 SaveMagic = 0x4e435353; // "SSCN"
-constexpr u32 SaveVersion = 4;
+constexpr u32 SaveVersion = 5;
 constexpr u64 SaveInterval = 30'000'000'000ULL;
 /// Bigger than any real list, so a corrupt size can't ask for a huge allocation.
 constexpr u64 MaxSaveSize = 1_GB;
@@ -436,11 +436,13 @@ void ShaderScanner::Load() {
     }
     std::span<const u8> in{raw};
     u32 count{};
-    if (!Get(in, count)) {
+    s32 base{};
+    if (!Get(in, count) || !Get(in, base)) {
         return;
     }
     const u64 now = PerfStats::NowNs();
     std::scoped_lock lock{mutex};
+    semantic_base = base;
     for (u32 i = 0; i < count; ++i) {
         u64 hash{};
         u8 type{};
@@ -493,6 +495,7 @@ void ShaderScanner::Save() {
         dirty = false;
         count = static_cast<u32>(shaders.size());
         Put(raw, count);
+        Put(raw, static_cast<s32>(semantic_base));
         for (const auto& [hash, shader] : shaders) {
             Put(raw, hash);
             Put(raw, shader.type);
@@ -553,6 +556,22 @@ std::optional<u8> ShaderScanner::StageOf(u64 hash) {
         return std::nullopt;
     }
     return it->second.stage;
+}
+
+std::optional<int> ShaderScanner::SemanticBase() {
+    std::scoped_lock lock{mutex};
+    if (semantic_base < 0) {
+        return std::nullopt;
+    }
+    return semantic_base;
+}
+
+void ShaderScanner::SetSemanticBase(int base) {
+    std::scoped_lock lock{mutex};
+    if (semantic_base != base) {
+        semantic_base = base;
+        dirty = true;
+    }
 }
 
 void ShaderScanner::WaitUntilLoaded() const {

@@ -300,6 +300,10 @@ private:
     int semantic_base_candidate{-1};
     u32 semantic_base_votes{};
     u32 semantic_base_misses{};
+    /// Draws whose pixel inputs the fallback guess (each shader's lowest semantic as the base)
+    /// would have got right, and wrong. For the log.
+    u32 semantic_min_right{};
+    u32 semantic_min_wrong{};
     bool guess_check{};
     /// Each checked program's guessed SPIR-V hashes that missed the first variant, to see if a
     /// later variant matches them. Zero once matched.
@@ -382,6 +386,8 @@ private:
     void JoinPrecompile(u64 hash);
     /// Queues the pixel shaders held until their inputs could be guessed.
     void ReleaseHeldPrecompiles();
+    /// The same, under the precompile lock.
+    void RequeueHeldLocked();
     /// Learns which binary type is which stage from programs the game uses. GPU thread.
     void NotePrecompileType(u64 hash, Shader::HwStage hw_stage);
     /// A prepared program's first use: whether its guess served the draw.
@@ -423,6 +429,11 @@ private:
         std::atomic<bool> has_done{};
         /// Pixel shaders with inputs found before the semantic base was learned.
         std::vector<u64> held;
+        /// When the first was held, and whether holding has stopped because learning took
+        /// too long (they're then compiled with the fallback guess).
+        u64 first_held_ns{};
+        u64 hold_ns{};
+        std::atomic<bool> hold_expired{};
         /// Programs a worker is compiling now, and a signal for each one it finishes.
         tsl::robin_set<u64> in_flight;
         std::condition_variable finished;

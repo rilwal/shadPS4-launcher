@@ -97,6 +97,11 @@ public:
     /// The stage a shader was first used as, in this run or an earlier one.
     std::optional<u8> StageOf(u64 hash);
 
+    /// The pixel shader semantic base (see PipelineCache::LearnSemanticBase) an earlier run
+    /// learned, saved with the list.
+    std::optional<int> SemanticBase();
+    void SetSemanticBase(int base);
+
     /// Waits until the shaders saved by earlier runs are loaded.
     void WaitUntilLoaded() const;
 
@@ -154,6 +159,7 @@ private:
     std::array<u64, NumRecentUses> recent_uses{};
     /// The last use_order given.
     u32 use_counter{};
+    int semantic_base{-1};
     size_t recent_use_index{};
     /// Scan totals, for the per-pass log.
     u32 pass_new{};

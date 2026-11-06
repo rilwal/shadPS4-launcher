@@ -1640,6 +1640,10 @@ void PipelineCache::StartPrecompile(u32 num_threads) {
     precompile.type_stage[0] = HwStage::Fragment;
     precompile.type_stage[1] = HwStage::Vertex;
     precompile.type_stage[4] = HwStage::Compute;
+    precompile.hold_ns = 15'000'000'000;
+    if (const char* hold = std::getenv("SHADPS4_PRECOMPILE_HOLD_S")) {
+        precompile.hold_ns = static_cast<u64>(std::strtod(hold, nullptr) * 1e9);
+    }
     if (const char* order = std::getenv("SHADPS4_PRECOMPILE_ORDER")) {
         precompile.order_near = std::string_view{order} != "newest";
     }
@@ -1676,6 +1680,16 @@ void PipelineCache::StopPrecompile() {
 void PipelineCache::RunPrecompile(std::stop_token stop) {
     Common::SetCurrentThreadName("shadPS4:Precompile");
     Common::SetCurrentThreadPriority(Common::ThreadPriority::Low);
+    shader_scanner->WaitUntilLoaded();
+    if (const auto saved = shader_scanner->SemanticBase()) {
+        int unknown = -1;
+        if (semantic_base.compare_exchange_strong(unknown, *saved)) {
+            LOG_INFO(Render_Vulkan,
+                     "Pixel shader inputs are their semantic less {}, as an "
+                     "earlier run learned",
+                     *saved);
+        }
+    }
     while (!stop.stop_requested()) {
         Precompile::Job job;
         {
@@ -1704,7 +1718,22 @@ void PipelineCache::RunPrecompile(std::stop_token stop) {
                     }
                 }
             };
+            // Learning the semantic base can take long (until gameplay), so held shaders stop
+            // waiting for it after a while and go with the fallback guess.
+            const auto expire_hold = [&] {
+                if (precompile.held.empty() || precompile.hold_expired.load() ||
+                    VideoCore::PerfStats::NowNs() - precompile.first_held_ns < precompile.hold_ns) {
+                    return;
+                }
+                precompile.hold_expired = true;
+                LOG_INFO(Render_Vulkan,
+                         "Pixel shader inputs not learned after {:.0f} s; compiling the {} held "
+                         "pixel shaders with each one's lowest semantic as the base",
+                         precompile.hold_ns / 1e9, precompile.held.size());
+                RequeueHeldLocked();
+            };
             take_found();
+            expire_hold();
             while (precompile.queue.empty()) {
                 precompile.cv.wait_for(lock, stop, std::chrono::milliseconds{250},
                                        [&] { return !precompile.queue.empty(); });
@@ -1712,6 +1741,7 @@ void PipelineCache::RunPrecompile(std::stop_token stop) {
                     return;
                 }
                 take_found();
+                expire_hold();
             }
             const size_t index = PickPrecompileJob();
             job = precompile.queue[index];
@@ -1746,12 +1776,17 @@ void PipelineCache::PrecompileOne(u64 hash, HwStage hw_stage) {
         return;
     }
     if (hw_stage == HwStage::Fragment && runtime_info->hw.fs.num_inputs != 0 &&
-        semantic_base.load(std::memory_order_relaxed) < 0) {
-        // Its inputs can't be guessed until draws have shown how semantics map to vertex
-        // outputs, so it waits for that. Checked again under the lock that the release takes
-        // after learning it, so none is left behind.
+        semantic_base.load(std::memory_order_relaxed) < 0 &&
+        !precompile.hold_expired.load(std::memory_order_relaxed)) {
+        // Its inputs are guessed best once draws have shown how semantics map to vertex
+        // outputs, so it waits for that, for a while. Checked again under the lock that the
+        // release takes, so none is left behind.
         std::unique_lock lock{precompile.mutex};
-        if (semantic_base.load(std::memory_order_relaxed) < 0) {
+        if (semantic_base.load(std::memory_order_relaxed) < 0 &&
+            !precompile.hold_expired.load(std::memory_order_relaxed)) {
+            if (precompile.held.empty()) {
+                precompile.first_held_ns = VideoCore::PerfStats::NowNs();
+            }
             precompile.held.push_back(hash);
             return;
         }
@@ -1855,16 +1890,20 @@ void PipelineCache::ReleaseHeldPrecompiles() {
     }
     {
         std::scoped_lock lock{precompile.mutex};
-        for (const u64 hash : precompile.held) {
-            if (!program_cache.contains(hash)) {
-                precompile.queue.push_back(MakePrecompileJob(hash, HwStage::Fragment));
-            }
-        }
         LOG_INFO(Render_Vulkan, "{} pixel shaders held for their inputs are queued again",
                  precompile.held.size());
-        precompile.held.clear();
+        RequeueHeldLocked();
     }
     precompile.cv.notify_all();
+}
+
+void PipelineCache::RequeueHeldLocked() {
+    for (const u64 hash : precompile.held) {
+        if (!precompile.used.contains(hash)) {
+            precompile.queue.push_back(MakePrecompileJob(hash, HwStage::Fragment));
+        }
+    }
+    precompile.held.clear();
 }
 
 void PipelineCache::JoinPrecompile(u64 hash) {
@@ -2110,6 +2149,19 @@ void PipelineCache::LearnSemanticBase(u64 hash, const Shader::RuntimeInfo& runti
     if (!semantics || semantics->size() != fs.num_inputs || fs.num_inputs == 0) {
         return;
     }
+    // How the fallback guess, each shader's lowest semantic as the base, would have done.
+    u32 lowest = 0xff;
+    for (u32 i = 0; i < fs.num_inputs; ++i) {
+        lowest = std::min<u32>(lowest, (*semantics)[i] & 0xff);
+    }
+    bool lowest_right = true;
+    for (u32 i = 0; i < fs.num_inputs; ++i) {
+        if (!fs.inputs[i].is_default &&
+            ((*semantics)[i] & 0xff) - lowest != fs.inputs[i].param_index) {
+            lowest_right = false;
+        }
+    }
+    ++(lowest_right ? semantic_min_right : semantic_min_wrong);
     // The vertex stage's outputs seem to be ordered by semantic, so an input's parameter is
     // its semantic less the first one the game exports. Learned from what draws use.
     for (u32 i = 0; i < fs.num_inputs; ++i) {
@@ -2126,6 +2178,7 @@ void PipelineCache::LearnSemanticBase(u64 hash, const Shader::RuntimeInfo& runti
         if (base == semantic_base_candidate) {
             if (++semantic_base_votes == 3) {
                 semantic_base.store(base, std::memory_order_relaxed);
+                shader_scanner->SetSemanticBase(base);
                 ReleaseHeldPrecompiles();
                 LOG_INFO(Render_Vulkan, "Pixel shader inputs are their semantic less {}", base);
             }
@@ -2186,7 +2239,14 @@ std::optional<Shader::RuntimeInfo> PipelineCache::GuessRuntimeInfo(
         // once draws have shown how they map), the render targets (assumed 8-bit unorm wherever
         // the shader exports), multisampling and blending (assumed off).
         const auto semantics = PsInputSemantics(header);
-        const int base = semantic_base.load(std::memory_order_relaxed);
+        int base = semantic_base.load(std::memory_order_relaxed);
+        if (base < 0 && semantics && !semantics->empty()) {
+            // Not learned yet: guess that the shader reads from the first vertex output.
+            base = 0xff;
+            for (const u16 semantic : *semantics) {
+                base = std::min(base, int(semantic & 0xff));
+            }
+        }
         for (u32 i = 0; i < fs.num_inputs; ++i) {
             fs.inputs[i] = {.param_index = static_cast<u16>(i)};
             // param_index is 5 bits wide.
@@ -2472,8 +2532,11 @@ void PipelineCache::LogGuessStats() {
              guess_stats.vertex_checked, guess_stats.vertex_matched,
              guess_stats.vertex_fetch_matched, guess_stats.vertex_unguessable,
              list(guess_stats.vertex_wrong));
-    LOG_INFO(Render_Vulkan, "Pixel shader input semantics: base {}, {} inputs off it",
-             semantic_base.load(std::memory_order_relaxed), semantic_base_misses);
+    LOG_INFO(Render_Vulkan,
+             "Pixel shader input semantics: base {}, {} inputs off it; each shader's lowest "
+             "semantic as the base would be right for {} draws and wrong for {}",
+             semantic_base.load(std::memory_order_relaxed), semantic_base_misses,
+             semantic_min_right, semantic_min_wrong);
 }
 
 std::optional<vk::ShaderModule> PipelineCache::ReplaceShader(vk::ShaderModule module,
