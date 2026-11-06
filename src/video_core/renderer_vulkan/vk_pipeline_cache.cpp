@@ -551,8 +551,11 @@ PipelineCache::PipelineCache(const Instance& instance_, Scheduler& scheduler_,
             instance_.UsesDescriptorHeap() && EmulatorSettings.IsFewerShaderVariants(),
         .runtime_target_swizzles =
             instance_.UsesDescriptorHeap() && EmulatorSettings.IsFewerShaderVariants(),
-        .runtime_vertex_formats =
-            instance_.UsesDescriptorHeap() && EmulatorSettings.IsFewerShaderVariants(),
+        // They make the driver's vertex shader compiles about a fifth slower, which only pays
+        // when it lets guessed shaders compiled early serve their draws.
+        .runtime_vertex_formats = instance_.UsesDescriptorHeap() &&
+                                  EmulatorSettings.IsFewerShaderVariants() &&
+                                  EmulatorSettings.GetShaderPrecompileThreads() != 0,
     };
     // A quarter of the cores: the game's own threads and the GPU thread need the rest.
     const u32 compile_threads = std::clamp(std::thread::hardware_concurrency() / 4, 1u, 4u);
