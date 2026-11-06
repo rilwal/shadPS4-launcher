@@ -1,6 +1,7 @@
 // SPDX-FileCopyrightText: Copyright 2024 shadPS4 Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+#include <algorithm>
 #include <vector>
 #include <tsl/robin_set.h>
 #include "shader_recompiler/ir/program.h"
@@ -8,26 +9,25 @@
 namespace Shader::Optimization {
 
 void DeadCodeEliminationPass(IR::Program& program) {
-    // We iterate over the instructions in reverse order.
-    // This is because removing an instruction reduces the number of uses for earlier instructions.
-    // Open addressing and a vector stack: a node-based set and a deque allocated per insert, and
-    // this pass runs twice per translation.
+    // Mark everything reachable from instructions with side effects, then sweep the rest.
+    // Removing a dead instruction one at a time searches each operand's use list for it, which is
+    // quadratic for values with many dead users, so the sweep drops dead instructions without
+    // touching use lists and then prunes the use lists of the live operands they referenced once.
+    // Open addressing and a vector stack: this pass runs twice per translation.
     thread_local tsl::robin_set<IR::Inst*> live;
+    thread_local tsl::robin_set<IR::Inst*> dead;
     thread_local std::vector<IR::Inst*> worklist;
+    thread_local std::vector<IR::Inst*> pruned;
     live.clear();
+    dead.clear();
     worklist.clear();
+    pruned.clear();
 
     for (IR::Block* block : program.post_order_blocks) {
-        auto it{block->end()};
-        while (it != block->begin()) {
-            --it;
-            const bool has_side_effects = it->MayHaveSideEffects();
-            if (!it->HasUses() && !has_side_effects) {
-                it->Invalidate();
-                it = block->Instructions().erase(it);
-            } else if (has_side_effects) {
-                live.insert(&*it);
-                worklist.push_back(&*it);
+        for (IR::Inst& inst : block->Instructions()) {
+            if (inst.MayHaveSideEffects()) {
+                live.insert(&inst);
+                worklist.push_back(&inst);
             }
         }
     }
@@ -51,11 +51,25 @@ void DeadCodeEliminationPass(IR::Program& program) {
         for (auto it = block->begin(); it != block->end();) {
             if (live.contains(&*it)) {
                 ++it;
-            } else {
-                it->Invalidate();
-                it = block->Instructions().erase(it);
+                continue;
             }
+            for (size_t i = 0; i < it->NumArgs(); i++) {
+                IR::Inst* const operand = it->Arg(i).TryInst();
+                if (operand && live.contains(operand)) {
+                    pruned.push_back(operand);
+                }
+            }
+            dead.insert(&*it);
+            it->InvalidateUnlinked();
+            it = block->Instructions().erase(it);
         }
+    }
+
+    std::ranges::sort(pruned);
+    const auto [first, last] = std::ranges::unique(pruned);
+    pruned.erase(first, last);
+    for (IR::Inst* inst : pruned) {
+        inst->EraseUsesIf([](const IR::Use& use) { return dead.contains(use.user); });
     }
 }
 
