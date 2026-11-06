@@ -30,6 +30,10 @@ public:
         /// PgmLo, then input usage slots and (for pixel shaders) input semantics, up to the code.
         /// Empty when the shader came without it.
         std::vector<u8> header;
+        /// The PSSL reflection's resource records after the BinaryInfo (24 bytes each: api slot,
+        /// size, type word with the dimension in byte 0, constant count, unknown, name), when
+        /// the copy with the struct had them. Empty otherwise.
+        std::vector<u8> reflection;
         u8 type;
         /// When the scan found it.
         u64 found_ns;
@@ -144,6 +148,9 @@ private:
     /// Finds the shader struct that the code at `code_addr` belongs to: its PgmLo is the
     /// distance from the struct to the code and its PgmHi is all ones.
     std::vector<u8> ReadHeader(u64 code_addr) const;
+    /// The reflection's resource records after the BinaryInfo at `info_addr`, if they look
+    /// real: a sane count and a first record whose name is a printable string.
+    std::vector<u8> ReadReflection(u64 info_addr) const;
     bool Read(u64 addr, void* dst, u64 size) const;
     /// The shaders found in earlier runs of this game, saved so that the next launch knows them
     /// from the start instead of waiting for the scan to find them again.

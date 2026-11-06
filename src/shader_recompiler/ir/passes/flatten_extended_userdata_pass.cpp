@@ -863,6 +863,27 @@ void FlattenExtendedUserdataPass(IR::Program& program) {
         SetFlatbufOffset(readconst, GetFlatbufOffset(original));
     }
 
+    // A translation without the draw's state finds image types by where their T#s are read.
+    if (program.info.guess_state) {
+        program.info.guess_flat_sources.clear();
+        for (IR::Inst* readconst : all_readconsts) {
+            if (readconst->GetOpcode() != IR::Opcode::ReadConst ||
+                !readconst->Arg(1).IsImmediate()) {
+                continue;
+            }
+            const IR::Inst* base = readconst->Arg(0).TryInst();
+            const IR::Inst* ptr_lo = base ? base->Arg(0).TryInst() : nullptr;
+            if (!ptr_lo || ptr_lo->GetOpcode() != IR::Opcode::GetUserData) {
+                continue;
+            }
+            program.info.guess_flat_sources.push_back({
+                .flat = GetFlatbufOffset(readconst),
+                .sgpr = static_cast<u8>(ptr_lo->Arg(0).ScalarReg()),
+                .dword = readconst->Arg(1).U32(),
+            });
+        }
+    }
+
     program.info.RefreshFlatBuf();
 }
 

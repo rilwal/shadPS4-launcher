@@ -48,9 +48,11 @@ constexpr size_t MaxPending = 64 * 1024;
 constexpr u64 MaxHeaderLength = 2_KB;
 /// The common word, then the embedded constant buffer and scratch sizes, then PgmLo.
 constexpr u64 HeaderPgmLoOffset = 8;
+/// 256 resource records of 24 bytes.
+constexpr u64 MaxReflectionLength = 6_KB;
 /// The saved list: magic, version, the uncompressed size, then the entries compressed.
 constexpr u32 SaveMagic = 0x4e435353; // "SSCN"
-constexpr u32 SaveVersion = 8;
+constexpr u32 SaveVersion = 9;
 constexpr u32 MaxTilingKeys = 1024;
 constexpr u64 SaveInterval = 30'000'000'000ULL;
 /// Bigger than any real list, so a corrupt size can't ask for a huge allocation.
@@ -404,12 +406,14 @@ bool ShaderScanner::TryAdd(u64 info_addr) {
         Shader shader{
             .code = {before.begin() + index, before.begin() + index + info.length / sizeof(u32)},
             .header = ReadHeader(code_addr),
+            .reflection = {},
             .type = static_cast<u8>(info.type),
             .found_ns = PerfStats::NowNs(),
         };
         const bool has_header = !shader.header.empty();
         if (has_header) {
             shader.addr = info_addr;
+            shader.reflection = ReadReflection(info_addr);
         }
         std::scoped_lock lock{mutex};
         if (const auto it = shaders.find(info.shader_hash); it != shaders.end()) {
@@ -417,6 +421,7 @@ bool ShaderScanner::TryAdd(u64 info_addr) {
                 return false;
             }
             it.value().header = std::move(shader.header);
+            it.value().reflection = std::move(shader.reflection);
             it.value().addr = info_addr;
             ++with_registers;
             found_order.push_back(info.shader_hash);
@@ -435,6 +440,34 @@ bool ShaderScanner::TryAdd(u64 info_addr) {
         return false;
     }
     return false;
+}
+
+std::vector<u8> ShaderScanner::ReadReflection(u64 info_addr) const {
+    constexpr u64 HeaderSize = 0x1c;
+    constexpr u64 RecordSize = 24;
+    constexpr u32 MaxRecords = 256;
+    const u64 base = info_addr + sizeof(AmdGpu::BinaryInfo);
+    u32 count{};
+    if (!Read(base, &count, sizeof(count)) || count == 0 || count > MaxRecords) {
+        return {};
+    }
+    std::vector<u8> records(count * RecordSize);
+    if (!Read(base + HeaderSize, records.data(), records.size())) {
+        return {};
+    }
+    // The name is self-relative from its own field, the record's last word.
+    s32 name_offset;
+    std::memcpy(&name_offset, records.data() + 20, sizeof(name_offset));
+    std::array<char, 64> name{};
+    if (name_offset <= 0 || !Read(base + HeaderSize + 20 + name_offset, name.data(), name.size())) {
+        return {};
+    }
+    const auto end = std::ranges::find(name, '\0');
+    if (end == name.begin() || end == name.end() ||
+        !std::all_of(name.begin(), end, [](char c) { return c >= 0x20 && c < 0x7f; })) {
+        return {};
+    }
+    return records;
 }
 
 std::vector<u8> ShaderScanner::ReadHeader(u64 code_addr) const {
@@ -511,10 +544,12 @@ void ShaderScanner::Load() {
         u32 use_order{};
         u32 code_dwords{};
         u32 header_bytes{};
+        u32 reflection_bytes{};
         if (!Get(in, hash) || !Get(in, type) || !Get(in, stage) || !Get(in, use_order) ||
-            !Get(in, code_dwords) || !Get(in, header_bytes) ||
+            !Get(in, code_dwords) || !Get(in, header_bytes) || !Get(in, reflection_bytes) ||
             code_dwords > MaxCodeLength / sizeof(u32) || header_bytes > MaxHeaderLength ||
-            in.size() < code_dwords * sizeof(u32) + header_bytes) {
+            reflection_bytes > MaxReflectionLength ||
+            in.size() < code_dwords * sizeof(u32) + header_bytes + reflection_bytes) {
             LOG_WARNING(Render, "Saved shader list {} is cut short after {} shaders",
                         save_path.string(), i);
             break;
@@ -529,6 +564,8 @@ void ShaderScanner::Load() {
         in = in.subspan(code_dwords * sizeof(u32));
         shader.header.assign(in.begin(), in.begin() + header_bytes);
         in = in.subspan(header_bytes);
+        shader.reflection.assign(in.begin(), in.begin() + reflection_bytes);
+        in = in.subspan(reflection_bytes);
         const bool has_header = !shader.header.empty();
         if (shaders.try_emplace(hash, std::move(shader)).second) {
             ++loaded;
@@ -636,9 +673,11 @@ void ShaderScanner::Save() {
             Put(raw, shader.use_order);
             Put(raw, static_cast<u32>(shader.code.size()));
             Put(raw, static_cast<u32>(shader.header.size()));
+            Put(raw, static_cast<u32>(shader.reflection.size()));
             const auto* code = reinterpret_cast<const u8*>(shader.code.data());
             raw.insert(raw.end(), code, code + shader.code.size() * sizeof(u32));
             raw.insert(raw.end(), shader.header.begin(), shader.header.end());
+            raw.insert(raw.end(), shader.reflection.begin(), shader.reflection.end());
         }
     }
     last_save_ns = PerfStats::NowNs();

@@ -458,6 +458,8 @@ private:
         u32 rejected{};
         /// Shaders compiled early from recorded draw states, and the variants made.
         u32 replayed{};
+        /// Guessed shaders whose image types came from their reflection.
+        u32 reflected{};
         u32 replayed_variants{};
         /// First uses that waited for the worker compiling them, and how long.
         u32 joined{};

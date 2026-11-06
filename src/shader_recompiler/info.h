@@ -141,6 +141,23 @@ struct Info : InfoPersistent {
     /// With guess_state, the fetch shader to assume (a Gcn::FetchShaderData), since there's
     /// no user data to find the real one with.
     const void* guessed_fetch{};
+    /// With guess_state, image types known from the shader's reflection, by where the T# is
+    /// read: user data registers from `sgpr` on, or `dword` into the table `sgpr` points at.
+    struct GuessedImage {
+        u8 sgpr;
+        bool table;
+        u32 dword;
+        AmdGpu::ImageType type;
+    };
+    std::span<const GuessedImage> guessed_images;
+    /// With guess_state, where the flattening put dwords read straight from a table a user data
+    /// register points at: flattened offset, register, dword offset in the table.
+    struct FlatSource {
+        u16 flat;
+        u8 sgpr;
+        u32 dword;
+    };
+    std::vector<FlatSource> guess_flat_sources;
 
     /// A draw's state recorded at an earlier first use, to translate the shader for exactly
     /// that draw without reading guest memory: the flattened user data (which holds every

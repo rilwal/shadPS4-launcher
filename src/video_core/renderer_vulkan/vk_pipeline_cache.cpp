@@ -620,6 +620,76 @@ static bool GuessTranslated(const Shader::Info& info, HwStage hw_stage) {
 /// The program user data a prepared program keeps until its first use fills in the draw's.
 static constexpr std::array<u32, Shader::ShaderParams::NumShaderUserData> NoUserData{};
 
+/// Image types from a shader's PSSL reflection, by where the shader reads each read-only
+/// texture's T#: the struct's usage slots say which user data registers hold a texture
+/// (type 0x00, by api slot) or point at a resource table (0x13, 0x1b; api slot k at dword 8k).
+static std::vector<Shader::Info::GuessedImage> ReflectedImages(HwStage stage,
+                                                               std::span<const u8> header,
+                                                               std::span<const u8> reflection) {
+    constexpr size_t RecordSize = 24;
+    // The usage slots follow the stage registers, with an input count word between for the
+    // vertex and pixel stages.
+    const size_t slots = stage == HwStage::Fragment ? 8 + 12 * 4 + 4
+                         : stage == HwStage::Vertex ? 8 + 7 * 4 + 4
+                                                    : 8 + 7 * 4;
+    if (reflection.empty() || header.size() < 4) {
+        return {};
+    }
+    u32 common;
+    std::memcpy(&common, header.data(), sizeof(common));
+    const u32 num_usage_slots = common >> 24;
+    if (slots + num_usage_slots * 4 > header.size()) {
+        return {};
+    }
+    std::vector<Shader::Info::GuessedImage> images;
+    for (size_t r = 0; r + RecordSize <= reflection.size(); r += RecordSize) {
+        u32 api_slot;
+        u32 type_word;
+        std::memcpy(&api_slot, reflection.data() + r, sizeof(api_slot));
+        std::memcpy(&type_word, reflection.data() + r + 8, sizeof(type_word));
+        const u8 dimension = type_word & 0xff;
+        const u8 kind = (type_word >> 8) & 0xff;
+        const u8 access = (type_word >> 16) & 0xff;
+        if (kind != 0x05 || access != 0x03) {
+            continue;
+        }
+        AmdGpu::ImageType type;
+        switch (dimension) {
+        case 0x01:
+            type = AmdGpu::ImageType::Color1D;
+            break;
+        case 0x02:
+            type = AmdGpu::ImageType::Color2D;
+            break;
+        case 0x03:
+            type = AmdGpu::ImageType::Color3D;
+            break;
+        case 0x04:
+        case 0x07:
+            type = AmdGpu::ImageType::Cube;
+            break;
+        case 0x06:
+            type = AmdGpu::ImageType::Color2DArray;
+            break;
+        case 0x08:
+            type = AmdGpu::ImageType::Color2DMsaa;
+            break;
+        default:
+            continue;
+        }
+        for (u32 i = 0; i < num_usage_slots; ++i) {
+            const u8* usage = header.data() + slots + i * 4;
+            if (usage[0] == 0x00 && usage[1] == api_slot) {
+                images.push_back({.sgpr = usage[2], .table = false, .dword = 0, .type = type});
+            } else if (usage[0] == 0x13 || usage[0] == 0x1b) {
+                images.push_back(
+                    {.sgpr = usage[2], .table = true, .dword = api_slot * 8, .type = type});
+            }
+        }
+    }
+    return images;
+}
+
 /// The stages whose register state a shader's struct gives.
 static bool PrecompilesStage(HwStage stage) {
     return stage == HwStage::Fragment || stage == HwStage::Compute || stage == HwStage::Vertex;
@@ -1831,6 +1901,8 @@ void PipelineCache::PrecompileOne(const Precompile::Job& job) {
     auto& info = program->info;
     info.guess_state = true;
     info.guessed_fetch = fetch ? &*fetch : nullptr;
+    const auto reflected_images = ReflectedImages(hw_stage, found->header, found->reflection);
+    info.guessed_images = reflected_images;
     thread_local Shader::Pools worker_pools;
     Shader::Backend::Bindings binding{};
     // The struct, the stage and even the code are guesses (the scan may catch bytes that aren't
@@ -1855,6 +1927,8 @@ void PipelineCache::PrecompileOne(const Precompile::Job& job) {
     auto spec = Shader::StageSpecialization(info, *runtime_info, profile, {});
     info.guess_state = false;
     info.guessed_fetch = nullptr;
+    info.guessed_images = {};
+    info.guess_flat_sources = {};
 
     Precompiled done{.hash = hash};
     const bool made_object = PrepareVariant(*program, done, info, std::move(spec), std::move(spv));

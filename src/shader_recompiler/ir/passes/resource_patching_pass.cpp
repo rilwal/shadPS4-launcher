@@ -266,6 +266,35 @@ static bool UsesCubeCoordinates(const IR::Inst& inst) {
 /// value is used only there, as the same address component of image instructions. A
 /// register left over from other work has other uses, and one holding another
 /// instruction's coordinates sits at another position.
+/// With guess_state, the image's type from the shader's reflection, if its T# is read from a
+/// place the reflection names.
+static std::optional<AmdGpu::ImageType> ReflectedImageType(const SharpFetch<AmdGpu::Image>& fetch,
+                                                           const Info& info) {
+    if (info.guessed_images.empty() ||
+        fetch.summary == SharpFetch<AmdGpu::Image>::Summary::Invalid ||
+        (fetch.load_mask & 1) == 0) {
+        return std::nullopt;
+    }
+    const u32 flat = fetch.offsets[0];
+    const auto match = [&](bool table, u32 sgpr, u32 dword) -> std::optional<AmdGpu::ImageType> {
+        for (const auto& image : info.guessed_images) {
+            if (image.table == table && image.sgpr == sgpr && image.dword == dword) {
+                return image.type;
+            }
+        }
+        return std::nullopt;
+    };
+    if (flat < NUM_USER_DATA_REGS) {
+        return match(false, flat, 0);
+    }
+    for (const auto& source : info.guess_flat_sources) {
+        if (source.flat == flat) {
+            return match(true, source.sgpr, source.dword);
+        }
+    }
+    return std::nullopt;
+}
+
 void PatchImageSharp(const ResourceDiscovery& resource, Info& info, Descriptors& descriptors,
                      const Profile& profile) {
     IR::Inst& inst = *resource.user;
@@ -290,6 +319,11 @@ void PatchImageSharp(const ResourceDiscovery& resource, Info& info, Descriptors&
                       : UsesCubeCoordinates(inst) ? AmdGpu::ImageType::Cube
                                                   : AmdGpu::ImageType::Color2D,
     };
+    if (info.guess_state) {
+        if (const auto reflected = ReflectedImageType(image_res.sharp_fetch, info)) {
+            image_res.guess_type = *reflected;
+        }
+    }
 
     auto image = image_res.GetSharp(info);
     ASSERT(image.GetType() != AmdGpu::ImageType::Invalid);
