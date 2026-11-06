@@ -101,6 +101,10 @@ public:
     /// learned, saved with the list.
     std::optional<int> SemanticBase();
     void SetSemanticBase(int base);
+    /// Whether an earlier run found that guessing images as 3D from their address goes wrong
+    /// in this game, saved with the list.
+    bool ThirdCoordinateOff();
+    void SetThirdCoordinateOff();
 
     /// Waits until the shaders saved by earlier runs are loaded.
     void WaitUntilLoaded() const;
@@ -160,6 +164,7 @@ private:
     /// The last use_order given.
     u32 use_counter{};
     int semantic_base{-1};
+    bool third_coordinate_off{};
     size_t recent_use_index{};
     /// Scan totals, for the per-pass log.
     u32 pass_new{};

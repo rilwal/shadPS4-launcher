@@ -50,7 +50,7 @@ constexpr u64 MaxHeaderLength = 2_KB;
 constexpr u64 HeaderPgmLoOffset = 8;
 /// The saved list: magic, version, the uncompressed size, then the entries compressed.
 constexpr u32 SaveMagic = 0x4e435353; // "SSCN"
-constexpr u32 SaveVersion = 5;
+constexpr u32 SaveVersion = 6;
 constexpr u64 SaveInterval = 30'000'000'000ULL;
 /// Bigger than any real list, so a corrupt size can't ask for a huge allocation.
 constexpr u64 MaxSaveSize = 1_GB;
@@ -437,12 +437,14 @@ void ShaderScanner::Load() {
     std::span<const u8> in{raw};
     u32 count{};
     s32 base{};
-    if (!Get(in, count) || !Get(in, base)) {
+    u8 third_off{};
+    if (!Get(in, count) || !Get(in, base) || !Get(in, third_off)) {
         return;
     }
     const u64 now = PerfStats::NowNs();
     std::scoped_lock lock{mutex};
     semantic_base = base;
+    third_coordinate_off = third_off != 0;
     for (u32 i = 0; i < count; ++i) {
         u64 hash{};
         u8 type{};
@@ -496,6 +498,7 @@ void ShaderScanner::Save() {
         count = static_cast<u32>(shaders.size());
         Put(raw, count);
         Put(raw, static_cast<s32>(semantic_base));
+        Put(raw, static_cast<u8>(third_coordinate_off));
         for (const auto& [hash, shader] : shaders) {
             Put(raw, hash);
             Put(raw, shader.type);
@@ -570,6 +573,19 @@ void ShaderScanner::SetSemanticBase(int base) {
     std::scoped_lock lock{mutex};
     if (semantic_base != base) {
         semantic_base = base;
+        dirty = true;
+    }
+}
+
+bool ShaderScanner::ThirdCoordinateOff() {
+    std::scoped_lock lock{mutex};
+    return third_coordinate_off;
+}
+
+void ShaderScanner::SetThirdCoordinateOff() {
+    std::scoped_lock lock{mutex};
+    if (!third_coordinate_off) {
+        third_coordinate_off = true;
         dirty = true;
     }
 }

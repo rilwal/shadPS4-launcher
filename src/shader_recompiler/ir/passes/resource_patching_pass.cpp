@@ -266,10 +266,12 @@ static bool UsesCubeCoordinates(const IR::Inst& inst) {
 /// value is used only there, as the same address component of image instructions. A
 /// register left over from other work has other uses, and one holding another
 /// instruction's coordinates sits at another position.
-static bool UsesThirdCoordinate(const IR::Inst& inst) {
+/// The value in the address register past a 2D coordinate, if it looks like a third
+/// coordinate (see below); null otherwise.
+static const IR::Inst* ThirdCoordinate(const IR::Inst& inst) {
     const auto flags = inst.Flags<IR::TextureInstInfo>();
     if (flags.is_array || flags.has_derivatives) {
-        return false;
+        return nullptr;
     }
     const IR::Inst* pack{};
     u32 operand{};
@@ -278,7 +280,7 @@ static bool UsesThirdCoordinate(const IR::Inst& inst) {
         const u32 index = u32(flags.has_offset) + u32(flags.has_bias) + u32(flags.is_depth) + 2 +
                           u32(flags.has_lod) + u32(flags.has_lod_clamp);
         if (index >= 12) {
-            return false;
+            return nullptr;
         }
         pack = inst.Arg(2 + index / 4).TryInst();
         operand = index % 4;
@@ -288,25 +290,25 @@ static bool UsesThirdCoordinate(const IR::Inst& inst) {
     case IR::Opcode::ImageWrite:
         operand = 2 + u32(flags.has_lod);
         if (operand >= 4) {
-            return false;
+            return nullptr;
         }
         pack = inst.Arg(1).TryInst();
         break;
     default:
-        return false;
+        return nullptr;
     }
     if (!pack || pack->GetOpcode() != IR::Opcode::CompositeConstructF32x4 &&
                      pack->GetOpcode() != IR::Opcode::CompositeConstructU32x4) {
-        return false;
+        return nullptr;
     }
     const IR::Inst* value = pack->Arg(operand).TryInst();
     if (!value) {
-        return false;
+        return nullptr;
     }
     switch (value->GetOpcode()) {
     case IR::Opcode::UndefU32:
     case IR::Opcode::UndefF32:
-        return false;
+        return nullptr;
     default:
         break;
     }
@@ -322,15 +324,15 @@ static bool UsesThirdCoordinate(const IR::Inst& inst) {
     };
     for (const auto& use : value->Uses()) {
         if (use.operand != operand || use.user->GetOpcode() != pack->GetOpcode()) {
-            return false;
+            return nullptr;
         }
         for (const auto& pack_use : use.user->Uses()) {
             if (!is_image(*pack_use.user)) {
-                return false;
+                return nullptr;
             }
         }
     }
-    return true;
+    return value;
 }
 
 void PatchImageSharp(const ResourceDiscovery& resource, Info& info, Descriptors& descriptors,
@@ -345,6 +347,8 @@ void PatchImageSharp(const ResourceDiscovery& resource, Info& info, Descriptors&
     // need fallback (TODO is this 100% true?)
     const bool needs_mip_storage_fallback =
         inst_info.has_lod && is_written && !profile.supports_image_load_store_lod;
+    const IR::Inst* third_coordinate =
+        info.guess_state && info.guess_third_coordinate ? ThirdCoordinate(inst) : nullptr;
     ImageResource image_res = {
         .sharp_fetch = ConstructSharpFetch<AmdGpu::Image>(resource.sharps[0]),
         .is_depth = bool(inst_info.is_depth),
@@ -355,9 +359,14 @@ void PatchImageSharp(const ResourceDiscovery& resource, Info& info, Descriptors&
         .post_op = resource.sharps[0].post_op,
         .guess_type = inst_info.is_array          ? AmdGpu::ImageType::Color2DArray
                       : UsesCubeCoordinates(inst) ? AmdGpu::ImageType::Cube
-                      : UsesThirdCoordinate(inst) ? AmdGpu::ImageType::Color3D
+                      : third_coordinate          ? AmdGpu::ImageType::Color3D
                                                   : AmdGpu::ImageType::Color2D,
     };
+    if (info.guess_state && image_res.guess_type == AmdGpu::ImageType::Color3D) {
+        LOG_INFO(Render_Recompiler,
+                 "Guessing an image of shader {:#x} as 3D: its third coordinate is from {}",
+                 info.pgm_hash, IR::NameOf(third_coordinate->GetOpcode()));
+    }
 
     auto image = image_res.GetSharp(info);
     ASSERT(image.GetType() != AmdGpu::ImageType::Invalid);
