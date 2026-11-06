@@ -459,16 +459,67 @@ public:
 
     /// GPU time of each submission, from timestamps at its start and end, while gpu_timing is
     /// on. Submissions run one after another, so the sum is how long the GPU was busy.
+    /// Kinds of GPU work timed separately inside each timed submission. A timestamp is written
+    /// wherever the kind changes, and the time up to it goes to the kind that was running, so the
+    /// kinds add up to the submission's time.
+    enum class GpuSection : u8 {
+        Other,
+        Draws,
+        Dispatches,
+        Detiling,
+        ImageUploads,
+        ImageCopies,
+        BufferCopies,
+        Count,
+    };
+    static constexpr std::array<const char*, size_t(GpuSection::Count)> GpuSectionNames = {
+        "other",         "draws",        "dispatches",    "detiling",
+        "image uploads", "image copies", "buffer copies",
+    };
+
     struct GpuTime {
         u64 busy_ns{};
         u64 worst_ns{};
         u32 submits{};
+        std::array<u64, size_t(GpuSection::Count)> section_ns{};
+        /// Submissions that ran out of timestamps; what followed went to the last kind.
+        u32 overflowed{};
     };
     /// What finished since the last call.
     GpuTime TakeGpuTime();
 
+    /// Work recorded from here on is of this kind, until the next change.
+    void SetGpuSection(GpuSection section) {
+        if (section != gpu_section) {
+            MarkGpuSection(section);
+        }
+    }
+    [[nodiscard]] GpuSection CurrentGpuSection() const noexcept {
+        return gpu_section;
+    }
+
+    /// Sets a kind for its scope, then goes back to the one before.
+    class ScopedGpuSection {
+    public:
+        ScopedGpuSection(Scheduler& scheduler_, GpuSection section)
+            : scheduler{scheduler_}, previous{scheduler_.CurrentGpuSection()} {
+            scheduler.SetGpuSection(section);
+        }
+        ~ScopedGpuSection() {
+            scheduler.SetGpuSection(previous);
+        }
+        ScopedGpuSection(const ScopedGpuSection&) = delete;
+        ScopedGpuSection& operator=(const ScopedGpuSection&) = delete;
+
+    private:
+        Scheduler& scheduler;
+        GpuSection previous;
+    };
+
 private:
     void ReadGpuTimes();
+
+    void MarkGpuSection(GpuSection section);
 
     void EndSession();
 
@@ -502,16 +553,24 @@ private:
     RenderState render_state;
     bool is_rendering = false;
     tracy::VkCtxScope* profiler_scope{};
-    /// Two timestamps per submission, used as a ring.
-    static constexpr u32 NumTimedSubmits = 256;
+    /// Each timed submission gets a slot of timestamps: its start, one per change of kind, and
+    /// its end. Slots are used as a ring.
+    static constexpr u32 NumTimedSubmits = 64;
+    static constexpr u32 QueriesPerSubmit = 512;
+    /// Submissions that took this long on the GPU log their split.
+    static constexpr u64 SlowSubmitNs = 30'000'000;
     vk::UniqueQueryPool timestamp_pool;
     u32 next_timed{};
-    /// The submission being recorded is timed from this query pair.
+    /// The submission being recorded is timed in this slot.
     std::optional<u32> current_timed;
+    /// The kind of each timed stretch so far, in order; stretch i ends at query i + 1.
+    std::vector<GpuSection> timed_sections;
+    GpuSection gpu_section{GpuSection::Other};
     bool ending_submit{};
     struct TimedSubmit {
-        u32 pair;
+        u32 slot;
         u64 tick;
+        std::vector<GpuSection> sections;
     };
     std::queue<TimedSubmit> timed_submits;
     std::mutex gpu_time_mutex;

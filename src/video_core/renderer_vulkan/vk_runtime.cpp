@@ -110,6 +110,7 @@ void Runtime::TickFrame() {
 
 void Runtime::CopyBuffer(const VideoCore::Buffer* src, const VideoCore::Buffer* dst,
                          std::span<const vk::BufferCopy> copies) {
+    const Scheduler::ScopedGpuSection gpu_section{scheduler, Scheduler::GpuSection::BufferCopies};
     scheduler.EndRendering();
 
     bool needs_flush{};
@@ -133,6 +134,7 @@ void Runtime::CopyBuffer(const VideoCore::Buffer* src, const VideoCore::Buffer* 
 }
 
 void Runtime::FillBuffer(const VideoCore::Buffer* dst, u64 offset, u64 size, u32 value) {
+    const Scheduler::ScopedGpuSection gpu_section{scheduler, Scheduler::GpuSection::BufferCopies};
     scheduler.EndRendering();
 
     if (IsBufferAccessed(dst, offset, size, true)) {
@@ -147,6 +149,7 @@ void Runtime::FillBuffer(const VideoCore::Buffer* dst, u64 offset, u64 size, u32
 }
 
 void Runtime::InlineData(VideoCore::Buffer* dst, u64 offset, u32 value) {
+    const Scheduler::ScopedGpuSection gpu_section{scheduler, Scheduler::GpuSection::BufferCopies};
     scheduler.EndRendering();
 
     if (IsBufferAccessed(dst, offset, sizeof(value), true)) {
@@ -170,6 +173,7 @@ bool Runtime::Transit(VideoCore::Image* image, vk::ImageLayout dst_layout,
 
 void Runtime::UploadImage(VideoCore::Image* dst, const VideoCore::Buffer* src,
                           std::span<const vk::BufferImageCopy> upload_copies) {
+    const Scheduler::ScopedGpuSection gpu_section{scheduler, Scheduler::GpuSection::ImageUploads};
     SetBackingSamples(dst, dst->info.num_samples, false);
     scheduler.EndRendering();
 
@@ -199,6 +203,7 @@ void Runtime::UploadImage(VideoCore::Image* dst, const VideoCore::Buffer* src,
 
 void Runtime::DownloadImage(VideoCore::Image* src, const VideoCore::Buffer* dst,
                             std::span<const vk::BufferImageCopy> download_copies) {
+    const Scheduler::ScopedGpuSection gpu_section{scheduler, Scheduler::GpuSection::ImageCopies};
     SetBackingSamples(src, src->info.num_samples);
     scheduler.EndRendering();
 
@@ -225,6 +230,7 @@ void Runtime::DownloadImage(VideoCore::Image* src, const VideoCore::Buffer* dst,
 }
 
 void Runtime::CopyImage(VideoCore::Image* src, VideoCore::Image* dst) {
+    const Scheduler::ScopedGpuSection gpu_section{scheduler, Scheduler::GpuSection::ImageCopies};
     const u32 num_mips = std::min(src->info.resources.levels, dst->info.resources.levels);
 
     // Format mismatch warning (safe but useful)
@@ -324,6 +330,7 @@ void Runtime::CopyImage(VideoCore::Image* src, VideoCore::Image* dst) {
 
 void Runtime::CopyImageWithBuffer(VideoCore::Image* src, VideoCore::Image* dst,
                                   const VideoCore::Buffer* buffer, u64 offset) {
+    const Scheduler::ScopedGpuSection gpu_section{scheduler, Scheduler::GpuSection::ImageCopies};
     const u32 num_mips = std::min(src->info.resources.levels, dst->info.resources.levels);
     const u32 num_layers = std::min(src->info.resources.layers, dst->info.resources.layers);
 
@@ -397,6 +404,7 @@ void Runtime::CopyImageWithBuffer(VideoCore::Image* src, VideoCore::Image* dst,
 }
 
 void Runtime::CopyMip(VideoCore::Image* src, VideoCore::Image* dst, u32 mip, u32 slice) {
+    const Scheduler::ScopedGpuSection gpu_section{scheduler, Scheduler::GpuSection::ImageCopies};
     const auto dst_dim = dst->info.props.is_block ? 2 : 0;
     const auto mip_block_w = std::max(dst->info.size.width >> (mip + dst_dim), 1u);
     const auto mip_block_h = std::max(dst->info.size.height >> (mip + dst_dim), 1u);
@@ -449,6 +457,7 @@ void Runtime::CopyMip(VideoCore::Image* src, VideoCore::Image* dst, u32 mip, u32
 }
 
 void Runtime::CopyColorAndDepth(VideoCore::Image* src, VideoCore::Image* dst) {
+    const Scheduler::ScopedGpuSection gpu_section{scheduler, Scheduler::GpuSection::ImageCopies};
     if (src->info.num_samples == 1 && dst->info.num_samples == 1) {
         if ((instance.IsMaintenance8Supported() ||
              src->info.props.is_depth == dst->info.props.is_depth) &&
@@ -485,6 +494,7 @@ void Runtime::CopyColorAndDepth(VideoCore::Image* src, VideoCore::Image* dst) {
 
 void Runtime::CopyDepthStencil(VideoCore::Image* src, VideoCore::Image* dst,
                                const VideoCore::SubresourceRange& sub_range) {
+    const Scheduler::ScopedGpuSection gpu_section{scheduler, Scheduler::GpuSection::ImageCopies};
     scheduler.EndRendering();
 
     bool needs_flush =
@@ -527,6 +537,7 @@ void Runtime::CopyDepthStencil(VideoCore::Image* src, VideoCore::Image* dst,
 void Runtime::ResolveImage(VideoCore::Image* src, VideoCore::Image* dst,
                            const VideoCore::SubresourceRange& src_range,
                            const VideoCore::SubresourceRange& dst_range) {
+    const Scheduler::ScopedGpuSection gpu_section{scheduler, Scheduler::GpuSection::ImageCopies};
     SetBackingSamples(dst, 1, false);
     scheduler.EndRendering();
 
@@ -592,6 +603,7 @@ void Runtime::ResolveImage(VideoCore::Image* src, VideoCore::Image* dst,
 
 void Runtime::ClearImage(VideoCore::Image* dst, const VideoCore::SubresourceRange& range,
                          const vk::ClearValue& clear_value) {
+    const Scheduler::ScopedGpuSection gpu_section{scheduler, Scheduler::GpuSection::ImageCopies};
     scheduler.EndRendering();
 
     const bool needs_flush =

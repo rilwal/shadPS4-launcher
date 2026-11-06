@@ -988,6 +988,18 @@ void PipelineCache::FlushCompileStats(u64 now_ns) {
                  seconds, gpu.busy_ns / 1e6,
                  frames.count != 0 ? gpu.busy_ns / 1e6 / frames.count : 0.0, frames.count,
                  gpu.submits, gpu.worst_ns / 1e6);
+        std::string parts;
+        for (size_t k = 0; k < gpu.section_ns.size(); ++k) {
+            if (gpu.section_ns[k] != 0) {
+                fmt::format_to(std::back_inserter(parts), "{}{} {:.1f} ms",
+                               parts.empty() ? "" : ", ", Scheduler::GpuSectionNames[k],
+                               gpu.section_ns[k] / 1e6);
+            }
+        }
+        LOG_INFO(Render_Vulkan, "GPU time by kind over {:.1f} s: {}{}", seconds, parts,
+                 gpu.overflowed != 0
+                     ? fmt::format(" ({} submits ran out of timestamps)", gpu.overflowed)
+                     : "");
     }
     const u64 probes = bg.probes.exchange(0, std::memory_order_relaxed);
     const u64 probe_optimized_ns = bg.probe_optimized_ns.exchange(0, std::memory_order_relaxed);

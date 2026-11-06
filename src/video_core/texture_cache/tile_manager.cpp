@@ -315,6 +315,9 @@ std::pair<const Buffer*, u64> TileManager::DetileImage(const VideoCore::Buffer* 
         return {in_buffer, in_offset};
     }
 
+    const Vulkan::Scheduler::ScopedGpuSection gpu_section{scheduler,
+                                                          Vulkan::Scheduler::GpuSection::Detiling};
+
     TilingInfo params{};
     params.bank_swizzle = info.bank_swizzle;
     params.micro_tiled_mips = info.micro_tiled_mips;
@@ -403,6 +406,9 @@ void TileManager::TileImage(Image& in_image, std::span<vk::BufferImageCopy> buff
         runtime.DownloadImage(&in_image, out_buffer, buffer_copies);
         return;
     }
+
+    const Vulkan::Scheduler::ScopedGpuSection gpu_section{scheduler,
+                                                          Vulkan::Scheduler::GpuSection::Detiling};
 
     TilingInfo params{};
     params.bank_swizzle = info.bank_swizzle;

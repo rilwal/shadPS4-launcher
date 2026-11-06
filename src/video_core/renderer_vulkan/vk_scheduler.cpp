@@ -1,6 +1,8 @@
 // SPDX-FileCopyrightText: Copyright 2025 shadPS4 Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+#include <iterator>
+#include <fmt/format.h>
 #include "common/assert.h"
 #include "common/debug.h"
 #include "common/thread.h"
@@ -22,7 +24,7 @@ Scheduler::Scheduler(const Instance& instance)
     if (EmulatorSettings.IsGpuTiming()) {
         auto [result, pool] = instance.GetDevice().createQueryPoolUnique({
             .queryType = vk::QueryType::eTimestamp,
-            .queryCount = NumTimedSubmits * 2,
+            .queryCount = NumTimedSubmits * QueriesPerSubmit,
         });
         if (result == vk::Result::eSuccess) {
             timestamp_pool = std::move(pool);
@@ -166,14 +168,16 @@ void Scheduler::BeginSession() {
     session.primary = command_pool.Commit();
     Check(session.primary.begin(begin_info));
 
-    // The first session of a submission starts its timing, if a query pair is free.
+    // The first session of a submission starts its timing, if a slot is free.
+    gpu_section = GpuSection::Other;
     if (timestamp_pool && sessions.size() == 1 && timed_submits.size() < NumTimedSubmits) {
-        const u32 pair = next_timed;
+        const u32 slot = next_timed;
         next_timed = (next_timed + 1) % NumTimedSubmits;
-        session.primary.resetQueryPool(*timestamp_pool, pair * 2, 2);
+        session.primary.resetQueryPool(*timestamp_pool, slot * QueriesPerSubmit, QueriesPerSubmit);
         session.primary.writeTimestamp(vk::PipelineStageFlagBits::eTopOfPipe, *timestamp_pool,
-                                       pair * 2);
-        current_timed = pair;
+                                       slot * QueriesPerSubmit);
+        current_timed = slot;
+        timed_sections.clear();
     }
 
     // Invalidate dynamic state so it gets applied to the new command buffer.
@@ -205,8 +209,10 @@ void Scheduler::EndSession() {
 
     EndRendering();
     if (ending_submit && current_timed) {
+        timed_sections.push_back(gpu_section);
         session.primary.writeTimestamp(vk::PipelineStageFlagBits::eBottomOfPipe, *timestamp_pool,
-                                       *current_timed * 2 + 1);
+                                       *current_timed * QueriesPerSubmit +
+                                           static_cast<u32>(timed_sections.size()));
     }
     Check(session.primary.end());
 }
@@ -274,7 +280,8 @@ void Scheduler::SubmitExecution(SubmitInfo& info) {
 
     work_semaphore.Refresh();
     if (current_timed) {
-        timed_submits.push({*current_timed, signal_value});
+        timed_submits.push({*current_timed, signal_value, std::move(timed_sections)});
+        timed_sections = {};
         current_timed.reset();
     }
     ReadGpuTimes();
@@ -284,23 +291,67 @@ void Scheduler::SubmitExecution(SubmitInfo& info) {
     PopPendingOperations();
 }
 
+void Scheduler::MarkGpuSection(GpuSection section) {
+    // One query is kept for the submission's end; past that, the rest goes to the current kind.
+    if (current_timed && timed_sections.size() + 2 < QueriesPerSubmit) {
+        timed_sections.push_back(gpu_section);
+        sessions.back().primary.writeTimestamp(
+            vk::PipelineStageFlagBits::eBottomOfPipe, *timestamp_pool,
+            *current_timed * QueriesPerSubmit + static_cast<u32>(timed_sections.size()));
+        gpu_section = section;
+    } else if (!current_timed) {
+        gpu_section = section;
+    }
+}
+
 void Scheduler::ReadGpuTimes() {
     const double period = instance.TimestampPeriod();
+    std::vector<u64> stamps;
     while (!timed_submits.empty() && work_semaphore.IsFree(timed_submits.front().tick)) {
-        const u32 pair = timed_submits.front().pair;
+        const TimedSubmit timed = std::move(timed_submits.front());
         timed_submits.pop();
-        std::array<u64, 2> stamps{};
+        const u32 count = static_cast<u32>(timed.sections.size()) + 1;
+        stamps.assign(count, 0);
         const auto result = instance.GetDevice().getQueryPoolResults(
-            *timestamp_pool, pair * 2, 2, sizeof(stamps), stamps.data(), sizeof(u64),
-            vk::QueryResultFlagBits::e64);
-        if (result != vk::Result::eSuccess || stamps[1] < stamps[0]) {
+            *timestamp_pool, timed.slot * QueriesPerSubmit, count, count * sizeof(u64),
+            stamps.data(), sizeof(u64), vk::QueryResultFlagBits::e64);
+        if (result != vk::Result::eSuccess || stamps.back() < stamps.front()) {
             continue;
         }
-        const u64 ns = static_cast<u64>(double(stamps[1] - stamps[0]) * period);
+        const auto to_ns = [period](u64 ticks) { return static_cast<u64>(double(ticks) * period); };
+        const u64 ns = to_ns(stamps.back() - stamps.front());
+        std::array<u64, size_t(GpuSection::Count)> section_ns{};
+        std::array<u32, size_t(GpuSection::Count)> section_count{};
+        // A later timestamp can land before an earlier one when work overlaps, so each stretch
+        // runs from the latest stamp so far.
+        u64 last = stamps.front();
+        for (u32 i = 0; i + 1 < count; ++i) {
+            const auto kind = static_cast<size_t>(timed.sections[i]);
+            const u64 end = std::max(stamps[i + 1], last);
+            section_ns[kind] += to_ns(end - last);
+            last = end;
+            ++section_count[kind];
+        }
+        const bool overflowed = count >= QueriesPerSubmit;
+        if (ns >= SlowSubmitNs) {
+            std::string parts;
+            for (size_t k = 0; k < section_ns.size(); ++k) {
+                if (section_count[k] != 0) {
+                    fmt::format_to(std::back_inserter(parts), ", {} {:.2f} ms ({})",
+                                   GpuSectionNames[k], section_ns[k] / 1e6, section_count[k]);
+                }
+            }
+            LOG_INFO(Render_Vulkan, "Slow submit {:.2f} ms on the GPU{}{}", ns / 1e6, parts,
+                     overflowed ? " (ran out of timestamps)" : "");
+        }
         std::scoped_lock lock{gpu_time_mutex};
         gpu_time.busy_ns += ns;
         gpu_time.worst_ns = std::max(gpu_time.worst_ns, ns);
         ++gpu_time.submits;
+        gpu_time.overflowed += overflowed ? 1 : 0;
+        for (size_t k = 0; k < section_ns.size(); ++k) {
+            gpu_time.section_ns[k] += section_ns[k];
+        }
     }
 }
 

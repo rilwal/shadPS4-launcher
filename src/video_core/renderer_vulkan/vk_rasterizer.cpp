@@ -341,9 +341,11 @@ void Rasterizer::Draw(bool is_indexed, u32 index_offset) {
     BindGraphics(pipeline);
 
     if (is_indexed) {
+        scheduler.SetGpuSection(Scheduler::GpuSection::Draws);
         cmdbuf.drawIndexed(regs.num_indices, regs.num_instances.NumInstances(), 0,
                            s32(vertex_offset), instance_offset);
     } else {
+        scheduler.SetGpuSection(Scheduler::GpuSection::Draws);
         cmdbuf.draw(regs.num_indices, regs.num_instances.NumInstances(), vertex_offset,
                     instance_offset);
     }
@@ -419,9 +421,11 @@ void Rasterizer::DrawIndirect(bool is_indexed, VAddr arg_address, u32 offset, u3
         ASSERT(sizeof(VkDrawIndexedIndirectCommand) == stride);
 
         if (count_address != 0) {
+            scheduler.SetGpuSection(Scheduler::GpuSection::Draws);
             cmdbuf.drawIndexedIndirectCount(buffer->Handle(), base, count_buffer->Handle(),
                                             count_offset, max_count, stride);
         } else {
+            scheduler.SetGpuSection(Scheduler::GpuSection::Draws);
             cmdbuf.drawIndexedIndirect(buffer->Handle(), base, max_count, stride);
         }
         DebugState.IncDrawCall();
@@ -429,9 +433,11 @@ void Rasterizer::DrawIndirect(bool is_indexed, VAddr arg_address, u32 offset, u3
         ASSERT(sizeof(VkDrawIndirectCommand) == stride);
 
         if (count_address != 0) {
+            scheduler.SetGpuSection(Scheduler::GpuSection::Draws);
             cmdbuf.drawIndirectCount(buffer->Handle(), base, count_buffer->Handle(), count_offset,
                                      max_count, stride);
         } else {
+            scheduler.SetGpuSection(Scheduler::GpuSection::Draws);
             cmdbuf.drawIndirect(buffer->Handle(), base, max_count, stride);
         }
         DebugState.IncDrawCall();
@@ -473,6 +479,7 @@ void Rasterizer::DispatchDirect() {
 
     const auto cmdbuf = scheduler.CommandBuffer();
     cmdbuf.bindPipeline(vk::PipelineBindPoint::eCompute, pipeline->Handle());
+    scheduler.SetGpuSection(Scheduler::GpuSection::Dispatches);
     cmdbuf.dispatch(cs_program.dim_x, cs_program.dim_y, cs_program.dim_z);
     DebugState.IncDispatch();
 
@@ -511,6 +518,7 @@ void Rasterizer::DispatchIndirect(VAddr address, u32 offset, u32 size) {
 
     const auto cmdbuf = scheduler.CommandBuffer();
     cmdbuf.bindPipeline(vk::PipelineBindPoint::eCompute, pipeline->Handle());
+    scheduler.SetGpuSection(Scheduler::GpuSection::Dispatches);
     cmdbuf.dispatchIndirect(buffer->Handle(), base);
     DebugState.IncDispatch();
 
