@@ -50,8 +50,7 @@ enum class Cost : u32 {
     BufferBytes,  ///< Guest memory copied into GPU buffers by the GPU thread (bytes).
     ImageUploads, ///< Images uploaded from guest memory by the GPU thread (a count).
     ImageBytes,   ///< Their guest size (bytes).
-    /// Of those, bytes identical to the image's previous upload (only with SHADPS4_UPLOAD_DUPES=1,
-    /// which hashes every upload).
+    /// Bytes of image uploads skipped because the guest memory matched the image's last upload.
     ImageSameBytes,
     Count,
 };
@@ -213,7 +212,8 @@ struct Frames {
             busy / 1e6, ms(Cost::Shaders), ms(Cost::Textures), c[size_t(Cost::ImageUploads)],
             c[size_t(Cost::ImageBytes)] / 1048576.0,
             c[size_t(Cost::ImageSameBytes)] != 0
-                ? fmt::format(" ({:.1f} MB unchanged)", c[size_t(Cost::ImageSameBytes)] / 1048576.0)
+                ? fmt::format(", {:.1f} MB unchanged and skipped",
+                              c[size_t(Cost::ImageSameBytes)] / 1048576.0)
                 : std::string{},
             ms(Cost::Buffers), c[size_t(Cost::BufferBytes)] / 1048576.0, ms(Cost::GpuWaits),
             ms(Cost::Submits), ms(Cost::Presents), ms(Cost::Flips), ms(Cost::Dma),
