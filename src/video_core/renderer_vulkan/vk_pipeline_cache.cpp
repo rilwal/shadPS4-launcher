@@ -944,13 +944,15 @@ void PipelineCache::FlushCompileStats(u64 now_ns) {
                      "another variant; {} came too late; {} queued; "
                      "{} dropped as the wrong stage; {} first uses waited {:.1f} ms for the "
                      "worker compiling them; {} queued were used before a worker got to them; "
-                     "{} compiled from recorded draw states ({} variants)",
+                     "{} compiled from recorded draw states ({} variants); {} guessed with "
+                     "image types from their reflection",
                      seconds, precompile.translated, precompile.shader_objects,
                      precompile.compute_pipelines, precompile.worker_ns / 1e6, precompile.served,
                      precompile.missed, precompile.duplicate, precompile.queue.size(),
                      precompile.rejected, precompile.joined, precompile.joined_ns / 1e6,
-                     precompile.skipped_used, precompile.replayed, precompile.replayed_variants);
-            precompile.replayed = precompile.replayed_variants = 0;
+                     precompile.skipped_used, precompile.replayed, precompile.replayed_variants,
+                     precompile.reflected);
+            precompile.replayed = precompile.replayed_variants = precompile.reflected = 0;
             precompile.skipped_used = 0;
             precompile.joined = 0;
             precompile.joined_ns = 0;
@@ -1937,6 +1939,7 @@ void PipelineCache::PrecompileOne(const Precompile::Job& job) {
 
     std::scoped_lock lock{precompile.mutex};
     ++precompile.translated;
+    precompile.reflected += reflected_images.empty() ? 0 : 1;
     precompile.shader_objects += made_object ? 1 : 0;
     precompile.compute_pipelines += static_cast<u32>(done.computes.size());
     precompile.worker_ns += VideoCore::PerfStats::NowNs() - start;
