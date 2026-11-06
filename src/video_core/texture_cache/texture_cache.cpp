@@ -36,6 +36,15 @@ static bool DetilesFromDevice() {
     return from_device;
 }
 
+/// Whether uploads are hashed to count bytes that didn't change since the image's last upload.
+static bool CountsSameUploads() {
+    static const bool counts = [] {
+        const char* env = std::getenv("SHADPS4_UPLOAD_DUPES");
+        return env && env[0] == '1';
+    }();
+    return counts;
+}
+
 static constexpr u32 MAX_IMAGES = std::numeric_limits<u16>::max();
 static constexpr u32 MAX_IMAGE_VIEWS = std::numeric_limits<u16>::max();
 static constexpr u32 MAX_SAMPLERS = std::numeric_limits<u16>::max();
@@ -931,6 +940,14 @@ void TextureCache::RefreshImage(Image& image) {
     VideoCore::PerfStats::frames.AddGpuCount(VideoCore::PerfStats::Cost::ImageUploads, 1);
     VideoCore::PerfStats::frames.AddGpuCount(VideoCore::PerfStats::Cost::ImageBytes,
                                              image.info.guest_size);
+    if (CountsSameUploads()) {
+        const u64 hash = HashBackingMemory(image.info.guest_address, image.info.guest_size);
+        if (hash == image.upload_hash) {
+            VideoCore::PerfStats::frames.AddGpuCount(VideoCore::PerfStats::Cost::ImageSameBytes,
+                                                     image.info.guest_size);
+        }
+        image.upload_hash = hash;
+    }
 }
 
 Sampler& TextureCache::GetSampler(const AmdGpu::Sampler& sharp,

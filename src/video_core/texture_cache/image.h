@@ -172,6 +172,8 @@ public:
     u64 lru_id{};
     u64 tick_accessed_last{};
     u64 cpu_hash{};
+    /// Hash of the guest memory at the last upload, with SHADPS4_UPLOAD_DUPES=1.
+    u64 upload_hash{};
     u64 gpu_hash{};
     u64 head_hash{};
     u64 tail_hash{};
