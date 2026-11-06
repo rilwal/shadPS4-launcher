@@ -40,6 +40,8 @@ enum class Cost : u32 {
     GpuWaits,   ///< Waiting for the host GPU to finish work (scheduler waits).
     Submits,    ///< Submitting command buffers to the host queue.
     Presents,   ///< Waiting for the presenter to flip (video out label waits).
+    Flips,      ///< Preparing flipped frames for the presenter (copying, waiting for a frame).
+    Dma,        ///< Buffer copies and fills the guest asked for, and DMA buffer syncs.
     Busy,       ///< GPU thread time not spent idle or spinning on guest waits.
     GuestWaits, ///< Spinning on guest waits (wait reg mem, semaphores, CE/DE counters).
     Faults,     ///< Handling guest page faults on tracked memory, summed over every thread.
@@ -185,17 +187,19 @@ struct Frames {
         const auto ms = [&](Cost cost) { return c[static_cast<size_t>(cost)] / 1e6; };
         const u64 named = c[size_t(Cost::Shaders)] + c[size_t(Cost::Textures)] +
                           c[size_t(Cost::Buffers)] + c[size_t(Cost::GpuWaits)] +
-                          c[size_t(Cost::Submits)] + c[size_t(Cost::Presents)];
+                          c[size_t(Cost::Submits)] + c[size_t(Cost::Presents)] +
+                          c[size_t(Cost::Flips)] + c[size_t(Cost::Dma)];
         const u64 busy = c[size_t(Cost::Busy)];
-        return fmt::format("busy {:.1f} ms (shaders {:.1f}, textures {:.1f}, buffers {:.1f}, GPU "
-                           "waits {:.1f}, submits {:.1f}, present waits {:.1f}, other {:.1f}), "
-                           "guest waits {:.1f} ms; page faults {} taking {:.1f} ms, {} pages "
-                           "unprotected ahead",
-                           busy / 1e6, ms(Cost::Shaders), ms(Cost::Textures), ms(Cost::Buffers),
-                           ms(Cost::GpuWaits), ms(Cost::Submits), ms(Cost::Presents),
-                           busy > named ? (busy - named) / 1e6 : 0.0, ms(Cost::GuestWaits),
-                           c[size_t(Cost::NumFaults)], ms(Cost::Faults),
-                           c[size_t(Cost::PagesAhead)]);
+        return fmt::format(
+            "busy {:.1f} ms (shaders {:.1f}, textures {:.1f}, buffers {:.1f}, GPU "
+            "waits {:.1f}, submits {:.1f}, present waits {:.1f}, flips {:.1f}, DMA {:.1f}, "
+            "other {:.1f}), "
+            "guest waits {:.1f} ms; page faults {} taking {:.1f} ms, {} pages "
+            "unprotected ahead",
+            busy / 1e6, ms(Cost::Shaders), ms(Cost::Textures), ms(Cost::Buffers),
+            ms(Cost::GpuWaits), ms(Cost::Submits), ms(Cost::Presents), ms(Cost::Flips),
+            ms(Cost::Dma), busy > named ? (busy - named) / 1e6 : 0.0, ms(Cost::GuestWaits),
+            c[size_t(Cost::NumFaults)], ms(Cost::Faults), c[size_t(Cost::PagesAhead)]);
     }
 
     /// Returns the counts since the last call and starts a new window.

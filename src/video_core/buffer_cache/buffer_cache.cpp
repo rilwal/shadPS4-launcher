@@ -324,6 +324,7 @@ void BufferCache::ReadEdgeImagePages(const Image& image) {
 }
 
 void BufferCache::SynchronizeDmaBuffers() {
+    const PerfStats::ScopedCost cost{PerfStats::Cost::Dma};
     fault_process_pending = true;
     for (const auto& range : resident_ranges) {
         const u64 page = range.start >> (ARENA_PAGE_BITS - block_shift);
