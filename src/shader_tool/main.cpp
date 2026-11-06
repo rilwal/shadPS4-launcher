@@ -82,6 +82,7 @@ struct Game {
 struct Options {
     u32 rounds = 20;
     bool reflection = true;
+    bool coordinate_3d = false;
     /// -2: the saved one; -1: each shader's lowest semantic; else this base.
     int semantic_base = -2;
     bool verbose = false;
@@ -174,6 +175,7 @@ int Bench(const Game& game, const Options& options) {
             };
             Shader::Info info(hw_stage, sw_stage, params);
             info.guess_state = true;
+            info.guess_coordinate_3d = options.coordinate_3d;
             info.guessed_fetch = fetch ? &*fetch : nullptr;
             auto runtime = *runtime_info;
             Shader::Backend::Bindings binding{};
@@ -338,6 +340,7 @@ int Score(const Game& game, const Options& options) {
                 };
                 Shader::Info info{state->hw_stage, state->sw_stage, params};
                 info.guess_state = true;
+                info.guess_coordinate_3d = options.coordinate_3d;
                 info.guessed_fetch = fetch;
                 info.guessed_images = guess_images;
                 return Translate(profile, pools, info, runtime, shader.code, true);
@@ -384,9 +387,9 @@ int Score(const Game& game, const Options& options) {
             }
         }
     }
-    fmt::print("Guess score ({}, semantic base {}):\n",
+    fmt::print("Guess score ({}{}, semantic base {}):\n",
                options.reflection ? "with reflection" : "reflection ignored",
-               SemanticBase(game, options));
+               options.coordinate_3d ? ", 3D from coordinates" : "", SemanticBase(game, options));
     fmt::print("  stage  states  no struct  stale  truth fails  unguessable  served  same SPIR-V  "
                "served (draw registers)\n");
     StageScore total{};
@@ -469,6 +472,7 @@ int Usage() {
         "  states           translate every recorded draw state, printing a hash of each\n"
         "options:\n"
         "  --no-reflection        ignore the PSSL reflection's image types\n"
+        "  --coordinate-3d        guess untyped images as 3D from their coordinates\n"
         "  --semantic-base N      pixel shader semantic base (default: the saved one; -1 for\n"
         "                         each shader's lowest)\n"
         "  -v                     list each miss\n"
@@ -492,6 +496,8 @@ int main(int argc, char** argv) {
         const std::string_view arg = argv[i];
         if (arg == "--no-reflection") {
             options.reflection = false;
+        } else if (arg == "--coordinate-3d") {
+            options.coordinate_3d = true;
         } else if (arg == "--semantic-base" && i + 1 < argc) {
             options.semantic_base = std::atoi(argv[++i]);
         } else if (arg == "-v") {

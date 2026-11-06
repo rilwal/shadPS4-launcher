@@ -150,6 +150,11 @@ struct Info : InfoPersistent {
         AmdGpu::ImageType type;
     };
     std::span<const GuessedImage> guessed_images;
+    /// With guess_state, whether an image the reflection doesn't type counts as 3D when its third
+    /// coordinate is made the same way as x and y. Off by default: on its own it was right for
+    /// 2 and wrong for 25 of Bloodborne's used shaders, and right for 13 and wrong for 8 of
+    /// The Last Guardian's.
+    bool guess_coordinate_3d{};
     /// With guess_state, where the flattening put dwords read straight from a table a user data
     /// register points at: flattened offset, register, dword offset in the table.
     struct FlatSource {

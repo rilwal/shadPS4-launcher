@@ -451,6 +451,8 @@ private:
         /// Guessed shaders whose image types came from their reflection.
         u32 reflected{};
         bool use_reflection{true};
+        /// Info::guess_coordinate_3d, from SHADPS4_GUESS_COORDINATE_3D=1.
+        bool coordinate_3d{};
         u32 replayed_variants{};
         /// First uses that waited for the worker compiling them, and how long.
         u32 joined{};

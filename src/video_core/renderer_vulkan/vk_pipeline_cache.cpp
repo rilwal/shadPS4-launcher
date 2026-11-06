@@ -1066,6 +1066,9 @@ void PipelineCache::StartPrecompile(u32 num_threads) {
     if (const char* ignore = std::getenv("SHADPS4_GUESS_IGNORE_REFLECTION")) {
         precompile.use_reflection = std::string_view{ignore} != "1";
     }
+    if (const char* coordinate_3d = std::getenv("SHADPS4_GUESS_COORDINATE_3D")) {
+        precompile.coordinate_3d = std::string_view{coordinate_3d} == "1";
+    }
     if (const char* order = std::getenv("SHADPS4_PRECOMPILE_ORDER")) {
         precompile.order_near = std::string_view{order} != "newest";
     }
@@ -1249,6 +1252,7 @@ void PipelineCache::PrecompileOne(const Precompile::Job& job) {
     auto program = std::make_unique<Program>(hw_stage, sw_stage, params);
     auto& info = program->info;
     info.guess_state = true;
+    info.guess_coordinate_3d = precompile.coordinate_3d;
     info.guessed_fetch = fetch ? &*fetch : nullptr;
     const auto reflected_images = precompile.use_reflection
                                       ? ReflectedImages(hw_stage, found->header, found->reflection)
@@ -1804,6 +1808,7 @@ void PipelineCache::CheckGuess(HwStage hw_stage, SwStage sw_stage,
     const auto translate = [&](Shader::RuntimeInfo& guess_runtime) {
         Shader::Info guess(hw_stage, sw_stage, params);
         guess.guess_state = true;
+        guess.guess_coordinate_3d = precompile.coordinate_3d;
         auto binding = start;
         const auto ir_program =
             Shader::TranslateProgram(params.code, pools, guess, guess_runtime, profile);
@@ -1913,6 +1918,7 @@ void PipelineCache::CheckVertexGuess(const Shader::ShaderParams& params, std::sp
     }
     Shader::Info guess(HwStage::Vertex, SwStage::Vertex, params);
     guess.guess_state = true;
+    guess.guess_coordinate_3d = precompile.coordinate_3d;
     guess.guessed_fetch = &*fetch;
     auto binding = start;
     const auto ir_program = Shader::TranslateProgram(params.code, pools, guess, *runtime, profile);
