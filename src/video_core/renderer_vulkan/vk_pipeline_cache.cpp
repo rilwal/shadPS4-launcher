@@ -6,6 +6,7 @@
 #include <cstdlib>
 #include <ranges>
 #include <fmt/ranges.h>
+#include <magic_enum/magic_enum.hpp>
 #include <xxhash.h>
 
 #include "common/hash.h"
@@ -183,7 +184,11 @@ static std::vector<std::string> SpecDifferences(const Shader::StageSpecializatio
         }
         const auto& x = a.images[i];
         const auto& y = b.images[i];
-        check(x.type == y.type, "img{}.type", i);
+        if (x.type != y.type) {
+            out.push_back(fmt::format("img{}.type {}/{}{}", i, magic_enum::enum_name(x.type),
+                                      magic_enum::enum_name(y.type),
+                                      x.is_storage ? " storage" : ""));
+        }
         check(x.is_integer == y.is_integer, "img{}.is_integer", i);
         check(x.is_storage == y.is_storage, "img{}.is_storage", i);
         check(x.is_srgb == y.is_srgb, "img{}.is_srgb", i);
