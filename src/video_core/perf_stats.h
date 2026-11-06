@@ -11,6 +11,7 @@
 #include <utility>
 #include <vector>
 
+#include "common/logging/log.h"
 #include "common/types.h"
 
 namespace VideoCore {
@@ -46,6 +47,13 @@ struct Frames {
     std::atomic<u64> total_stutters{};
     std::atomic<u64> total_stall_ns{};
 
+    /// GPU-thread time spent on shaders and pipelines (translating, creating, waiting for
+    /// workers), added by the pipeline cache, so a stutter's log line says how much of it they
+    /// explain.
+    void AddShaderTime(u64 ns) {
+        shader_ns.fetch_add(ns, std::memory_order_relaxed);
+    }
+
     void Record() {
         total.fetch_add(1, std::memory_order_relaxed);
         const u64 now = NowNs();
@@ -70,8 +78,18 @@ struct Frames {
                     stall = delta - median;
                     total_stutters.fetch_add(1, std::memory_order_relaxed);
                     total_stall_ns.fetch_add(stall, std::memory_order_relaxed);
+                    // The GPU thread runs up to a frame behind, so its time over this frame
+                    // and the one before.
+                    LOG_INFO(Render,
+                             "Stutter at frame {}: {:.1f} ms against a median of {:.1f} ms; the "
+                             "GPU thread spent {:.1f} ms on shaders and pipelines in it and "
+                             "{:.1f} ms in the frame before",
+                             total.load(std::memory_order_relaxed), delta / 1e6, median / 1e6,
+                             shader_ns.load(std::memory_order_relaxed) / 1e6,
+                             previous_shader_ns / 1e6);
                 }
             }
+            previous_shader_ns = shader_ns.exchange(0, std::memory_order_relaxed);
             pace[next_pace] = delta;
             next_pace = (next_pace + 1) % PaceFrames;
             ++num_paced;
@@ -135,6 +153,8 @@ struct Frames {
     }
 
 private:
+    std::atomic<u64> shader_ns{};
+    u64 previous_shader_ns{};           // presenter thread only
     u64 last_ns{};                      // presenter thread only
     std::array<u64, PaceFrames> pace{}; // presenter thread only
     size_t next_pace{};

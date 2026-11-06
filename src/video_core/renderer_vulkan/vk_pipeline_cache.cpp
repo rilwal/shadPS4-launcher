@@ -995,6 +995,7 @@ void PipelineCache::WaitUntilReady(const GraphicsPipeline& pipeline) {
     compiler->WaitFor([&pipeline] { return pipeline.IsReady(); }, std::chrono::hours{1});
     const u64 waited = VideoCore::PerfStats::NowNs() - start;
     compile_stats.waited_ns += waited;
+    VideoCore::PerfStats::frames.AddShaderTime(waited);
     compile_stats.worst_ns = std::max(compile_stats.worst_ns, waited);
     ++compile_stats.waited_draws;
 }
@@ -1019,6 +1020,7 @@ u64 PipelineCache::WaitForPipeline(const GraphicsPipeline& pipeline) {
     const u64 waited = VideoCore::PerfStats::NowNs() - now;
     wait_credit_ns -= std::min(wait_credit_ns, waited);
     compile_stats.waited_ns += waited;
+    VideoCore::PerfStats::frames.AddShaderTime(waited);
     return waited;
 }
 
@@ -1073,6 +1075,7 @@ const GraphicsPipeline* PipelineCache::LookUpGraphicsPipeline(const DrawIndirect
         const bool skips = mode == AsyncMode::Skip || mode == AsyncMode::SkipAll;
         if (!skips) {
             compile_stats.driver_ns += gpu_thread_ns;
+            VideoCore::PerfStats::frames.AddShaderTime(gpu_thread_ns);
         }
         // A prefetch never waits: the draw it was made for does that if it must.
         const u64 waited_ns = skips && !prefetch ? WaitForPipeline(*it.value()) : 0;
@@ -1109,6 +1112,7 @@ const ComputePipeline* PipelineCache::GetComputePipeline() {
         compiler->WaitFor([pipeline] { return pipeline->IsReady(); }, std::chrono::hours{1});
         const u64 waited = VideoCore::PerfStats::NowNs() - start;
         compile_stats.waited_ns += waited;
+        VideoCore::PerfStats::frames.AddShaderTime(waited);
         compile_stats.worst_ns = std::max(compile_stats.worst_ns, waited);
         ++compile_stats.waited_dispatches;
     }
@@ -1155,6 +1159,7 @@ const ComputePipeline* PipelineCache::LookUpComputePipeline(bool prefetch) {
         } else {
             new_compute_pipeline = true;
             compile_stats.driver_ns += gpu_thread_ns;
+            VideoCore::PerfStats::frames.AddShaderTime(gpu_thread_ns);
             compile_stats.worst_ns = std::max(compile_stats.worst_ns, recompile_ns + gpu_thread_ns);
             LOG_INFO(Render_Vulkan, "Compute pipeline {:#x}: recompile {:.2f} ms, driver {:.2f} ms",
                      pipeline_hash, recompile_ns / 1e6, gpu_thread_ns / 1e6);
@@ -1417,6 +1422,7 @@ std::pair<vk::ShaderModule, u64> PipelineCache::CompileModule(Shader::Info& info
         const u64 elapsed = VideoCore::PerfStats::NowNs() - start;
         pending_recompile_ns += elapsed;
         compile_stats.recompile_ns += elapsed;
+        VideoCore::PerfStats::frames.AddShaderTime(elapsed);
         ++compile_stats.shaders;
     };
 
