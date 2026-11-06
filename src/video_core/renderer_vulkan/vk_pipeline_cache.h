@@ -380,6 +380,8 @@ private:
     void TakePrecompiled();
     /// Waits a little for a worker compiling the program, so its first use can take that.
     void JoinPrecompile(u64 hash);
+    /// Queues the pixel shaders held until their inputs could be guessed.
+    void ReleaseHeldPrecompiles();
     /// Learns which binary type is which stage from programs the game uses. GPU thread.
     void NotePrecompileType(u64 hash, Shader::HwStage hw_stage);
     /// A prepared program's first use: whether its guess served the draw.
@@ -405,6 +407,8 @@ private:
         size_t found_cursor{};
         std::vector<Precompiled> done;
         std::atomic<bool> has_done{};
+        /// Pixel shaders with inputs found before the semantic base was learned.
+        std::vector<u64> held;
         /// Programs a worker is compiling now, and a signal for each one it finishes.
         tsl::robin_set<u64> in_flight;
         std::condition_variable finished;

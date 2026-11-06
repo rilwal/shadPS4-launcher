@@ -1733,6 +1733,22 @@ void PipelineCache::PrecompileOne(u64 hash, HwStage hw_stage) {
     if (!runtime_info) {
         return;
     }
+    if (hw_stage == HwStage::Fragment && runtime_info->hw.fs.num_inputs != 0 &&
+        semantic_base.load(std::memory_order_relaxed) < 0) {
+        // Its inputs can't be guessed until draws have shown how semantics map to vertex
+        // outputs, so it waits for that. Checked again under the lock that the release takes
+        // after learning it, so none is left behind.
+        std::unique_lock lock{precompile.mutex};
+        if (semantic_base.load(std::memory_order_relaxed) < 0) {
+            precompile.held.push_back(hash);
+            return;
+        }
+        lock.unlock();
+        runtime_info = GuessRuntimeInfo(hw_stage, sw_stage, found->header);
+        if (!runtime_info) {
+            return;
+        }
+    }
     std::optional<Shader::Gcn::FetchShaderData> fetch;
     if (hw_stage == HwStage::Vertex) {
         fetch = GuessFetchShader(found->header);
@@ -1819,6 +1835,24 @@ void PipelineCache::PrecompileOne(u64 hash, HwStage hw_stage) {
     precompile.worker_ns += VideoCore::PerfStats::NowNs() - start;
     precompile.done.push_back(std::move(done));
     precompile.has_done.store(true, std::memory_order_release);
+}
+
+void PipelineCache::ReleaseHeldPrecompiles() {
+    if (!precompile.active) {
+        return;
+    }
+    {
+        std::scoped_lock lock{precompile.mutex};
+        for (const u64 hash : precompile.held) {
+            if (!program_cache.contains(hash)) {
+                precompile.queue.emplace_back(hash, HwStage::Fragment);
+            }
+        }
+        LOG_INFO(Render_Vulkan, "{} pixel shaders held for their inputs are queued again",
+                 precompile.held.size());
+        precompile.held.clear();
+    }
+    precompile.cv.notify_all();
 }
 
 void PipelineCache::JoinPrecompile(u64 hash) {
@@ -2027,6 +2061,7 @@ void PipelineCache::LearnSemanticBase(u64 hash, const Shader::RuntimeInfo& runti
         if (base == semantic_base_candidate) {
             if (++semantic_base_votes == 3) {
                 semantic_base.store(base, std::memory_order_relaxed);
+                ReleaseHeldPrecompiles();
                 LOG_INFO(Render_Vulkan, "Pixel shader inputs are their semantic less {}", base);
             }
         } else {
