@@ -14,6 +14,7 @@
 #include <tsl/robin_map.h>
 
 #include "common/types.h"
+#include "video_core/shader_list.h"
 
 namespace VideoCore {
 
@@ -47,7 +48,7 @@ public:
         /// game hasn't used it yet. Saved with it.
         u32 use_order{};
     };
-    static constexpr u8 NoStage = 0xff;
+    static constexpr u8 NoStage = ShaderFiles::NoStage;
 
     ShaderScanner();
     ~ShaderScanner();
@@ -110,12 +111,9 @@ public:
     std::vector<u64> TilingKeys();
     void NoteTilingKey(u64 key);
 
-    /// Draw states recorded at first uses, as PipelineCache's blobs, so later launches can
+    /// Draw states recorded at first uses, as ParseDrawState's blobs, so later launches can
     /// compile shaders for exactly what they were drawn with. Saved apart from the list, in a
-    /// file with no shader code, so it can be shared. A blob starts with StateKeyBytes that
-    /// identify what it records (one with the same start isn't kept twice), then its hardware
-    /// stage as a byte.
-    static constexpr size_t StateKeyBytes = 12;
+    /// file with no shader code, so it can be shared (see ShaderFiles::StateKeyBytes).
     void NoteState(u64 hash, std::vector<u8> state);
     std::vector<std::vector<u8>> StatesOf(u64 hash);
     /// The hardware stage a shader's recorded states were drawn as, if it has any.
@@ -184,7 +182,7 @@ private:
     u32 use_counter{};
     int semantic_base{-1};
     std::vector<u64> tiling_keys;
-    tsl::robin_map<u64, std::vector<std::vector<u8>>> states;
+    ShaderFiles::ShaderStates states;
     std::filesystem::path states_path;
     size_t recent_use_index{};
     /// Scan totals, for the per-pass log.

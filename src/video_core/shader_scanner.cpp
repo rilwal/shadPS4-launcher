@@ -7,15 +7,12 @@
 #include <condition_variable>
 #include <cstdlib>
 #include <cstring>
-#include <fstream>
 #include <span>
 
 #ifdef __linux__
 #include <fcntl.h>
 #include <unistd.h>
 #endif
-
-#include <zstd.h>
 
 #include "common/elf_info.h"
 #include "common/logging/log.h"
@@ -24,6 +21,7 @@
 #include "core/memory.h"
 #include "video_core/amdgpu/regs_shader.h"
 #include "video_core/perf_stats.h"
+#include "video_core/shader_list.h"
 #include "video_core/shader_scanner.h"
 
 namespace VideoCore {
@@ -36,93 +34,21 @@ constexpr std::array<u8, 7> Signature{'O', 'r', 'b', 'S', 'h', 'd', 'r'};
 /// distance from the code to its BinaryInfo, in 8-byte units minus one.
 constexpr u32 TokenMovVccHi = 0xBEEB03FF;
 constexpr u64 ChunkSize = 4_MB;
-/// Shaders are at most a few tens of KB; anything larger isn't one.
-constexpr u32 MaxCodeLength = 1_MB;
 constexpr auto ScanInterval = std::chrono::seconds{3};
 constexpr u32 FullPassEvery = 8;
 constexpr u64 UnreadablePieceSize = 64_KB;
 /// Beyond this many queued signatures or ranges, the next pass picks the rest up.
 constexpr size_t MaxPending = 64 * 1024;
-/// How far before its code a shader struct may start: the struct, up to 255 usage slots and
-/// the input semantics.
-constexpr u64 MaxHeaderLength = 2_KB;
 /// The common word, then the embedded constant buffer and scratch sizes, then PgmLo.
 constexpr u64 HeaderPgmLoOffset = 8;
-/// 256 resource records of 24 bytes.
-constexpr u64 MaxReflectionLength = 6_KB;
-/// The saved list: magic, version, the uncompressed size, then the entries compressed.
-constexpr u32 SaveMagic = 0x4e435353; // "SSCN"
-constexpr u32 SaveVersion = 10;
-constexpr u32 MaxTilingKeys = 1024;
+using ShaderFiles::MaxCodeLength;
+using ShaderFiles::MaxHeaderLength;
+using ShaderFiles::MaxReflectionLength;
+using ShaderFiles::MaxStateSize;
+using ShaderFiles::MaxStatesPerShader;
+using ShaderFiles::MaxTilingKeys;
+using ShaderFiles::StateKeyBytes;
 constexpr u64 SaveInterval = 30'000'000'000ULL;
-/// Bigger than any real list, so a corrupt size can't ask for a huge allocation.
-constexpr u64 MaxSaveSize = 1_GB;
-/// The recorded draw states, in their own file with no shader code: magic, version, size,
-/// then compressed per shader its hash, a count and the states, each a size and its bytes.
-constexpr u32 StatesMagic = 0x41545353; // "SSTA"
-constexpr u32 StatesVersion = 2;
-constexpr u32 MaxStatesPerShader = 8;
-constexpr u32 MaxStateSize = 64_KB;
-
-/// Reads a file Save wrote: its entries, uncompressed, if the magic and version match.
-std::optional<std::vector<u8>> ReadSaved(const std::filesystem::path& path, u32 want_magic,
-                                         u32 want_version, std::string_view what) {
-    std::ifstream file{path, std::ios::binary};
-    if (!file) {
-        return std::nullopt;
-    }
-    u32 magic{};
-    u32 version{};
-    u64 raw_size{};
-    file.read(reinterpret_cast<char*>(&magic), sizeof(magic));
-    file.read(reinterpret_cast<char*>(&version), sizeof(version));
-    file.read(reinterpret_cast<char*>(&raw_size), sizeof(raw_size));
-    if (!file || magic != want_magic || version != want_version || raw_size > MaxSaveSize) {
-        LOG_WARNING(Render, "Ignoring the saved {} {}: unknown format", what, path.string());
-        return std::nullopt;
-    }
-    const std::vector<char> packed((std::istreambuf_iterator<char>(file)),
-                                   std::istreambuf_iterator<char>());
-    std::vector<u8> raw(raw_size);
-    const size_t got = ZSTD_decompress(raw.data(), raw.size(), packed.data(), packed.size());
-    if (ZSTD_isError(got) || got != raw_size) {
-        LOG_WARNING(Render, "Ignoring the saved {} {}: corrupt", what, path.string());
-        return std::nullopt;
-    }
-    return raw;
-}
-
-/// Compresses and writes entries, aside and renamed over, so a run stopped mid-write keeps the
-/// last good file. Returns the compressed size.
-std::optional<size_t> WriteSaved(const std::filesystem::path& path, u32 magic, u32 version,
-                                 std::span<const u8> raw, std::string_view what) {
-    std::vector<char> packed(ZSTD_compressBound(raw.size()));
-    const size_t size = ZSTD_compress(packed.data(), packed.size(), raw.data(), raw.size(), 3);
-    if (ZSTD_isError(size)) {
-        return std::nullopt;
-    }
-    auto temp = path;
-    temp += ".tmp";
-    {
-        std::ofstream file{temp, std::ios::binary | std::ios::trunc};
-        const u64 raw_size = raw.size();
-        file.write(reinterpret_cast<const char*>(&magic), sizeof(magic));
-        file.write(reinterpret_cast<const char*>(&version), sizeof(version));
-        file.write(reinterpret_cast<const char*>(&raw_size), sizeof(raw_size));
-        file.write(packed.data(), static_cast<std::streamsize>(size));
-        if (!file) {
-            LOG_WARNING(Render, "Can't save the {} to {}", what, temp.string());
-            return std::nullopt;
-        }
-    }
-    std::error_code ec;
-    std::filesystem::rename(temp, path, ec);
-    if (ec) {
-        LOG_WARNING(Render, "Can't save the {} to {}: {}", what, path.string(), ec.message());
-        return std::nullopt;
-    }
-    return size;
-}
 
 /// What file reads and loads queued for the scanner. Static, so a game thread can queue while
 /// the scanner is being destroyed.
@@ -495,94 +421,41 @@ std::vector<u8> ShaderScanner::ReadHeader(u64 code_addr) const {
     return {};
 }
 
-namespace {
-
-template <typename T>
-void Put(std::vector<u8>& out, const T& value) {
-    const auto* bytes = reinterpret_cast<const u8*>(&value);
-    out.insert(out.end(), bytes, bytes + sizeof(T));
-}
-
-template <typename T>
-bool Get(std::span<const u8>& in, T& value) {
-    if (in.size() < sizeof(T)) {
-        return false;
-    }
-    std::memcpy(&value, in.data(), sizeof(T));
-    in = in.subspan(sizeof(T));
-    return true;
-}
-
-} // Anonymous namespace
-
 void ShaderScanner::Load() {
     if (save_path.empty()) {
         return;
     }
     LoadStates();
-    const auto saved = ReadSaved(save_path, SaveMagic, SaveVersion, "shader list");
-    if (!saved) {
+    auto list = ShaderFiles::ReadShaderList(save_path);
+    if (!list) {
         return;
-    }
-    const auto& raw = *saved;
-    std::span<const u8> in{raw};
-    u32 count{};
-    s32 base{};
-    u32 num_tiling_keys{};
-    if (!Get(in, count) || !Get(in, base) || !Get(in, num_tiling_keys) ||
-        num_tiling_keys > MaxTilingKeys) {
-        return;
-    }
-    std::vector<u64> keys(num_tiling_keys);
-    for (u64& key : keys) {
-        if (!Get(in, key)) {
-            return;
-        }
     }
     const u64 now = PerfStats::NowNs();
     std::scoped_lock lock{mutex};
-    semantic_base = base;
-    tiling_keys = std::move(keys);
-    for (u32 i = 0; i < count; ++i) {
-        u64 hash{};
-        u8 type{};
-        u8 stage{};
-        u32 use_order{};
-        u32 code_dwords{};
-        u32 header_bytes{};
-        u32 reflection_bytes{};
-        if (!Get(in, hash) || !Get(in, type) || !Get(in, stage) || !Get(in, use_order) ||
-            !Get(in, code_dwords) || !Get(in, header_bytes) || !Get(in, reflection_bytes) ||
-            code_dwords > MaxCodeLength / sizeof(u32) || header_bytes > MaxHeaderLength ||
-            reflection_bytes > MaxReflectionLength ||
-            in.size() < code_dwords * sizeof(u32) + header_bytes + reflection_bytes) {
-            LOG_WARNING(Render, "Saved shader list {} is cut short after {} shaders",
-                        save_path.string(), i);
-            break;
-        }
-        if (code_dwords == 0) {
-            break;
-        }
-        Shader shader{.type = type, .found_ns = now, .stage = stage, .use_order = use_order};
-        use_counter = std::max(use_counter, use_order);
-        shader.code.resize(code_dwords);
-        std::memcpy(shader.code.data(), in.data(), code_dwords * sizeof(u32));
-        in = in.subspan(code_dwords * sizeof(u32));
-        shader.header.assign(in.begin(), in.begin() + header_bytes);
-        in = in.subspan(header_bytes);
-        shader.reflection.assign(in.begin(), in.begin() + reflection_bytes);
-        in = in.subspan(reflection_bytes);
+    semantic_base = list->semantic_base;
+    tiling_keys = std::move(list->tiling_keys);
+    for (auto& listed : list->shaders) {
+        Shader shader{
+            .code = std::move(listed.code),
+            .header = std::move(listed.header),
+            .reflection = std::move(listed.reflection),
+            .type = listed.type,
+            .found_ns = now,
+            .stage = listed.stage,
+            .use_order = listed.use_order,
+        };
+        use_counter = std::max(use_counter, listed.use_order);
         const bool has_header = !shader.header.empty();
         // One without a header can still be compiled early from the draw states recorded when
         // an earlier run used it, which its saved stage says it did.
-        const bool was_used = stage != NoStage || states.contains(hash);
-        if (shaders.try_emplace(hash, std::move(shader)).second) {
+        const bool was_used = listed.stage != NoStage || states.contains(listed.hash);
+        if (shaders.try_emplace(listed.hash, std::move(shader)).second) {
             ++loaded;
             if (has_header) {
                 ++with_registers;
             }
             if (has_header || was_used) {
-                found_order.push_back(hash);
+                found_order.push_back(listed.hash);
             }
         }
     }
@@ -591,37 +464,15 @@ void ShaderScanner::Load() {
 }
 
 void ShaderScanner::LoadStates() {
-    const auto saved = ReadSaved(states_path, StatesMagic, StatesVersion, "shader draw states");
+    auto saved = ShaderFiles::ReadShaderStates(states_path);
     if (!saved) {
         return;
     }
-    std::span<const u8> in{*saved};
-    u32 count{};
-    if (!Get(in, count)) {
-        return;
-    }
     std::scoped_lock lock{mutex};
+    states = std::move(*saved);
     u32 loaded_states = 0;
-    for (u32 i = 0; i < count; ++i) {
-        u64 hash{};
-        u32 num{};
-        if (!Get(in, hash) || !Get(in, num) || num > MaxStatesPerShader) {
-            break;
-        }
-        auto& list = states[hash];
-        for (u32 k = 0; k < num; ++k) {
-            u32 size{};
-            if (!Get(in, size) || size > MaxStateSize || in.size() < size) {
-                LOG_WARNING(Render, "Saved shader draw states {} are cut short",
-                            states_path.string());
-                return;
-            }
-            if (size > StateKeyBytes) {
-                list.emplace_back(in.begin(), in.begin() + size);
-                ++loaded_states;
-            }
-            in = in.subspan(size);
-        }
+    for (const auto& [hash, list] : states) {
+        loaded_states += static_cast<u32>(list.size());
     }
     LOG_INFO(Render, "Shader scan: {} draw states of {} shaders from earlier runs", loaded_states,
              states.size());
@@ -662,8 +513,8 @@ void ShaderScanner::Save() {
     if (save_path.empty()) {
         return;
     }
-    std::vector<u8> raw;
-    std::vector<u8> states_raw;
+    std::optional<ShaderFiles::ShaderListWriter> writer;
+    ShaderFiles::ShaderStates states_copy;
     u32 count{};
     u32 num_states{};
     {
@@ -672,44 +523,22 @@ void ShaderScanner::Save() {
             return;
         }
         dirty = false;
-        if (!states.empty()) {
-            Put(states_raw, static_cast<u32>(states.size()));
-            for (const auto& [hash, list] : states) {
-                Put(states_raw, hash);
-                Put(states_raw, static_cast<u32>(list.size()));
-                for (const auto& state : list) {
-                    Put(states_raw, static_cast<u32>(state.size()));
-                    states_raw.insert(states_raw.end(), state.begin(), state.end());
-                    ++num_states;
-                }
-            }
+        states_copy = states;
+        for (const auto& [hash, list] : states) {
+            num_states += static_cast<u32>(list.size());
         }
         count = static_cast<u32>(shaders.size());
-        Put(raw, count);
-        Put(raw, static_cast<s32>(semantic_base));
-        Put(raw, static_cast<u32>(tiling_keys.size()));
-        for (const u64 key : tiling_keys) {
-            Put(raw, key);
-        }
+        writer.emplace(count, semantic_base, tiling_keys);
         for (const auto& [hash, shader] : shaders) {
-            Put(raw, hash);
-            Put(raw, shader.type);
-            Put(raw, shader.stage);
-            Put(raw, shader.use_order);
-            Put(raw, static_cast<u32>(shader.code.size()));
-            Put(raw, static_cast<u32>(shader.header.size()));
-            Put(raw, static_cast<u32>(shader.reflection.size()));
-            const auto* code = reinterpret_cast<const u8*>(shader.code.data());
-            raw.insert(raw.end(), code, code + shader.code.size() * sizeof(u32));
-            raw.insert(raw.end(), shader.header.begin(), shader.header.end());
-            raw.insert(raw.end(), shader.reflection.begin(), shader.reflection.end());
+            writer->Add(hash, shader.type, shader.stage, shader.use_order, shader.code,
+                        shader.header, shader.reflection);
         }
     }
     last_save_ns = PerfStats::NowNs();
-    if (!states_raw.empty()) {
-        WriteSaved(states_path, StatesMagic, StatesVersion, states_raw, "shader draw states");
+    if (!states_copy.empty()) {
+        ShaderFiles::WriteShaderStates(states_path, states_copy);
     }
-    const auto size = WriteSaved(save_path, SaveMagic, SaveVersion, raw, "shader list");
+    const auto size = writer->Write(save_path);
     if (!size) {
         return;
     }

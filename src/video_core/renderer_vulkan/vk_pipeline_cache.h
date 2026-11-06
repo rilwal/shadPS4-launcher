@@ -15,6 +15,7 @@
 #include "shader_recompiler/recompiler.h"
 #include "shader_recompiler/specialization.h"
 #include "video_core/amdgpu/regs.h"
+#include "video_core/renderer_vulkan/shader_guess.h"
 #include "video_core/renderer_vulkan/vk_compute_pipeline.h"
 #include "video_core/renderer_vulkan/vk_graphics_pipeline.h"
 #include "video_core/renderer_vulkan/vk_pipeline_compiler.h"
@@ -75,12 +76,6 @@ struct Program {
     void AddPermut(vk::ShaderModule module, Shader::StageSpecialization&& spec, u64 hash) {
         modules.emplace_back(module, std::move(spec), hash);
     }
-};
-
-struct DrawIndirectParams {
-    u16 vertex_sgpr_offset;
-    u32 instance_sgpr_offset;
-    bool is_indirect;
 };
 
 class PipelineCache {
@@ -151,18 +146,6 @@ private:
                                                    size_t perm_idx,
                                                    Shader::Backend::Bindings& binding);
     const Shader::RuntimeInfo& BuildRuntimeInfo(Shader::HwStage stage, Shader::SwStage l_stage);
-    using ColorBuffers = std::array<Shader::PsColorBuffer, AmdGpu::NUM_COLOR_BUFFERS>;
-    /// Builds a stage's runtime info from the registers, so a draw recorded as its registers can
-    /// be built again later. The compute registers are needed for compute, the hull shader's
-    /// info for the local stage.
-    void FillRuntimeInfo(Shader::RuntimeInfo& info, Shader::HwStage stage, Shader::SwStage l_stage,
-                         const AmdGpu::Regs& regs, const AmdGpu::ComputeProgram* cs_regs,
-                         const ColorBuffers& color_buffers, const DrawIndirectParams& indirect,
-                         const Shader::Info* hull_info);
-    /// The render targets as the shader recompiler sees them, before draws mask them.
-    static void FillColorBuffers(const AmdGpu::Regs& regs, ColorBuffers& color_buffers);
-    /// A render target as the fragment shader is specialized on it.
-    Shader::PsColorBuffer ShaderColorBuffer(const Shader::PsColorBuffer& target) const;
 
     [[nodiscard]] bool IsPipelineCacheDirty() const {
         return num_new_pipelines > 0;
@@ -311,7 +294,6 @@ private:
     void CheckVertexGuess(const Shader::ShaderParams& params, std::span<const u8> header,
                           const Shader::Backend::Bindings& start,
                           const Shader::StageSpecialization& spec, u64 perm_hash);
-    static std::optional<Shader::Gcn::FetchShaderData> GuessFetchShader(std::span<const u8> header);
     /// Learns how pixel shader input semantics map to vertex outputs from a first use. GPU
     /// thread; the guess reads semantic_base from any thread.
     void LearnSemanticBase(u64 hash, const Shader::RuntimeInfo& runtime_info);
@@ -367,6 +349,7 @@ private:
     } guess_stats;
     vk::UniquePipelineLayout pipeline_layout;
     Shader::Profile profile{};
+    ShaderHost host{};
     Shader::Pools pools;
     DrawIndirectParams draw_indirect_params{};
     tsl::robin_map<size_t, std::unique_ptr<Program>> program_cache;
@@ -392,10 +375,6 @@ private:
     /// Workers translate the newest found first, since a game tends to use what it just loaded;
     /// the GPU thread takes in the results before looking up a program.
     void StartPrecompile(u32 num_threads);
-    /// Measurement (SHADPS4_TRANSLATE_BENCH=rounds): translates every saved shader with a
-    /// known stage, from its struct, and logs where the time went. Its own thread.
-    void RunTranslateBench(u32 rounds);
-    std::jthread bench_thread;
     void StopPrecompile();
     void RunPrecompile(std::stop_token stop);
     /// Moves finished precompiles into the program and pipeline caches. GPU thread.
@@ -490,17 +469,6 @@ private:
                             const VideoCore::ShaderScanner::Shader& found,
                             const std::vector<std::vector<u8>>& states);
     /// A recorded draw state, built again for this build.
-    struct DrawState {
-        Shader::HwStage hw_stage;
-        Shader::SwStage sw_stage;
-        Shader::RuntimeInfo runtime_info;
-        std::array<u32, Shader::ShaderParams::NumShaderUserData> user_data;
-        u64 flat_layout;
-        std::vector<u32> flat_buf;
-        std::optional<Shader::Gcn::FetchShaderData> fetch;
-        std::vector<std::pair<u32, AmdGpu::Buffer>> vertex_buffers;
-    };
-    std::optional<DrawState> ParseDrawState(std::span<const u8> blob);
     /// Records the draw state a first use was translated for, for PrecompileRecorded next time.
     void RecordDrawState(const Shader::Info& info, const Shader::RuntimeInfo& runtime_info,
                          const Shader::Gcn::FetchShaderData& fetch);
