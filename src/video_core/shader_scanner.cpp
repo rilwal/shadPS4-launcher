@@ -50,7 +50,7 @@ constexpr u64 MaxHeaderLength = 2_KB;
 constexpr u64 HeaderPgmLoOffset = 8;
 /// The saved list: magic, version, the uncompressed size, then the entries compressed.
 constexpr u32 SaveMagic = 0x4e435353; // "SSCN"
-constexpr u32 SaveVersion = 2;
+constexpr u32 SaveVersion = 3;
 constexpr u64 SaveInterval = 30'000'000'000ULL;
 /// Bigger than any real list, so a corrupt size can't ask for a huge allocation.
 constexpr u64 MaxSaveSize = 1_GB;
@@ -589,7 +589,8 @@ void ShaderScanner::NoteFirstUse(u64 hash, u8 stage) {
     if (it != shaders.end()) {
         ++found_ahead;
         leads.push_back((now - it->second.found_ns) / 1e9);
-        if (it->second.stage == NoStage) {
+        // The draw knows the stage; a saved one from an older launch can be wrong.
+        if (it->second.stage != stage) {
             it.value().stage = stage;
             dirty = true;
         }
