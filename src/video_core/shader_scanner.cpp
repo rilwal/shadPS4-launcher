@@ -50,7 +50,7 @@ constexpr u64 MaxHeaderLength = 2_KB;
 constexpr u64 HeaderPgmLoOffset = 8;
 /// The saved list: magic, version, the uncompressed size, then the entries compressed.
 constexpr u32 SaveMagic = 0x4e435353; // "SSCN"
-constexpr u32 SaveVersion = 7;
+constexpr u32 SaveVersion = 8;
 constexpr u32 MaxTilingKeys = 1024;
 constexpr u64 SaveInterval = 30'000'000'000ULL;
 /// Bigger than any real list, so a corrupt size can't ask for a huge allocation.
@@ -489,9 +489,8 @@ void ShaderScanner::Load() {
     std::span<const u8> in{raw};
     u32 count{};
     s32 base{};
-    u8 third_off{};
     u32 num_tiling_keys{};
-    if (!Get(in, count) || !Get(in, base) || !Get(in, third_off) || !Get(in, num_tiling_keys) ||
+    if (!Get(in, count) || !Get(in, base) || !Get(in, num_tiling_keys) ||
         num_tiling_keys > MaxTilingKeys) {
         return;
     }
@@ -504,7 +503,6 @@ void ShaderScanner::Load() {
     const u64 now = PerfStats::NowNs();
     std::scoped_lock lock{mutex};
     semantic_base = base;
-    third_coordinate_off = third_off != 0;
     tiling_keys = std::move(keys);
     for (u32 i = 0; i < count; ++i) {
         u64 hash{};
@@ -627,7 +625,6 @@ void ShaderScanner::Save() {
         count = static_cast<u32>(shaders.size());
         Put(raw, count);
         Put(raw, static_cast<s32>(semantic_base));
-        Put(raw, static_cast<u8>(third_coordinate_off));
         Put(raw, static_cast<u32>(tiling_keys.size()));
         for (const u64 key : tiling_keys) {
             Put(raw, key);
@@ -686,19 +683,6 @@ void ShaderScanner::SetSemanticBase(int base) {
     std::scoped_lock lock{mutex};
     if (semantic_base != base) {
         semantic_base = base;
-        dirty = true;
-    }
-}
-
-bool ShaderScanner::ThirdCoordinateOff() {
-    std::scoped_lock lock{mutex};
-    return third_coordinate_off;
-}
-
-void ShaderScanner::SetThirdCoordinateOff() {
-    std::scoped_lock lock{mutex};
-    if (!third_coordinate_off) {
-        third_coordinate_off = true;
         dirty = true;
     }
 }

@@ -141,9 +141,6 @@ struct Info : InfoPersistent {
     /// With guess_state, the fetch shader to assume (a Gcn::FetchShaderData), since there's
     /// no user data to find the real one with.
     const void* guessed_fetch{};
-    /// With guess_state, whether an image whose third address coordinate is used is guessed
-    /// as 3D. Turned off for games where that turns out wrong.
-    bool guess_third_coordinate{true};
 
     /// A draw's state recorded at an earlier first use, to translate the shader for exactly
     /// that draw without reading guest memory: the flattened user data (which holds every

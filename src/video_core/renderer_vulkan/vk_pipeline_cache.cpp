@@ -874,17 +874,14 @@ void PipelineCache::FlushCompileStats(u64 now_ns) {
                      "another variant; {} came too late; {} queued; "
                      "{} dropped as the wrong stage; {} first uses waited {:.1f} ms for the "
                      "worker compiling them; {} queued were used before a worker got to them; "
-                     "{} replaced after a guess was given up; {} compiled from recorded draw "
-                     "states ({} variants)",
+                     "{} compiled from recorded draw states ({} variants)",
                      seconds, precompile.translated, precompile.shader_objects,
                      precompile.compute_pipelines, precompile.worker_ns / 1e6, precompile.served,
                      precompile.missed, precompile.duplicate, precompile.queue.size(),
                      precompile.rejected, precompile.joined, precompile.joined_ns / 1e6,
-                     precompile.skipped_used, precompile.replaced, precompile.replayed,
-                     precompile.replayed_variants);
+                     precompile.skipped_used, precompile.replayed, precompile.replayed_variants);
             precompile.replayed = precompile.replayed_variants = 0;
             precompile.skipped_used = 0;
-            precompile.replaced = 0;
             precompile.joined = 0;
             precompile.joined_ns = 0;
             precompile.translated = precompile.shader_objects = precompile.compute_pipelines = 0;
@@ -1692,9 +1689,6 @@ void PipelineCache::RunPrecompile(std::stop_token stop) {
     Common::SetCurrentThreadName("shadPS4:Precompile");
     Common::SetCurrentThreadPriority(Common::ThreadPriority::Low);
     shader_scanner->WaitUntilLoaded();
-    if (shader_scanner->ThirdCoordinateOff() && precompile.guess_third_coordinate.exchange(false)) {
-        LOG_INFO(Render_Vulkan, "Not guessing images as 3D, as an earlier run found it wrong");
-    }
     if (const auto saved = shader_scanner->SemanticBase()) {
         int unknown = -1;
         if (semantic_base.compare_exchange_strong(unknown, *saved)) {
@@ -1837,7 +1831,6 @@ void PipelineCache::PrecompileOne(const Precompile::Job& job) {
     auto& info = program->info;
     info.guess_state = true;
     info.guessed_fetch = fetch ? &*fetch : nullptr;
-    info.guess_third_coordinate = precompile.guess_third_coordinate.load();
     thread_local Shader::Pools worker_pools;
     Shader::Backend::Bindings binding{};
     // The struct, the stage and even the code are guesses (the scan may catch bytes that aren't
@@ -1862,12 +1855,8 @@ void PipelineCache::PrecompileOne(const Precompile::Job& job) {
     auto spec = Shader::StageSpecialization(info, *runtime_info, profile, {});
     info.guess_state = false;
     info.guessed_fetch = nullptr;
-    const bool guessed_third =
-        info.guess_third_coordinate && std::ranges::any_of(spec.images, [](const auto& image) {
-            return image.type == AmdGpu::ImageType::Color3D;
-        });
 
-    Precompiled done{.hash = hash, .replace = job.replace};
+    Precompiled done{.hash = hash};
     const bool made_object = PrepareVariant(*program, done, info, std::move(spec), std::move(spv));
     program->prepared = true;
     done.program = std::move(program);
@@ -1879,16 +1868,6 @@ void PipelineCache::PrecompileOne(const Precompile::Job& job) {
     precompile.worker_ns += VideoCore::PerfStats::NowNs() - start;
     precompile.done.push_back(std::move(done));
     precompile.has_done.store(true, std::memory_order_release);
-    if (guessed_third) {
-        // Kept in case the 3D guess is given up; if it was meanwhile, compiled again now.
-        auto again = job;
-        again.replace = true;
-        if (precompile.guess_third_coordinate.load()) {
-            precompile.guessed_third.push_back(again);
-        } else {
-            precompile.queue.push_back(again);
-        }
-    }
 }
 
 bool PipelineCache::PrepareVariant(Program& program, Precompiled& done, const Shader::Info& info,
@@ -2063,7 +2042,7 @@ bool PipelineCache::PrecompileRecorded(const Precompile::Job& job,
     const u64 start = VideoCore::PerfStats::NowNs();
     thread_local Shader::Pools replay_pools;
     std::unique_ptr<Program> program;
-    Precompiled done{.hash = job.hash, .replace = job.replace};
+    Precompiled done{.hash = job.hash};
     u32 objects = 0;
     u32 variants = 0;
     for (const auto& blob : states) {
@@ -2131,29 +2110,6 @@ bool PipelineCache::PrecompileRecorded(const Precompile::Job& job,
     return true;
 }
 
-void PipelineCache::GiveUpThirdCoordinate() {
-    if (!precompile.guess_third_coordinate.exchange(false)) {
-        return;
-    }
-    shader_scanner->SetThirdCoordinateOff();
-    {
-        std::scoped_lock lock{precompile.mutex};
-        u32 requeued = 0;
-        for (const auto& job : precompile.guessed_third) {
-            if (!precompile.used.contains(job.hash)) {
-                precompile.queue.push_back(job);
-                ++requeued;
-            }
-        }
-        precompile.guessed_third.clear();
-        LOG_INFO(Render_Vulkan,
-                 "Images guessed as 3D were right for {} first uses and wrong for {}; no "
-                 "longer guessing 3D, and compiling the {} unused shaders made with it again",
-                 precompile.third_right, precompile.third_wrong, requeued);
-    }
-    precompile.cv.notify_all();
-}
-
 void PipelineCache::ReleaseHeldPrecompiles() {
     if (!precompile.active) {
         return;
@@ -2218,21 +2174,6 @@ void PipelineCache::TakePrecompiled() {
     const auto device = instance.GetDevice();
     for (auto& item : done) {
         const auto [it, fresh] = program_cache.try_emplace(item.hash);
-        if (!fresh && item.replace && it.value() && it.value()->prepared) {
-            // Replaces an early compile made with a guess since given up, still unused.
-            for (const auto& m : it.value()->modules) {
-                if (shader_objects) {
-                    shader_objects->Forget(m.module);
-                }
-                device.destroyShaderModule(m.module);
-            }
-            it.value() = std::move(item.program);
-            for (auto& [perm_hash, compute] : item.computes) {
-                compute_pipelines.try_emplace(ComputePipelineKey{perm_hash}, std::move(compute));
-            }
-            ++precompile.replaced;
-            continue;
-        }
         if (!fresh) {
             // The game got there first.
             for (const auto& m : item.program->modules) {
@@ -2331,19 +2272,6 @@ void PipelineCache::NotePrecompileType(u64 hash, HwStage hw_stage) {
 void PipelineCache::NotePreparedUse(Program& program, u64 hash, bool served,
                                     const Shader::StageSpecialization& spec, u64 perm_hash) {
     program.prepared = false;
-    if (precompile.guess_third_coordinate.load()) {
-        const auto& guess = program.modules[0].spec.images;
-        for (size_t i = 0; i < guess.size() && i < spec.images.size(); ++i) {
-            if (guess[i].type == AmdGpu::ImageType::Color3D) {
-                ++(spec.images[i].type == AmdGpu::ImageType::Color3D ? precompile.third_right
-                                                                     : precompile.third_wrong);
-            }
-        }
-        // Mostly wrong in some games (Bloodborne keeps a value past many 2D coordinates).
-        if (precompile.third_wrong >= 6 && precompile.third_wrong > 2 * precompile.third_right) {
-            GiveUpThirdCoordinate();
-        }
-    }
     if (shader_scanner) {
         shader_scanner->NoteFirstUse(
             hash, static_cast<u8>(

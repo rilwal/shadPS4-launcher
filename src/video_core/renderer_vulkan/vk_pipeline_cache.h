@@ -405,7 +405,6 @@ private:
         std::unique_ptr<Program> program;
         /// Compute pipelines by variant hash.
         std::vector<std::pair<u64, std::unique_ptr<ComputePipeline>>> computes;
-        bool replace{};
     };
     struct Precompile {
         std::mutex mutex;
@@ -417,8 +416,6 @@ private:
             u64 addr;
             /// When an earlier run first used it (ShaderScanner::Shader::use_order).
             u32 use_order;
-            /// Compiled again to replace an early compile made with a guess since given up.
-            bool replace{};
         };
         /// Waiting for a worker, newest last.
         std::vector<Job> queue;
@@ -459,14 +456,6 @@ private:
         u32 skipped_used{};
         /// Shaders whose guessed translation failed, so they wait for their draw.
         u32 rejected{};
-        /// Images guessed as 3D, and how many of those first uses bound a 3D image; the
-        /// guess is given up when it's mostly wrong, and the shaders made with it compiled
-        /// again.
-        std::atomic<bool> guess_third_coordinate{true};
-        u32 third_right{};
-        u32 third_wrong{};
-        std::vector<Job> guessed_third;
-        u32 replaced{};
         /// Shaders compiled early from recorded draw states, and the variants made.
         u32 replayed{};
         u32 replayed_variants{};
@@ -489,9 +478,6 @@ private:
     /// Records the draw state a first use was translated for, for PrecompileRecorded next time.
     void RecordDrawState(const Shader::Info& info, const Shader::RuntimeInfo& runtime_info,
                          const Shader::Gcn::FetchShaderData& fetch);
-    /// Stops guessing images as 3D and queues the shaders compiled early with that guess
-    /// again. GPU thread.
-    void GiveUpThirdCoordinate();
     /// A queue entry for a found shader, with where it was found and when it was first used.
     Precompile::Job MakePrecompileJob(u64 hash, Shader::HwStage stage);
     /// Index of the queued shader a worker should compile next. Under the precompile lock.

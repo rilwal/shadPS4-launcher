@@ -101,10 +101,6 @@ public:
     /// learned, saved with the list.
     std::optional<int> SemanticBase();
     void SetSemanticBase(int base);
-    /// Whether an earlier run found that guessing images as 3D from their address goes wrong
-    /// in this game, saved with the list.
-    bool ThirdCoordinateOff();
-    void SetThirdCoordinateOff();
     /// Tiling pipelines (TileManager's packed keys) the game used, saved with the list so they
     /// can be built ahead next time.
     std::vector<u64> TilingKeys();
@@ -175,7 +171,6 @@ private:
     /// The last use_order given.
     u32 use_counter{};
     int semantic_base{-1};
-    bool third_coordinate_off{};
     std::vector<u64> tiling_keys;
     tsl::robin_map<u64, std::vector<std::vector<u8>>> states;
     std::filesystem::path states_path;
