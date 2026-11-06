@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 #include <algorithm>
+#include <bit>
 #include <cstdlib>
 #include <limits>
 #include <string_view>
@@ -920,6 +921,22 @@ void TextureCache::RefreshImage(Image& image) {
         image.upload_hash = hash;
     } else {
         image.upload_hash = 0;
+        // Why a repeat upload wasn't checked, for a few uploads per image (1st, 2nd, 4th, ...).
+        if (SkipsSameUploads() && std::has_single_bit(image.upload_count)) {
+            const char* reason = image.changed_uploads >= MaxChangedUploads ? "its data changes"
+                                 : True(image.flags & ImageFlagBits::GpuModified)
+                                     ? "the GPU wrote the image"
+                                 : True(image.flags & ImageFlagBits::GpuDirty)
+                                     ? "the GPU wrote its memory"
+                                     : "its memory is GPU-modified in the buffer cache";
+            LOG_INFO(Render_Vulkan,
+                     "Upload {} of image {:#x} ({}x{} {} {}, {} KB, flags {:#x}) not checked for "
+                     "changes: {}",
+                     image.upload_count + 1, image.info.guest_address, image.info.size.width,
+                     image.info.size.height, vk::to_string(image.info.pixel_format),
+                     image.info.props.is_tiled ? "tiled" : "linear", image.info.guest_size / 1024,
+                     static_cast<u32>(image.flags), reason);
+        }
     }
     ++image.upload_count;
 
