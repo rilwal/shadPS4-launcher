@@ -881,6 +881,14 @@ void PipelineCache::FlushCompileStats(u64 now_ns) {
                  stats.background, bg_created, bg_driver_ns / 1e6, bg_worst_driver_ns / 1e6,
                  bg_worst_latency_ns / 1e6, stats.skipped_draws, stats.waited_draws, stats.ran_now,
                  stats.waited_ns / 1e6, compiler->Pending());
+        if (frames.count != 0) {
+            auto per_frame = frames.costs;
+            for (u64& cost : per_frame) {
+                cost /= frames.count;
+            }
+            LOG_INFO(Render, "GPU thread per frame over {:.1f} s: {}", seconds,
+                     VideoCore::PerfStats::Frames::DescribeCosts(per_frame));
+        }
     }
     if (stats.shaders != 0) {
         // Where the GPU thread's recompile time went, largest first.

@@ -65,6 +65,8 @@ inline thread_local bool is_gpu_thread = false;
 /// loading screen's pace doesn't hide a hitch in gameplay. Its stall is the time past that
 /// median, which is how long the game was actually held up.
 struct Frames {
+    static constexpr size_t CostCount = static_cast<size_t>(Cost::Count);
+
     /// Frames longer than this count as hitches (two 60 Hz frames).
     static constexpr u64 HitchNs = 33'333'333;
     /// Frames the median looks back over, and how many it needs first.
@@ -138,6 +140,12 @@ struct Frames {
             for (size_t i = 0; i < CostCount; ++i) {
                 previous_costs[i] = costs[i].exchange(0, std::memory_order_relaxed);
             }
+            {
+                std::scoped_lock lock{window_mutex};
+                for (size_t i = 0; i < CostCount; ++i) {
+                    window_costs[i] += previous_costs[i];
+                }
+            }
             pace[next_pace] = delta;
             next_pace = (next_pace + 1) % PaceFrames;
             ++num_paced;
@@ -167,7 +175,25 @@ struct Frames {
         u64 p999_ns;
         u64 total_stutters;
         u64 total_stall_ns;
+        /// The GPU thread's costs summed over the window's frames.
+        std::array<u64, CostCount> costs;
     };
+
+    /// One line of costs, as the stutter log prints them.
+    static std::string DescribeCosts(const std::array<u64, CostCount>& c) {
+        const auto ms = [&](Cost cost) { return c[static_cast<size_t>(cost)] / 1e6; };
+        const u64 named = c[size_t(Cost::Shaders)] + c[size_t(Cost::Textures)] +
+                          c[size_t(Cost::Buffers)] + c[size_t(Cost::GpuWaits)] +
+                          c[size_t(Cost::Submits)] + c[size_t(Cost::Presents)];
+        const u64 busy = c[size_t(Cost::Busy)];
+        return fmt::format("busy {:.1f} ms (shaders {:.1f}, textures {:.1f}, buffers {:.1f}, GPU "
+                           "waits {:.1f}, submits {:.1f}, present waits {:.1f}, other {:.1f}), "
+                           "guest waits {:.1f} ms; page faults {} taking {:.1f} ms",
+                           busy / 1e6, ms(Cost::Shaders), ms(Cost::Textures), ms(Cost::Buffers),
+                           ms(Cost::GpuWaits), ms(Cost::Submits), ms(Cost::Presents),
+                           busy > named ? (busy - named) / 1e6 : 0.0, ms(Cost::GuestWaits),
+                           c[size_t(Cost::NumFaults)], ms(Cost::Faults));
+    }
 
     /// Returns the counts since the last call and starts a new window.
     Window Take() {
@@ -184,6 +210,7 @@ struct Frames {
             window.stall_ns = std::exchange(window_stall_ns, 0);
             window.over_50 = std::exchange(window_over_50, 0);
             window.over_100 = std::exchange(window_over_100, 0);
+            window.costs = std::exchange(window_costs, {});
         }
         window.total_stutters = total_stutters.load(std::memory_order_relaxed);
         window.total_stall_ns = total_stall_ns.load(std::memory_order_relaxed);
@@ -201,23 +228,6 @@ struct Frames {
     }
 
 private:
-    static constexpr size_t CostCount = static_cast<size_t>(Cost::Count);
-
-    static std::string DescribeCosts(const std::array<u64, CostCount>& c) {
-        const auto ms = [&](Cost cost) { return c[static_cast<size_t>(cost)] / 1e6; };
-        const u64 named = c[size_t(Cost::Shaders)] + c[size_t(Cost::Textures)] +
-                          c[size_t(Cost::Buffers)] + c[size_t(Cost::GpuWaits)] +
-                          c[size_t(Cost::Submits)] + c[size_t(Cost::Presents)];
-        const u64 busy = c[size_t(Cost::Busy)];
-        return fmt::format("busy {:.1f} ms (shaders {:.1f}, textures {:.1f}, buffers {:.1f}, GPU "
-                           "waits {:.1f}, submits {:.1f}, present waits {:.1f}, other {:.1f}), "
-                           "guest waits {:.1f} ms; page faults {} taking {:.1f} ms",
-                           busy / 1e6, ms(Cost::Shaders), ms(Cost::Textures), ms(Cost::Buffers),
-                           ms(Cost::GpuWaits), ms(Cost::Submits), ms(Cost::Presents),
-                           busy > named ? (busy - named) / 1e6 : 0.0, ms(Cost::GuestWaits),
-                           c[size_t(Cost::NumFaults)], ms(Cost::Faults));
-    }
-
     std::array<std::atomic<u64>, CostCount> costs{};
     std::array<u64, CostCount> previous_costs{}; // presenter thread only
     u64 last_ns{};                               // presenter thread only
@@ -230,6 +240,7 @@ private:
     u64 window_stall_ns{};
     u64 window_over_50{};
     u64 window_over_100{};
+    std::array<u64, CostCount> window_costs{};
 };
 
 inline Frames frames;
