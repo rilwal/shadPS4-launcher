@@ -52,7 +52,7 @@ constexpr u64 HeaderPgmLoOffset = 8;
 constexpr u64 MaxReflectionLength = 6_KB;
 /// The saved list: magic, version, the uncompressed size, then the entries compressed.
 constexpr u32 SaveMagic = 0x4e435353; // "SSCN"
-constexpr u32 SaveVersion = 9;
+constexpr u32 SaveVersion = 10;
 constexpr u32 MaxTilingKeys = 1024;
 constexpr u64 SaveInterval = 30'000'000'000ULL;
 /// Bigger than any real list, so a corrupt size can't ask for a huge allocation.
