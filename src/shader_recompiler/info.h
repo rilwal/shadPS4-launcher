@@ -145,6 +145,17 @@ struct Info : InfoPersistent {
     /// as 3D. Turned off for games where that turns out wrong.
     bool guess_third_coordinate{true};
 
+    /// A draw's state recorded at an earlier first use, to translate the shader for exactly
+    /// that draw without reading guest memory: the flattened user data (which holds every
+    /// sharp the shader reads), the fetch shader and the vertex buffer V#s by dword offset.
+    struct ReplayState {
+        std::span<const u32> flat_buf;
+        /// A Gcn::FetchShaderData, or null without one.
+        const void* fetch{};
+        std::span<const std::pair<u32, AmdGpu::Buffer>> vertex_buffers;
+    };
+    const ReplayState* replay{};
+
     std::array<Interpolation, IR::NumParams> fs_interpolation{};
 
     Info() = default;
@@ -176,6 +187,13 @@ struct Info : InfoPersistent {
 
     void RefreshFlatBuf() {
         flattened_ud_buf.resize(srt_info.flattened_bufsize_dw);
+        if (replay) {
+            std::ranges::fill(flattened_ud_buf, 0u);
+            std::copy_n(replay->flat_buf.begin(),
+                        std::min(replay->flat_buf.size(), flattened_ud_buf.size()),
+                        flattened_ud_buf.begin());
+            return;
+        }
         if (guess_state) {
             std::ranges::fill(flattened_ud_buf, 0u);
             return;

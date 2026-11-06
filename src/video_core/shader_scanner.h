@@ -110,6 +110,12 @@ public:
     std::vector<u64> TilingKeys();
     void NoteTilingKey(u64 key);
 
+    /// Draw states recorded at first uses, as PipelineCache's opaque blobs, so later launches
+    /// can compile shaders for exactly what they were drawn with. Saved apart from the list, in
+    /// a file with no shader code, so it can be shared.
+    void NoteState(u64 hash, std::vector<u8> state);
+    std::vector<std::vector<u8>> StatesOf(u64 hash);
+
     /// Waits until the shaders saved by earlier runs are loaded.
     void WaitUntilLoaded() const;
 
@@ -146,6 +152,7 @@ private:
     /// The shaders found in earlier runs of this game, saved so that the next launch knows them
     /// from the start instead of waiting for the scan to find them again.
     void Load();
+    void LoadStates();
     void Save();
 
     std::filesystem::path save_path;
@@ -170,6 +177,8 @@ private:
     int semantic_base{-1};
     bool third_coordinate_off{};
     std::vector<u64> tiling_keys;
+    tsl::robin_map<u64, std::vector<std::vector<u8>>> states;
+    std::filesystem::path states_path;
     size_t recent_use_index{};
     /// Scan totals, for the per-pass log.
     u32 pass_new{};

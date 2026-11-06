@@ -60,8 +60,8 @@ public:
     /// Called with each tiling pipeline the game needs that wasn't built yet, as a packed key,
     /// so it can be saved and prepared ahead next time. GPU thread.
     void SetKeyObserver(std::function<void(u64)> observer);
-    /// Builds the tiling pipelines for the packed keys `keys` returns on a background thread,
-    /// so the first image that needs one doesn't wait for the driver.
+    /// Builds the tiling pipelines for the packed keys `keys` returns, then a common set, on a
+    /// background thread, so the first image that needs one doesn't wait for the driver.
     void Prepare(std::function<std::vector<u64>()> keys);
     /// Waits for Prepare's thread, before what its `keys` uses goes away.
     void StopPrepare();

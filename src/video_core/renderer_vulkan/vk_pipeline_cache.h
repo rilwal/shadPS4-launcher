@@ -60,11 +60,12 @@ struct Program {
 
     Shader::Info info;
     ModuleList modules{};
-    /// Translated ahead of its first use with guessed draw state, as variant 0. Cleared at the
+    /// Translated ahead of its first use, with guessed or recorded draw state. Cleared at the
     /// first use, which is counted as served or not.
     bool prepared{};
-    /// Variant 0's SPIR-V while prepared, registered with the cache if a draw uses it.
-    std::vector<u32> prepared_spv;
+    /// The prepared variants' SPIR-V by variant hash, registered with the cache if a draw uses
+    /// one.
+    std::vector<std::pair<u64, std::vector<u32>>> prepared_spv;
 
     Program() = default;
     Program(Shader::HwStage stage, Shader::SwStage l_stage, Shader::ShaderParams params)
@@ -402,8 +403,8 @@ private:
     struct Precompiled {
         u64 hash;
         std::unique_ptr<Program> program;
-        std::unique_ptr<ComputePipeline> compute;
-        u64 perm_hash;
+        /// Compute pipelines by variant hash.
+        std::vector<std::pair<u64, std::unique_ptr<ComputePipeline>>> computes;
         bool replace{};
     };
     struct Precompile {
@@ -466,6 +467,9 @@ private:
         u32 third_wrong{};
         std::vector<Job> guessed_third;
         u32 replaced{};
+        /// Shaders compiled early from recorded draw states, and the variants made.
+        u32 replayed{};
+        u32 replayed_variants{};
         /// First uses that waited for the worker compiling them, and how long.
         u32 joined{};
         u64 joined_ns{};
@@ -473,6 +477,18 @@ private:
         std::vector<std::jthread> threads;
     } precompile;
     void PrecompileOne(const Precompile::Job& job);
+    /// Compiles one early variant's SPIR-V and builds its driver part, adding it to `program`
+    /// and `done`. Returns whether it made a shader object.
+    bool PrepareVariant(Program& program, Precompiled& done, const Shader::Info& info,
+                        Shader::StageSpecialization&& spec, std::vector<u32>&& spv);
+    /// Compiles a shader early for each draw state recorded at its first uses in earlier runs.
+    /// Returns false when none of them could be used.
+    bool PrecompileRecorded(const Precompile::Job& job,
+                            const VideoCore::ShaderScanner::Shader& found,
+                            const std::vector<std::vector<u8>>& states);
+    /// Records the draw state a first use was translated for, for PrecompileRecorded next time.
+    void RecordDrawState(const Shader::Info& info, const Shader::RuntimeInfo& runtime_info,
+                         const Shader::Gcn::FetchShaderData& fetch);
     /// Stops guessing images as 3D and queues the shaders compiled early with that guess
     /// again. GPU thread.
     void GiveUpThirdCoordinate();

@@ -617,6 +617,9 @@ static bool GuessTranslated(const Shader::Info& info, HwStage hw_stage) {
            (hw_stage == HwStage::Compute || static_cast<u32>(info.shared_types) == 0);
 }
 
+/// The program user data a prepared program keeps until its first use fills in the draw's.
+static constexpr std::array<u32, Shader::ShaderParams::NumShaderUserData> NoUserData{};
+
 /// The stages whose register state a shader's struct gives.
 static bool PrecompilesStage(HwStage stage) {
     return stage == HwStage::Fragment || stage == HwStage::Compute || stage == HwStage::Vertex;
@@ -871,12 +874,15 @@ void PipelineCache::FlushCompileStats(u64 now_ns) {
                      "another variant; {} came too late; {} queued; "
                      "{} dropped as the wrong stage; {} first uses waited {:.1f} ms for the "
                      "worker compiling them; {} queued were used before a worker got to them; "
-                     "{} replaced after a guess was given up",
+                     "{} replaced after a guess was given up; {} compiled from recorded draw "
+                     "states ({} variants)",
                      seconds, precompile.translated, precompile.shader_objects,
                      precompile.compute_pipelines, precompile.worker_ns / 1e6, precompile.served,
                      precompile.missed, precompile.duplicate, precompile.queue.size(),
                      precompile.rejected, precompile.joined, precompile.joined_ns / 1e6,
-                     precompile.skipped_used, precompile.replaced);
+                     precompile.skipped_used, precompile.replaced, precompile.replayed,
+                     precompile.replayed_variants);
+            precompile.replayed = precompile.replayed_variants = 0;
             precompile.skipped_used = 0;
             precompile.replaced = 0;
             precompile.joined = 0;
@@ -1543,6 +1549,7 @@ PipelineCache::Result PipelineCache::GetProgram(HwStage hw_stage, SwStage sw_sta
         const auto [module, perm_hash] =
             CompileModule(program->info, runtime_info, params.code, 0, binding);
         auto spec = Shader::StageSpecialization(program->info, runtime_info, profile, start);
+        RecordDrawState(program->info, runtime_info, spec.fetch_shader_data);
         if (guess_check && shader_scanner && shader_scanner->Find(params.hash)) {
             CheckGuess(hw_stage, sw_stage, params, runtime_info, start, spec, perm_hash);
         }
@@ -1571,6 +1578,7 @@ PipelineCache::Result PipelineCache::GetProgram(HwStage hw_stage, SwStage sw_sta
     if (program->prepared) {
         NotePreparedUse(*program, params.hash, it != program->modules.end(), spec,
                         it != program->modules.end() ? it->hash : 0);
+        RecordDrawState(info, runtime_info, spec.fetch_shader_data);
     }
     if (it == program->modules.end()) {
         ++compile_stats.permutations;
@@ -1596,6 +1604,7 @@ PipelineCache::Result PipelineCache::GetProgram(HwStage hw_stage, SwStage sw_sta
         auto new_info = Shader::Info(hw_stage, sw_stage, params);
         std::tie(module, perm_hash) =
             CompileModule(new_info, runtime_info, params.code, perm_idx, binding);
+        RecordDrawState(new_info, runtime_info, spec.fetch_shader_data);
 
         if (const auto guessed = guessed_hashes.find(params.hash);
             guessed != guessed_hashes.end()) {
@@ -1775,7 +1784,15 @@ void PipelineCache::PrecompileOne(const Precompile::Job& job) {
     const auto sw_stage = hw_stage == HwStage::Compute  ? SwStage::Compute
                           : hw_stage == HwStage::Vertex ? SwStage::Vertex
                                                         : SwStage::Fragment;
-    if (!found || found->header.empty()) {
+    if (!found) {
+        return;
+    }
+    // Earlier runs' first uses say exactly what to compile.
+    if (const auto states = shader_scanner->StatesOf(hash);
+        !states.empty() && PrecompileRecorded(job, *found, states)) {
+        return;
+    }
+    if (found->header.empty()) {
         return;
     }
     auto runtime_info = GuessRuntimeInfo(hw_stage, sw_stage, found->header);
@@ -1811,7 +1828,6 @@ void PipelineCache::PrecompileOne(const Precompile::Job& job) {
         }
     }
     // Nothing is known of the draw's user data; the first use fills it in.
-    static constexpr std::array<u32, Shader::ShaderParams::NumShaderUserData> NoUserData{};
     const Shader::ShaderParams params{
         .user_data = NoUserData,
         .code = found->code,
@@ -1851,15 +1867,43 @@ void PipelineCache::PrecompileOne(const Precompile::Job& job) {
             return image.type == AmdGpu::ImageType::Color3D;
         });
 
+    Precompiled done{.hash = hash, .replace = job.replace};
+    const bool made_object = PrepareVariant(*program, done, info, std::move(spec), std::move(spv));
+    program->prepared = true;
+    done.program = std::move(program);
+
+    std::scoped_lock lock{precompile.mutex};
+    ++precompile.translated;
+    precompile.shader_objects += made_object ? 1 : 0;
+    precompile.compute_pipelines += static_cast<u32>(done.computes.size());
+    precompile.worker_ns += VideoCore::PerfStats::NowNs() - start;
+    precompile.done.push_back(std::move(done));
+    precompile.has_done.store(true, std::memory_order_release);
+    if (guessed_third) {
+        // Kept in case the 3D guess is given up; if it was meanwhile, compiled again now.
+        auto again = job;
+        again.replace = true;
+        if (precompile.guess_third_coordinate.load()) {
+            precompile.guessed_third.push_back(again);
+        } else {
+            precompile.queue.push_back(again);
+        }
+    }
+}
+
+bool PipelineCache::PrepareVariant(Program& program, Precompiled& done, const Shader::Info& info,
+                                   Shader::StageSpecialization&& spec, std::vector<u32>&& spv) {
+    const auto hw_stage = info.hw_stage;
     const auto device = instance.GetDevice();
     const auto module = CompileSPV(spv, device);
-    Vulkan::SetObjectName(device, module, "{} (found early)", GetShaderName(hw_stage, hash, 0));
-    const u64 perm_hash = HashCombine(hash, XXH3_64bits(spv.data(), spv.size() * sizeof(u32)));
-    program->AddPermut(module, std::move(spec), perm_hash);
+    Vulkan::SetObjectName(device, module, "{} (found early)",
+                          GetShaderName(hw_stage, info.pgm_hash, program.modules.size()));
+    const u64 perm_hash =
+        HashCombine(info.pgm_hash, XXH3_64bits(spv.data(), spv.size() * sizeof(u32)));
+    program.AddPermut(module, std::move(spec), perm_hash);
 
     // The driver's part: a shader object for a fragment shader, which every pipeline using it
     // shares; a whole pipeline for a compute shader, which is the shader alone.
-    Precompiled done{.hash = hash, .perm_hash = perm_hash, .replace = job.replace};
     bool made_object = false;
     if ((hw_stage == HwStage::Fragment || hw_stage == HwStage::Vertex) && shader_objects) {
         shader_objects->Register(module, spv);
@@ -1877,33 +1921,214 @@ void PipelineCache::PrecompileOne(const Precompile::Job& job) {
         made_object = true;
     } else if (hw_stage == HwStage::Compute) {
         ComputePipeline::SerializationSupport sdata{};
-        done.compute = std::make_unique<ComputePipeline>(
-            instance, scheduler, desc_heap, profile, *pipeline_cache, ComputePipelineKey{perm_hash},
-            info, module, sdata, false, nullptr);
+        done.computes.emplace_back(perm_hash, std::make_unique<ComputePipeline>(
+                                                  instance, scheduler, desc_heap, profile,
+                                                  *pipeline_cache, ComputePipelineKey{perm_hash},
+                                                  info, module, sdata, false, nullptr));
     } else if (shader_objects) {
         shader_objects->Register(module, spv);
     }
-    program->prepared = true;
-    program->prepared_spv = std::move(spv);
-    done.program = std::move(program);
+    program.prepared_spv.emplace_back(perm_hash, std::move(spv));
+    return made_object;
+}
 
+namespace {
+
+/// Recorded draw states: the version, then the stages, the runtime info, the user data, the
+/// flattened user data, the fetch shader and the vertex buffer V#s. Laid out in this build's
+/// structs, so the version changes with their sizes.
+constexpr u32 DrawStateVersion = (1u << 24) ^ u32(sizeof(Shader::RuntimeInfo)) ^
+                                 u32(sizeof(Shader::Gcn::VertexAttribute) << 16) ^
+                                 u32(sizeof(AmdGpu::Buffer) << 20);
+static_assert(std::is_trivially_copyable_v<Shader::RuntimeInfo>);
+static_assert(std::is_trivially_copyable_v<Shader::Gcn::VertexAttribute>);
+static_assert(std::is_trivially_copyable_v<AmdGpu::Buffer>);
+
+struct DrawState {
+    HwStage hw_stage;
+    SwStage sw_stage;
+    Shader::RuntimeInfo runtime_info;
+    std::array<u32, Shader::ShaderParams::NumShaderUserData> user_data;
+    std::vector<u32> flat_buf;
+    std::optional<Shader::Gcn::FetchShaderData> fetch;
+    std::vector<std::pair<u32, AmdGpu::Buffer>> vertex_buffers;
+};
+
+template <typename T>
+void PutState(std::vector<u8>& out, const T& value) {
+    const auto* bytes = reinterpret_cast<const u8*>(&value);
+    out.insert(out.end(), bytes, bytes + sizeof(T));
+}
+
+template <typename T>
+bool GetState(std::span<const u8>& in, T& value) {
+    if (in.size() < sizeof(T)) {
+        return false;
+    }
+    std::memcpy(&value, in.data(), sizeof(T));
+    in = in.subspan(sizeof(T));
+    return true;
+}
+
+std::optional<DrawState> ParseDrawState(std::span<const u8> in) {
+    u32 version{};
+    u8 hw{};
+    u8 sw{};
+    DrawState state{};
+    u32 flat_size{};
+    if (!GetState(in, version) || version != DrawStateVersion || !GetState(in, hw) ||
+        !GetState(in, sw) || !GetState(in, state.runtime_info) || !GetState(in, state.user_data) ||
+        !GetState(in, flat_size) || in.size() < flat_size * sizeof(u32)) {
+        return std::nullopt;
+    }
+    state.hw_stage = static_cast<HwStage>(hw);
+    state.sw_stage = static_cast<SwStage>(sw);
+    state.flat_buf.resize(flat_size);
+    std::memcpy(state.flat_buf.data(), in.data(), flat_size * sizeof(u32));
+    in = in.subspan(flat_size * sizeof(u32));
+    u32 fetch_size{};
+    if (!GetState(in, fetch_size)) {
+        return std::nullopt;
+    }
+    if (fetch_size != 0) {
+        auto& fetch = state.fetch.emplace();
+        fetch.size = fetch_size;
+        u32 num_attributes{};
+        if (!GetState(in, fetch.vertex_offset_sgpr) || !GetState(in, fetch.instance_offset_sgpr) ||
+            !GetState(in, num_attributes) || num_attributes > Shader::IR::NumParams) {
+            return std::nullopt;
+        }
+        for (u32 i = 0; i < num_attributes; ++i) {
+            Shader::Gcn::VertexAttribute attribute{};
+            if (!GetState(in, attribute)) {
+                return std::nullopt;
+            }
+            fetch.attributes.push_back(attribute);
+        }
+    }
+    u32 num_buffers{};
+    if (!GetState(in, num_buffers) || num_buffers > Shader::IR::NumParams) {
+        return std::nullopt;
+    }
+    for (u32 i = 0; i < num_buffers; ++i) {
+        std::pair<u32, AmdGpu::Buffer> buffer{};
+        if (!GetState(in, buffer.first) || !GetState(in, buffer.second)) {
+            return std::nullopt;
+        }
+        state.vertex_buffers.push_back(buffer);
+    }
+    return state;
+}
+
+} // namespace
+
+void PipelineCache::RecordDrawState(const Shader::Info& info,
+                                    const Shader::RuntimeInfo& runtime_info,
+                                    const Shader::Gcn::FetchShaderData& fetch) {
+    if (!precompile.active || !PrecompilesStage(PrecompileStageOf(info.hw_stage, info.sw_stage))) {
+        return;
+    }
+    std::vector<u8> out;
+    PutState(out, DrawStateVersion);
+    PutState(out, static_cast<u8>(info.hw_stage));
+    PutState(out, static_cast<u8>(info.sw_stage));
+    PutState(out, runtime_info);
+    std::array<u32, Shader::ShaderParams::NumShaderUserData> user_data{};
+    std::copy_n(info.user_data.begin(), std::min(info.user_data.size(), user_data.size()),
+                user_data.begin());
+    PutState(out, user_data);
+    PutState(out, static_cast<u32>(info.flattened_ud_buf.size()));
+    const auto* flat = reinterpret_cast<const u8*>(info.flattened_ud_buf.data());
+    out.insert(out.end(), flat, flat + info.flattened_ud_buf.size() * sizeof(u32));
+    PutState(out, fetch.size);
+    if (fetch.size != 0) {
+        PutState(out, fetch.vertex_offset_sgpr);
+        PutState(out, fetch.instance_offset_sgpr);
+        PutState(out, static_cast<u32>(fetch.attributes.size()));
+        for (const auto& attribute : fetch.attributes) {
+            PutState(out, attribute);
+        }
+    }
+    PutState(out, static_cast<u32>(fetch.attributes.size()));
+    for (const auto& attribute : fetch.attributes) {
+        PutState(out, static_cast<u32>(attribute.dword_offset));
+        PutState(out, info.ReadUdReg<AmdGpu::Buffer>(attribute.sgpr_base, attribute.dword_offset));
+    }
+    shader_scanner->NoteState(info.pgm_hash, std::move(out));
+}
+
+bool PipelineCache::PrecompileRecorded(const Precompile::Job& job,
+                                       const VideoCore::ShaderScanner::Shader& found,
+                                       const std::vector<std::vector<u8>>& states) {
+    const u64 start = VideoCore::PerfStats::NowNs();
+    thread_local Shader::Pools replay_pools;
+    std::unique_ptr<Program> program;
+    Precompiled done{.hash = job.hash, .replace = job.replace};
+    u32 objects = 0;
+    u32 variants = 0;
+    for (const auto& blob : states) {
+        const auto state = ParseDrawState(blob);
+        if (!state || state->hw_stage != job.stage) {
+            continue;
+        }
+        const Shader::ShaderParams params{
+            .user_data = state->user_data,
+            .code = found.code,
+            .hash = job.hash,
+        };
+        Shader::Info info{state->hw_stage, state->sw_stage, params};
+        const Shader::Info::ReplayState replay{
+            .flat_buf = state->flat_buf,
+            .fetch = state->fetch ? &*state->fetch : nullptr,
+            .vertex_buffers = state->vertex_buffers,
+        };
+        info.replay = &replay;
+        auto runtime_info = state->runtime_info;
+        Shader::Backend::Bindings binding{};
+        std::vector<u32> spv;
+        try {
+            const Common::SoftAsserts soft_asserts;
+            const auto ir_program =
+                Shader::TranslateProgram(found.code, replay_pools, info, runtime_info, profile);
+            spv = Shader::Backend::SPIRV::EmitSPIRV(profile, runtime_info, ir_program, binding);
+        } catch (const Common::SoftAssertFailure&) {
+            LOG_INFO(Render_Vulkan, "Recorded draw state of {} shader {:#x} doesn't translate",
+                     job.stage, job.hash);
+            continue;
+        }
+        auto spec = Shader::StageSpecialization(info, runtime_info, profile, {});
+        info.replay = nullptr;
+        info.user_data = NoUserData;
+        if (program && std::ranges::find(program->modules, spec, &Program::Module::spec) !=
+                           program->modules.end()) {
+            continue;
+        }
+        const bool first = !program;
+        if (first) {
+            program = std::make_unique<Program>(state->hw_stage, state->sw_stage, params);
+        }
+        objects += PrepareVariant(*program, done, info, std::move(spec), std::move(spv)) ? 1 : 0;
+        if (first) {
+            program->info = std::move(info);
+        }
+        ++variants;
+    }
+    if (!program) {
+        return false;
+    }
+    program->info.user_data = NoUserData;
+    program->prepared = true;
+    done.program = std::move(program);
     std::scoped_lock lock{precompile.mutex};
     ++precompile.translated;
-    precompile.shader_objects += made_object ? 1 : 0;
-    precompile.compute_pipelines += done.compute ? 1 : 0;
+    ++precompile.replayed;
+    precompile.replayed_variants += variants;
+    precompile.shader_objects += objects;
+    precompile.compute_pipelines += static_cast<u32>(done.computes.size());
     precompile.worker_ns += VideoCore::PerfStats::NowNs() - start;
     precompile.done.push_back(std::move(done));
     precompile.has_done.store(true, std::memory_order_release);
-    if (guessed_third) {
-        // Kept in case the 3D guess is given up; if it was meanwhile, compiled again now.
-        auto again = job;
-        again.replace = true;
-        if (precompile.guess_third_coordinate.load()) {
-            precompile.guessed_third.push_back(again);
-        } else {
-            precompile.queue.push_back(again);
-        }
-    }
+    return true;
 }
 
 void PipelineCache::GiveUpThirdCoordinate() {
@@ -2002,9 +2227,8 @@ void PipelineCache::TakePrecompiled() {
                 device.destroyShaderModule(m.module);
             }
             it.value() = std::move(item.program);
-            if (item.compute) {
-                compute_pipelines.try_emplace(ComputePipelineKey{item.perm_hash},
-                                              std::move(item.compute));
+            for (auto& [perm_hash, compute] : item.computes) {
+                compute_pipelines.try_emplace(ComputePipelineKey{perm_hash}, std::move(compute));
             }
             ++precompile.replaced;
             continue;
@@ -2021,9 +2245,8 @@ void PipelineCache::TakePrecompiled() {
             continue;
         }
         it.value() = std::move(item.program);
-        if (item.compute) {
-            compute_pipelines.try_emplace(ComputePipelineKey{item.perm_hash},
-                                          std::move(item.compute));
+        for (auto& [perm_hash, compute] : item.computes) {
+            compute_pipelines.try_emplace(ComputePipelineKey{perm_hash}, std::move(compute));
         }
     }
 }
@@ -2128,8 +2351,15 @@ void PipelineCache::NotePreparedUse(Program& program, u64 hash, bool served,
     }
     if (served) {
         ++precompile.served;
-        RegisterShaderMeta(program.info, spec.fetch_shader_data, spec, perm_hash, 0);
-        RegisterShaderBinary(std::move(program.prepared_spv), perm_hash);
+        const auto module_it =
+            std::ranges::find(program.modules, perm_hash, &Program::Module::hash);
+        RegisterShaderMeta(program.info, spec.fetch_shader_data, spec, perm_hash,
+                           std::distance(program.modules.begin(), module_it));
+        if (const auto spv = std::ranges::find(program.prepared_spv, perm_hash,
+                                               &std::pair<u64, std::vector<u32>>::first);
+            spv != program.prepared_spv.end()) {
+            RegisterShaderBinary(std::move(spv->second), perm_hash);
+        }
         LOG_INFO(Render_Vulkan, "{} shader {:#x} was compiled early and served its first use",
                  program.info.hw_stage, hash);
     } else {

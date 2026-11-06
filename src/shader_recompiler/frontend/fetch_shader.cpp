@@ -44,6 +44,13 @@ bool ParseFetchShader(const Shader::Info& info, FetchShaderData& out_fetch_data)
     if (!info.has_fetch_shader) {
         return false;
     }
+    if (info.replay) {
+        if (!info.replay->fetch) {
+            return false;
+        }
+        out_fetch_data = *static_cast<const FetchShaderData*>(info.replay->fetch);
+        return true;
+    }
     if (info.guess_state) {
         if (!info.guessed_fetch) {
             return false;

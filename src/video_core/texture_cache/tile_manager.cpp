@@ -140,12 +140,52 @@ void TileManager::SetKeyObserver(std::function<void(u64)> observer) {
     key_observer = std::move(observer);
 }
 
+/// Tiling pipelines every game measured so far needs (Bloodborne and The Last Guardian use 18
+/// between them, the same in every run), built ahead on a first launch too.
+static std::vector<u64> CommonKeys() {
+    using AmdGpu::TileMode;
+    struct Common {
+        TileMode mode;
+        u32 bits;
+        bool tiler;
+    };
+    static constexpr std::array<Common, 18> Keys{{
+        {TileMode::Thin1DThin, 8, false},
+        {TileMode::Thin1DThin, 16, false},
+        {TileMode::Thin1DThin, 32, false},
+        {TileMode::Thin1DThin, 64, false},
+        {TileMode::Thin1DThin, 128, false},
+        {TileMode::Display2DThin, 32, false},
+        {TileMode::Thin2DThin, 8, false},
+        {TileMode::Thin2DThin, 32, false},
+        {TileMode::Thin2DThin, 32, true},
+        {TileMode::Thin2DThin, 64, false},
+        {TileMode::Thin2DThin, 64, true},
+        {TileMode::Depth2DThin64, 16, false},
+        {TileMode::Depth2DThin64, 32, false},
+        {TileMode::Depth2DThin64, 32, true},
+        {TileMode::Thick1DThick, 8, false},
+        {TileMode::Thick1DThick, 16, false},
+        {TileMode::Thick1DThick, 32, false},
+        {TileMode::Thick1DThick, 64, false},
+    }};
+    std::vector<u64> keys;
+    for (const auto& key : Keys) {
+        keys.push_back(u64(key.mode) | u64(key.bits) << 8 | u64(1) << 16 | u64(key.tiler) << 24);
+    }
+    return keys;
+}
+
 void TileManager::Prepare(std::function<std::vector<u64>()> keys) {
     prepare_thread = std::jthread([this, keys = std::move(keys)](std::stop_token stop) {
         Common::SetCurrentThreadName("shadPS4:PrepareTiling");
         Common::SetCurrentThreadPriority(Common::ThreadPriority::Low);
         u32 built = 0;
-        for (const u64 packed : keys()) {
+        // The game's own first, then the common ones.
+        auto all = keys();
+        const auto common = CommonKeys();
+        all.insert(all.end(), common.begin(), common.end());
+        for (const u64 packed : all) {
             if (stop.stop_requested()) {
                 return;
             }

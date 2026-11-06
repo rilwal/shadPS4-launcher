@@ -58,7 +58,17 @@ struct VertexAttribute {
             buffer.dst_sel_w = select(3, AmdGpu::CompSwizzle::One);
             return buffer;
         }
-        auto buffer = info.ReadUdReg<AmdGpu::Buffer>(sgpr_base, dword_offset);
+        AmdGpu::Buffer buffer = AmdGpu::Buffer::Null();
+        if (info.replay) {
+            for (const auto& [offset, recorded] : info.replay->vertex_buffers) {
+                if (offset == dword_offset) {
+                    buffer = recorded;
+                    break;
+                }
+            }
+        } else {
+            buffer = info.ReadUdReg<AmdGpu::Buffer>(sgpr_base, dword_offset);
+        }
         buffer.base_address += inst_offset;
         if (data_format) {
             buffer.data_format = data_format;
