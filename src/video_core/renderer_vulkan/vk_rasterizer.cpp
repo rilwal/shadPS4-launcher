@@ -1525,6 +1525,14 @@ bool Rasterizer::InvalidateMemory(VAddr addr, u64 size, bool assume_locks) {
     return true;
 }
 
+void Rasterizer::InvalidateMemoryAhead(VAddr addr, u64 size) {
+    if (!IsMapped(addr, size)) {
+        return;
+    }
+    // Images untrack all of themselves on their first fault, so only buffers need this.
+    buffer_cache.InvalidateMemoryAhead(addr, size);
+}
+
 bool Rasterizer::ReadMemory(VAddr addr, u64 size, bool assume_locks) {
     if (!IsMapped(addr, size)) {
         // Not GPU mapped memory, can skip invalidation logic entirely.

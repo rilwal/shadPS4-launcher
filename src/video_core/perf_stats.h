@@ -44,6 +44,7 @@ enum class Cost : u32 {
     GuestWaits, ///< Spinning on guest waits (wait reg mem, semaphores, CE/DE counters).
     Faults,     ///< Handling guest page faults on tracked memory, summed over every thread.
     NumFaults,  ///< How many of those faults (a count, not time).
+    PagesAhead, ///< Pages unprotected ahead of guests writing in order (a count).
     Count,
 };
 
@@ -188,11 +189,13 @@ struct Frames {
         const u64 busy = c[size_t(Cost::Busy)];
         return fmt::format("busy {:.1f} ms (shaders {:.1f}, textures {:.1f}, buffers {:.1f}, GPU "
                            "waits {:.1f}, submits {:.1f}, present waits {:.1f}, other {:.1f}), "
-                           "guest waits {:.1f} ms; page faults {} taking {:.1f} ms",
+                           "guest waits {:.1f} ms; page faults {} taking {:.1f} ms, {} pages "
+                           "unprotected ahead",
                            busy / 1e6, ms(Cost::Shaders), ms(Cost::Textures), ms(Cost::Buffers),
                            ms(Cost::GpuWaits), ms(Cost::Submits), ms(Cost::Presents),
                            busy > named ? (busy - named) / 1e6 : 0.0, ms(Cost::GuestWaits),
-                           c[size_t(Cost::NumFaults)], ms(Cost::Faults));
+                           c[size_t(Cost::NumFaults)], ms(Cost::Faults),
+                           c[size_t(Cost::PagesAhead)]);
     }
 
     /// Returns the counts since the last call and starts a new window.

@@ -2,6 +2,9 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 #include <algorithm>
+#include <array>
+#include <cstdlib>
+#include <mutex>
 #include <utility>
 #include "common/adaptive_mutex.h"
 #include "common/assert.h"
@@ -37,6 +40,80 @@
 #endif
 
 namespace VideoCore {
+
+namespace {
+
+/// Follows guest threads writing tracked memory in order (streaming data into a buffer), so
+/// their write traps can be removed ahead of them: each fault in such a run unprotects twice as
+/// many pages after it as the last, up to SHADPS4_FAULT_AHEAD_PAGES (0 turns it off). The pages
+/// are only marked as written early, which costs an upload of data that didn't change at worst.
+class FaultAhead {
+public:
+    /// The range to unprotect after a write fault at `addr`, empty if it isn't in a run.
+    std::pair<VAddr, u64> Next(VAddr addr) {
+        const u64 max_pages = MaxPages();
+        if (max_pages == 0) {
+            return {};
+        }
+        const VAddr page = PageManager::GetPageAddr(addr);
+        std::scoped_lock lock{mutex};
+        ++tick;
+        Run* run = std::ranges::find(runs, page, &Run::end);
+        if (run == runs.end()) {
+            // A new run, replacing the one used longest ago.
+            run = std::ranges::min_element(runs, {}, &Run::last_use);
+            *run = Run{.end = page + PageManager::GetPageSize(), .pages = 0, .last_use = tick};
+            return {};
+        }
+        run->pages = std::clamp<u64>(run->pages * 2, 1, max_pages);
+        run->last_use = tick;
+        const VAddr start = page + PageManager::GetPageSize();
+        const u64 size = run->pages * PageManager::GetPageSize();
+        run->end = start + size;
+        return {start, size};
+    }
+
+private:
+    static u64 MaxPages() {
+        static const u64 pages = [] {
+            const char* env = std::getenv("SHADPS4_FAULT_AHEAD_PAGES");
+            return env != nullptr ? std::strtoull(env, nullptr, 10) : u64{64};
+        }();
+        return pages;
+    }
+
+    struct Run {
+        /// The first page the run hasn't unprotected yet, where its next fault lands.
+        VAddr end{};
+        u64 pages{};
+        u64 last_use{};
+    };
+    std::mutex mutex;
+    std::array<Run, 8> runs{};
+    u64 tick{};
+};
+
+FaultAhead fault_ahead;
+
+/// Handles a write fault on tracked memory, then unprotects ahead of it if the guest is
+/// writing in order. Not on the GPU thread, which may hold the trackers' locks.
+bool HandleWriteFault(Vulkan::Rasterizer* rasterizer, VAddr addr, u64 size, bool is_gpu_thread) {
+    const u64 start = PerfStats::NowNs();
+    const bool handled = rasterizer->InvalidateMemory(addr, size, is_gpu_thread);
+    if (handled && !is_gpu_thread) {
+        if (const auto [ahead, ahead_size] = fault_ahead.Next(addr); ahead_size != 0) {
+            rasterizer->InvalidateMemoryAhead(ahead, ahead_size);
+            PerfStats::frames.AddCost(PerfStats::Cost::PagesAhead,
+                                      ahead_size / PageManager::GetPageSize());
+        }
+    }
+    if (handled) {
+        PerfStats::frames.AddFault(PerfStats::NowNs() - start);
+    }
+    return handled;
+}
+
+} // namespace
 
 struct PageManager::Impl {
     struct PageState {
@@ -397,10 +474,8 @@ public:
             // Notify rasterizer about the fault.
             const VAddr addr = msg.arg.pagefault.address;
             const auto ptid = msg.arg.pagefault.feat.ptid;
-            const u64 start = VideoCore::PerfStats::NowNs();
-            rasterizer->InvalidateMemory(addr, 1,
-                                         ptid == rasterizer->GetGpuCommandProcessorThreadId());
-            VideoCore::PerfStats::frames.AddFault(VideoCore::PerfStats::NowNs() - start);
+            HandleWriteFault(rasterizer, addr, 1,
+                             ptid == rasterizer->GetGpuCommandProcessorThreadId());
 
             // Some calls to InvalidateMemory never reach the UFFDIO_WRITEPROTECT ioctl in
             // ::Protect, therefore we use MODE_DONTWAKE and wake the thread with UFFDIO_WAKE here
@@ -439,10 +514,11 @@ struct SignalImpl : public PageManager::Impl {
         const auto size = std::min<u64>(8, PageManager::GetNextPageAddr(addr) - addr);
         const auto is_gpu_thread =
             std::this_thread::get_id() == rasterizer->GetGpuCommandProcessorThread();
+        if (Common::IsWriteError(context)) {
+            return HandleWriteFault(rasterizer, addr, size, is_gpu_thread);
+        }
         const u64 start = VideoCore::PerfStats::NowNs();
-        const bool handled = Common::IsWriteError(context)
-                                 ? rasterizer->InvalidateMemory(addr, size, is_gpu_thread)
-                                 : rasterizer->ReadMemory(addr, size, is_gpu_thread);
+        const bool handled = rasterizer->ReadMemory(addr, size, is_gpu_thread);
         if (handled) {
             VideoCore::PerfStats::frames.AddFault(VideoCore::PerfStats::NowNs() - start);
         }

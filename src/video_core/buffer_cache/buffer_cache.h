@@ -94,6 +94,9 @@ public:
     /// Invalidates any buffer in the logical page range.
     void InvalidateMemory(VAddr device_addr, u64 size, bool assume_locks = false);
 
+    /// Marks memory the guest is about to write as modified from the CPU, ahead of its faults.
+    void InvalidateMemoryAhead(VAddr device_addr, u64 size);
+
     /// Unmark a region as modified from the GPU.
     void UnmarkRegionAsGpuModified(VAddr device_addr, u64 size, bool is_write = false);
 
