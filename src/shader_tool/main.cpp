@@ -90,6 +90,18 @@ struct Options {
     bool verbose = false;
 };
 
+/// One game's result, for the table `all` prints at the end.
+struct Summary {
+    u32 shaders{};
+    u32 states{};
+    u32 served{};
+    u32 tried_3d{};
+    u32 served_3d{};
+    double us_per_shader{};
+    u32 failed{};
+    u64 combined{};
+};
+
 /// What a translation came out as: its SPIR-V's hash and its specialisation, or nothing when
 /// it failed a check.
 struct Translated {
@@ -128,7 +140,7 @@ int SemanticBase(const Game& game, const Options& options) {
 
 /// Translates every listed shader with a known stage and a struct, from its struct, `rounds`
 /// times, timing translation alone. The emulator's precompile workers do the same work.
-int Bench(const Game& game, const Options& options) {
+int Bench(const Game& game, const Options& options, Summary& summary) {
     const auto& profile = game.host.profile;
     const ShaderHost host = game.host.Host();
     std::vector<const Files::ListedShader*> shaders;
@@ -228,6 +240,7 @@ int Bench(const Game& game, const Options& options) {
     }
     parts.emplace_back(emit_ns, "SPIR-V emission");
     std::ranges::sort(parts, std::greater{});
+    summary.us_per_shader = translated != 0 ? total_ns / 1e3 / translated : 0.0;
     fmt::print("{} translations in {:.1f} ms ({:.1f} us per shader, {:.0f} us per 1000 code "
                "dwords), {} without a usable struct\n",
                translated, total_ns / 1e6, translated != 0 ? total_ns / 1e3 / translated : 0.0,
@@ -282,7 +295,7 @@ std::string KindOf(std::string_view part) {
 /// For each recorded draw state of a shader with a struct, translates it as recorded (what the
 /// draw really needed) and as the precompile workers guess it from the struct, and counts how
 /// often the guess would have served the draw (same specialisation) and what it got wrong.
-int Score(const Game& game, const Options& options) {
+int Score(const Game& game, const Options& options, Summary& summary) {
     const auto& profile = game.host.profile;
     const ShaderHost host = game.host.Host();
     Shader::Pools pools;
@@ -428,6 +441,10 @@ int Score(const Game& game, const Options& options) {
     fmt::print("  {:<5} {:7} {:10} {:6} {:12} {:12} {:7} {:12} {:10}\n", "all", total.states,
                total.no_struct, total.stale, total.truth_failed, total.unguessable, total.served,
                total.same_spirv, total.served_resources);
+    summary.states = total.states;
+    summary.served = total.served;
+    summary.tried_3d = total.tried_3d;
+    summary.served_3d = total.served_3d;
     if (options.variants_3d && !options.coordinate_3d) {
         fmt::print("3D variants: {} misses also tried as 3D, {} of them served\n", total.tried_3d,
                    total.served_3d);
@@ -451,7 +468,7 @@ int Score(const Game& game, const Options& options) {
 
 /// Translates every recorded draw state and prints a hash of each result, so two builds can be
 /// checked to translate the same.
-int States(const Game& game, const Options&) {
+int States(const Game& game, const Options&, Summary& summary) {
     Shader::Pools pools;
     std::vector<u64> hashes;
     for (const auto& [hash, list] : game.states) {
@@ -484,12 +501,15 @@ int States(const Game& game, const Options&) {
         }
     }
     fmt::print("{} states translated, {} failed, combined hash {:#018x}\n", count, failed, all);
+    summary.states = count;
+    summary.failed = failed;
+    summary.combined = all;
     return 0;
 }
 
 int Usage() {
     std::fputs(
-        "usage: shader_tool <cache folder> <serial> <command> [options]\n"
+        "usage: shader_tool <cache folder> <serial | all> <command> [options]\n"
         "  bench [rounds]   time translating every listed shader from its struct (default 20)\n"
         "  score            score struct guesses against the recorded draw states\n"
         "  states           translate every recorded draw state, printing a hash of each\n"
@@ -501,7 +521,9 @@ int Usage() {
         "                         each shader's lowest)\n"
         "  -v                     list each miss\n"
         "The cache folder holds <serial>_shaders.bin, <serial>_shader_states.bin and\n"
-        "<serial>_shader_host.bin, which the emulator writes with the shader scan on.\n",
+        "<serial>_shader_host.bin, which the emulator writes with the shader scan on.\n"
+        "`all` in place of a serial runs the command for every game there, with a table at the "
+        "end.\n",
         stderr);
     return 2;
 }
@@ -534,43 +556,100 @@ int main(int argc, char** argv) {
             return Usage();
         }
     }
-    Game game;
-    const auto host = ReadShaderHost(folder / (serial + "_shader_host.bin"));
-    if (!host) {
-        fmt::print(stderr,
-                   "No usable {}_shader_host.bin in {}: run the game once with this "
-                   "build and the shader scan on\n",
-                   serial, folder.string());
-        return 1;
+    const auto run = [&](const std::string& serial, Summary& summary) -> int {
+        Game game;
+        const auto host = ReadShaderHost(folder / (serial + "_shader_host.bin"));
+        if (!host) {
+            fmt::print(stderr,
+                       "No usable {}_shader_host.bin in {}: run the game once with this "
+                       "build and the shader scan on\n",
+                       serial, folder.string());
+            return 1;
+        }
+        game.host = *host;
+        EmulatorSettings.SetDirectMemoryAccessEnabled(host->direct_memory_access);
+        auto list = Files::ReadShaderList(folder / (serial + "_shaders.bin"));
+        if (!list) {
+            fmt::print(stderr, "No usable {}_shaders.bin in {}\n", serial, folder.string());
+            return 1;
+        }
+        game.list = std::move(*list);
+        if (auto states = Files::ReadShaderStates(folder / (serial + "_shader_states.bin"))) {
+            game.states = std::move(*states);
+        }
+        for (const auto& shader : game.list.shaders) {
+            game.by_hash.emplace(shader.hash, &shader);
+        }
+        u32 num_states = 0;
+        for (const auto& [hash, list] : game.states) {
+            num_states += static_cast<u32>(list.size());
+        }
+        summary.shaders = static_cast<u32>(game.list.shaders.size());
+        fmt::print("{}: {} shaders, {} draw states of {} shaders, semantic base {}\n", serial,
+                   game.list.shaders.size(), num_states, game.states.size(),
+                   game.list.semantic_base);
+        if (command == "bench") {
+            return Bench(game, options, summary);
+        }
+        if (command == "score") {
+            return Score(game, options, summary);
+        }
+        if (command == "states") {
+            return States(game, options, summary);
+        }
+        return Usage();
+    };
+    if (serial != "all") {
+        Summary summary;
+        return run(serial, summary);
     }
-    game.host = *host;
-    EmulatorSettings.SetDirectMemoryAccessEnabled(host->direct_memory_access);
-    auto list = Files::ReadShaderList(folder / (serial + "_shaders.bin"));
-    if (!list) {
-        fmt::print(stderr, "No usable {}_shaders.bin in {}\n", serial, folder.string());
-        return 1;
+    // Every game in the folder with a list and a host file, then one line each.
+    std::vector<std::string> serials;
+    constexpr std::string_view ListSuffix = "_shaders.bin";
+    for (const auto& entry : std::filesystem::directory_iterator(folder)) {
+        const std::string name = entry.path().filename().string();
+        if (name.size() > ListSuffix.size() && name.ends_with(ListSuffix) &&
+            std::filesystem::exists(
+                folder / (name.substr(0, name.size() - ListSuffix.size()) + "_shader_host.bin"))) {
+            serials.push_back(name.substr(0, name.size() - ListSuffix.size()));
+        }
     }
-    game.list = std::move(*list);
-    if (auto states = Files::ReadShaderStates(folder / (serial + "_shader_states.bin"))) {
-        game.states = std::move(*states);
+    std::ranges::sort(serials);
+    std::vector<std::pair<std::string, Summary>> results;
+    for (const auto& one : serials) {
+        Summary summary;
+        fmt::print("\n");
+        if (run(one, summary) == 0) {
+            results.emplace_back(one, summary);
+        }
     }
-    for (const auto& shader : game.list.shaders) {
-        game.by_hash.emplace(shader.hash, &shader);
-    }
-    u32 num_states = 0;
-    for (const auto& [hash, list] : game.states) {
-        num_states += static_cast<u32>(list.size());
-    }
-    fmt::print("{}: {} shaders, {} draw states of {} shaders, semantic base {}\n", serial,
-               game.list.shaders.size(), num_states, game.states.size(), game.list.semantic_base);
-    if (command == "bench") {
-        return Bench(game, options);
+    fmt::print("\n{} games:\n", results.size());
+    Summary total;
+    for (const auto& [one, r] : results) {
+        if (command == "bench") {
+            fmt::print("  {:<10} {:6} shaders {:8.1f} us per shader\n", one, r.shaders,
+                       r.us_per_shader);
+        } else if (command == "score") {
+            fmt::print("  {:<10} {:6} states {:6} served ({:.0f}%), 3D variants served {} of {}\n",
+                       one, r.states, r.served, r.states != 0 ? 100.0 * r.served / r.states : 0.0,
+                       r.served_3d, r.tried_3d);
+        } else {
+            fmt::print("  {:<10} {:6} states {:4} failed, combined hash {:#018x}\n", one, r.states,
+                       r.failed, r.combined);
+        }
+        total.states += r.states;
+        total.served += r.served;
+        total.served_3d += r.served_3d;
+        total.tried_3d += r.tried_3d;
+        total.failed += r.failed;
     }
     if (command == "score") {
-        return Score(game, options);
+        fmt::print("  {:<10} {:6} states {:6} served ({:.0f}%), 3D variants served {} of {}\n",
+                   "all", total.states, total.served,
+                   total.states != 0 ? 100.0 * total.served / total.states : 0.0, total.served_3d,
+                   total.tried_3d);
+    } else if (command == "states") {
+        fmt::print("  {:<10} {:6} states {:4} failed\n", "all", total.states, total.failed);
     }
-    if (command == "states") {
-        return States(game, options);
-    }
-    return Usage();
+    return 0;
 }
