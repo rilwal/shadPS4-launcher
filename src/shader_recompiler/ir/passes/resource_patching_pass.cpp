@@ -264,7 +264,7 @@ static bool UsesCubeCoordinates(const IR::Inst& inst) {
 /// addresses three coordinates, so the image is 3D. The address registers don't say how many
 /// there are (the T# does), and compilers fill the one past a 2D address with leftovers (in
 /// Bloodborne, an integer bit-cast to float), so a third coordinate counts only when it's
-/// made the same way as x or y, and isn't a reinterpreted or converted integer.
+/// made the same way as both x and y, and isn't a reinterpreted or converted integer.
 static bool UsesThirdCoordinate(const IR::Inst& inst) {
     const auto flags = inst.Flags<IR::TextureInstInfo>();
     if (flags.is_array || flags.has_derivatives) {
@@ -318,7 +318,7 @@ static bool UsesThirdCoordinate(const IR::Inst& inst) {
     default:
         break;
     }
-    return z->GetOpcode() == x->GetOpcode() || z->GetOpcode() == y->GetOpcode();
+    return z->GetOpcode() == x->GetOpcode() && z->GetOpcode() == y->GetOpcode();
 }
 
 /// With guess_state, the image's type from the shader's reflection, if its T# is read from a
@@ -380,6 +380,8 @@ void PatchImageSharp(const ResourceDiscovery& resource, Info& info, Descriptors&
         } else if (image_res.guess_type == AmdGpu::ImageType::Color2D &&
                    UsesThirdCoordinate(inst)) {
             image_res.guess_type = AmdGpu::ImageType::Color3D;
+            LOG_INFO(Render_Recompiler,
+                     "Guessing an image of shader {:#x} as 3D from its coordinates", info.pgm_hash);
         }
     }
 

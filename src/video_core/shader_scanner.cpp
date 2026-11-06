@@ -446,7 +446,10 @@ std::vector<u8> ShaderScanner::ReadReflection(u64 info_addr) const {
     constexpr u64 HeaderSize = 0x1c;
     constexpr u64 RecordSize = 24;
     constexpr u32 MaxRecords = 256;
-    const u64 base = info_addr + sizeof(AmdGpu::BinaryInfo);
+    // The reflection follows the 28 bytes of the BinaryInfo, which the struct pads to 32.
+    constexpr u64 BinaryInfoSize = offsetof(AmdGpu::BinaryInfo, crc32) + sizeof(u32);
+    static_assert(BinaryInfoSize == 28);
+    const u64 base = info_addr + BinaryInfoSize;
     u32 count{};
     if (!Read(base, &count, sizeof(count)) || count == 0 || count > MaxRecords) {
         return {};
