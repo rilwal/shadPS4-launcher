@@ -1837,6 +1837,10 @@ void PipelineCache::NotePrecompileType(u64 hash, HwStage hw_stage) {
         return;
     }
     const u8 t = *type & 0xf;
+    const auto name = [](HwStage s) {
+        return s == UnguessedStage ? std::string{"other-stage (not compiled early)"}
+                                   : fmt::format("{}", s);
+    };
     auto& stage = precompile.type_stage[t];
     if (precompile.type_conflict[t]) {
         return;
@@ -1846,7 +1850,7 @@ void PipelineCache::NotePrecompileType(u64 hash, HwStage hw_stage) {
         LOG_WARNING(Render_Vulkan,
                     "Shader binary type {} is used as both {} and {}; not "
                     "compiling it early",
-                    t, stage, hw_stage);
+                    t, name(stage), name(hw_stage));
         std::erase_if(precompile.untyped, [t](const auto& u) { return u.second == t; });
         return;
     }
@@ -1854,7 +1858,7 @@ void PipelineCache::NotePrecompileType(u64 hash, HwStage hw_stage) {
     if (++precompile.type_votes[t] != 3) {
         return;
     }
-    LOG_INFO(Render_Vulkan, "Shader binary type {} is {} shaders", t, hw_stage);
+    LOG_INFO(Render_Vulkan, "Shader binary type {} is {} shaders", t, name(hw_stage));
     if (!PrecompilesStage(hw_stage)) {
         std::erase_if(precompile.untyped, [t](const auto& u) { return u.second == t; });
         return;

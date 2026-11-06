@@ -36,6 +36,10 @@ bool SoftAsserts::Active() {
 
 } // namespace Common
 
+bool assert_is_soft() {
+    return Common::SoftAsserts::Active();
+}
+
 void assert_fail_impl() {
     if (Common::SoftAsserts::Active()) {
         throw Common::SoftAssertFailure{};
@@ -53,10 +57,11 @@ void assert_fail_impl() {
 }
 
 void assert_fail_debug_msg(const char* msg) {
-    LOG_CRITICAL(Debug, "Assertion Failed!\n{}", msg);
     if (Common::SoftAsserts::Active()) {
+        LOG_WARNING(Debug, "Assertion Failed!\n{}", msg);
         throw Common::SoftAssertFailure{};
     }
+    LOG_CRITICAL(Debug, "Assertion Failed!\n{}", msg);
     Launcher::Session::Failed(msg, "fatal_error");
     assert_fail_impl();
 }
