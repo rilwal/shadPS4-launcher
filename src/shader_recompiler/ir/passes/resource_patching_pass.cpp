@@ -277,19 +277,25 @@ static bool UsesThirdCoordinate(const IR::Inst& inst) {
     bool sample = false;
     switch (inst.GetOpcode()) {
     case IR::Opcode::ImageSampleRaw:
+        // The LOD or clamp comes after the coordinates, so with one the third address is a 2D
+        // image's LOD or a 3D image's z: no telling.
+        if (flags.has_lod || flags.has_lod_clamp) {
+            return false;
+        }
         sample = true;
         first = u32(flags.has_offset) + u32(flags.has_bias) + u32(flags.is_depth);
-        third = first + 2 + u32(flags.has_lod) + u32(flags.has_lod_clamp);
+        third = first + 2;
         if (third >= 12) {
             return false;
         }
         break;
     case IR::Opcode::ImageRead:
     case IR::Opcode::ImageWrite:
-        third = 2 + u32(flags.has_lod);
-        if (third >= 4) {
+        // Likewise for the mip level.
+        if (flags.has_lod) {
             return false;
         }
+        third = 2;
         break;
     default:
         return false;
