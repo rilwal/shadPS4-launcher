@@ -3,8 +3,13 @@
 
 #pragma once
 
+#include <functional>
+#include <mutex>
+#include <optional>
+#include <thread>
 #include <unordered_map>
 #include <utility>
+#include <vector>
 #include <boost/container_hash/hash.hpp>
 
 #include "common/types.h"
@@ -52,8 +57,20 @@ public:
     std::pair<const Buffer*, u64> DetileImage(const VideoCore::Buffer* in_buffer, u64 in_offset,
                                               const ImageInfo& info);
 
+    /// Called with each tiling pipeline the game needs that wasn't built yet, as a packed key,
+    /// so it can be saved and prepared ahead next time. GPU thread.
+    void SetKeyObserver(std::function<void(u64)> observer);
+    /// Builds the tiling pipelines for the packed keys `keys` returns on a background thread,
+    /// so the first image that needs one doesn't wait for the driver.
+    void Prepare(std::function<std::vector<u64>()> keys);
+    /// Waits for Prepare's thread, before what its `keys` uses goes away.
+    void StopPrepare();
+
 private:
     vk::Pipeline GetTilingPipeline(const ImageInfo& info, bool is_tiler);
+    vk::UniquePipeline CreateTilingPipeline(const TilingKey& key) const;
+    static u64 PackKey(const TilingKey& key);
+    static std::optional<TilingKey> UnpackKey(u64 packed);
 
 private:
     const Vulkan::Instance& instance;
@@ -63,6 +80,11 @@ private:
     vk::UniqueDescriptorSetLayout desc_layout;
     vk::UniquePipelineLayout pl_layout;
     std::unordered_map<TilingKey, vk::UniquePipeline, TilingKey::Hash> tiling_pipelines;
+    /// Guards tiling_pipelines while Prepare's thread runs.
+    std::mutex pipelines_mutex;
+    std::function<void(u64)> key_observer;
+    /// Last, so it stops before the layouts it builds with are destroyed.
+    std::jthread prepare_thread;
 };
 
 } // namespace VideoCore

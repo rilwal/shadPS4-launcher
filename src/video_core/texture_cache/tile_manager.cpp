@@ -1,6 +1,7 @@
 // SPDX-FileCopyrightText: Copyright 2024 shadPS4 Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+#include "common/thread.h"
 #include "video_core/renderer_vulkan/vk_instance.h"
 #include "video_core/renderer_vulkan/vk_runtime.h"
 #include "video_core/renderer_vulkan/vk_scheduler.h"
@@ -93,35 +94,113 @@ vk::Pipeline TileManager::GetTilingPipeline(const ImageInfo& info, bool is_tiler
         .num_samples = info.num_samples,
         .is_tiler = is_tiler,
     };
-    if (const auto it = tiling_pipelines.find(key); it != tiling_pipelines.end()) {
-        return *it->second;
+    {
+        std::scoped_lock lock{pipelines_mutex};
+        if (const auto it = tiling_pipelines.find(key); it != tiling_pipelines.end()) {
+            return *it->second;
+        }
     }
+    LOG_INFO(Render_Vulkan, "Creating tiling pipeline {}_{} {}",
+             magic_enum::enum_name(key.tile_mode), key.num_bits,
+             key.is_tiler ? "tiler" : "detiler");
+    auto pipeline = CreateTilingPipeline(key);
+    if (key_observer) {
+        key_observer(PackKey(key));
+    }
+    std::scoped_lock lock{pipelines_mutex};
+    // Prepare's thread may have built it meanwhile; either serves.
+    return *tiling_pipelines.try_emplace(key, std::move(pipeline)).first->second;
+}
 
+u64 TileManager::PackKey(const TilingKey& key) {
+    return u64(key.tile_mode) | u64(key.num_bits) << 8 | u64(key.num_samples) << 16 |
+           u64(key.is_tiler) << 24;
+}
+
+std::optional<TileManager::TilingKey> TileManager::UnpackKey(u64 packed) {
+    const TilingKey key{
+        .tile_mode = static_cast<AmdGpu::TileMode>(packed & 0xff),
+        .num_bits = u32(packed >> 8) & 0xff,
+        .num_samples = u32(packed >> 16) & 0xff,
+        .is_tiler = ((packed >> 24) & 1) != 0,
+    };
+    // Saved keys come from a file, so only ones a game could have used are built.
+    const bool bits_ok = key.num_bits == 8 || key.num_bits == 16 || key.num_bits == 32 ||
+                         key.num_bits == 64 || key.num_bits == 96 || key.num_bits == 128;
+    const bool samples_ok = key.num_samples == 1 || key.num_samples == 2 || key.num_samples == 4 ||
+                            key.num_samples == 8;
+    if (!bits_ok || !samples_ok || !magic_enum::enum_contains(key.tile_mode) ||
+        (packed >> 25) != 0) {
+        return std::nullopt;
+    }
+    return key;
+}
+
+void TileManager::SetKeyObserver(std::function<void(u64)> observer) {
+    key_observer = std::move(observer);
+}
+
+void TileManager::Prepare(std::function<std::vector<u64>()> keys) {
+    prepare_thread = std::jthread([this, keys = std::move(keys)](std::stop_token stop) {
+        Common::SetCurrentThreadName("shadPS4:PrepareTiling");
+        Common::SetCurrentThreadPriority(Common::ThreadPriority::Low);
+        u32 built = 0;
+        for (const u64 packed : keys()) {
+            if (stop.stop_requested()) {
+                return;
+            }
+            const auto key = UnpackKey(packed);
+            if (!key) {
+                continue;
+            }
+            {
+                std::scoped_lock lock{pipelines_mutex};
+                if (tiling_pipelines.contains(*key)) {
+                    continue;
+                }
+            }
+            auto pipeline = CreateTilingPipeline(*key);
+            std::scoped_lock lock{pipelines_mutex};
+            built += tiling_pipelines.try_emplace(*key, std::move(pipeline)).second ? 1 : 0;
+        }
+        LOG_INFO(Render_Vulkan, "Prepared {} tiling pipelines ahead", built);
+    });
+}
+
+void TileManager::StopPrepare() {
+    if (prepare_thread.joinable()) {
+        prepare_thread.request_stop();
+        prepare_thread.join();
+    }
+}
+
+vk::UniquePipeline TileManager::CreateTilingPipeline(const TilingKey& key) const {
     const auto device = instance.GetDevice();
-    const auto micro_tile_mode = AmdGpu::GetMicroTileMode(info.tile_mode);
-    const bool is_macro = AmdGpu::IsMacroTiled(info.array_mode);
+    const auto array_mode = AmdGpu::GetArrayMode(key.tile_mode);
+    const auto micro_tile_mode = AmdGpu::GetMicroTileMode(key.tile_mode);
+    const bool is_macro = AmdGpu::IsMacroTiled(array_mode);
     std::array<u32, 12> spec_data{
-        info.num_samples,
+        key.num_samples,
         u32(micro_tile_mode),
-        AmdGpu::GetMicroTileThickness(info.array_mode),
-        u32(is_tiler),
+        AmdGpu::GetMicroTileThickness(array_mode),
+        u32(key.is_tiler),
     };
     if (is_macro) {
         const auto macro_tile_mode =
-            AmdGpu::CalculateMacrotileMode(info.tile_mode, info.num_bits, info.num_samples);
-        spec_data[4] = u32(info.array_mode);
-        spec_data[5] = u32(AmdGpu::GetPipeConfig(info.tile_mode));
+            AmdGpu::CalculateMacrotileMode(key.tile_mode, key.num_bits, key.num_samples);
+        spec_data[4] = u32(array_mode);
+        spec_data[5] = u32(AmdGpu::GetPipeConfig(key.tile_mode));
         spec_data[6] = AmdGpu::GetBankWidth(macro_tile_mode);
         spec_data[7] = AmdGpu::GetBankHeight(macro_tile_mode);
         spec_data[8] = AmdGpu::GetNumBanks(macro_tile_mode);
         spec_data[9] = std::bit_width(spec_data[8]) - 1;
-        spec_data[10] = AmdGpu::CalculateTileSplit(info.tile_mode, info.array_mode, micro_tile_mode,
-                                                   info.num_bits);
+        spec_data[10] =
+            AmdGpu::CalculateTileSplit(key.tile_mode, array_mode, micro_tile_mode, key.num_bits);
         spec_data[11] = AmdGpu::GetMacrotileAspect(macro_tile_mode);
     }
 
     std::span<const u32> code;
-    switch (info.num_bits) {
+    switch (key.num_bits) {
     case 8:
         code = is_macro ? std::span<const u32>{TILING_MACRO_8_COMP}
                         : std::span<const u32>{TILING_MICRO_8_COMP};
@@ -147,7 +226,7 @@ vk::Pipeline TileManager::GetTilingPipeline(const ImageInfo& info, bool is_tiler
                         : std::span<const u32>{TILING_MICRO_128_COMP};
         break;
     default:
-        UNREACHABLE_MSG("Unsupported tiling pixel width {}", info.num_bits);
+        UNREACHABLE_MSG("Unsupported tiling pixel width {}", key.num_bits);
     }
 
     const auto module = Vulkan::CompileSPV(code, device);
@@ -167,9 +246,8 @@ vk::Pipeline TileManager::GetTilingPipeline(const ImageInfo& info, bool is_tiler
         .pData = spec_data.data(),
     };
 
-    const auto module_name = fmt::format("{}_{} {}", magic_enum::enum_name(info.tile_mode),
-                                         info.num_bits, is_tiler ? "tiler" : "detiler");
-    LOG_INFO(Render_Vulkan, "Creating tiling pipeline {}", module_name);
+    const auto module_name = fmt::format("{}_{} {}", magic_enum::enum_name(key.tile_mode),
+                                         key.num_bits, key.is_tiler ? "tiler" : "detiler");
     Vulkan::SetObjectName(device, module, module_name);
 
     const vk::PipelineShaderStageCreateInfo shader_ci = {
@@ -187,10 +265,8 @@ vk::Pipeline TileManager::GetTilingPipeline(const ImageInfo& info, bool is_tiler
         device.createComputePipelineUnique(VK_NULL_HANDLE, compute_pipeline_ci);
     ASSERT_MSG(result == vk::Result::eSuccess, "Detiler pipeline creation failed {}",
                vk::to_string(result));
-    const auto handle = *pipeline;
-    tiling_pipelines.emplace(key, std::move(pipeline));
     device.destroyShaderModule(module);
-    return handle;
+    return std::move(pipeline);
 }
 
 std::pair<const Buffer*, u64> TileManager::DetileImage(const VideoCore::Buffer* in_buffer,

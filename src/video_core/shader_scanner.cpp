@@ -50,7 +50,8 @@ constexpr u64 MaxHeaderLength = 2_KB;
 constexpr u64 HeaderPgmLoOffset = 8;
 /// The saved list: magic, version, the uncompressed size, then the entries compressed.
 constexpr u32 SaveMagic = 0x4e435353; // "SSCN"
-constexpr u32 SaveVersion = 6;
+constexpr u32 SaveVersion = 7;
+constexpr u32 MaxTilingKeys = 1024;
 constexpr u64 SaveInterval = 30'000'000'000ULL;
 /// Bigger than any real list, so a corrupt size can't ask for a huge allocation.
 constexpr u64 MaxSaveSize = 1_GB;
@@ -438,13 +439,22 @@ void ShaderScanner::Load() {
     u32 count{};
     s32 base{};
     u8 third_off{};
-    if (!Get(in, count) || !Get(in, base) || !Get(in, third_off)) {
+    u32 num_tiling_keys{};
+    if (!Get(in, count) || !Get(in, base) || !Get(in, third_off) || !Get(in, num_tiling_keys) ||
+        num_tiling_keys > MaxTilingKeys) {
         return;
+    }
+    std::vector<u64> keys(num_tiling_keys);
+    for (u64& key : keys) {
+        if (!Get(in, key)) {
+            return;
+        }
     }
     const u64 now = PerfStats::NowNs();
     std::scoped_lock lock{mutex};
     semantic_base = base;
     third_coordinate_off = third_off != 0;
+    tiling_keys = std::move(keys);
     for (u32 i = 0; i < count; ++i) {
         u64 hash{};
         u8 type{};
@@ -499,6 +509,10 @@ void ShaderScanner::Save() {
         Put(raw, count);
         Put(raw, static_cast<s32>(semantic_base));
         Put(raw, static_cast<u8>(third_coordinate_off));
+        Put(raw, static_cast<u32>(tiling_keys.size()));
+        for (const u64 key : tiling_keys) {
+            Put(raw, key);
+        }
         for (const auto& [hash, shader] : shaders) {
             Put(raw, hash);
             Put(raw, shader.type);
@@ -586,6 +600,20 @@ void ShaderScanner::SetThirdCoordinateOff() {
     std::scoped_lock lock{mutex};
     if (!third_coordinate_off) {
         third_coordinate_off = true;
+        dirty = true;
+    }
+}
+
+std::vector<u64> ShaderScanner::TilingKeys() {
+    std::scoped_lock lock{mutex};
+    return tiling_keys;
+}
+
+void ShaderScanner::NoteTilingKey(u64 key) {
+    std::scoped_lock lock{mutex};
+    if (tiling_keys.size() < MaxTilingKeys &&
+        std::ranges::find(tiling_keys, key) == tiling_keys.end()) {
+        tiling_keys.push_back(key);
         dirty = true;
     }
 }

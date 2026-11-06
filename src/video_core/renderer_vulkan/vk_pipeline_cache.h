@@ -119,6 +119,13 @@ public:
     static std::string GetShaderName(Shader::HwStage stage, u64 hash,
                                      std::optional<size_t> perm = {});
 
+    /// Whether found shaders are compiled early; tiling pipelines are then prepared ahead too.
+    bool PreparesAhead() const {
+        return precompile.active;
+    }
+    /// Tiling pipelines earlier runs used (packed TileManager keys), once they're loaded.
+    std::vector<u64> SavedTilingKeys();
+    void NoteTilingKey(u64 key);
     auto& GetProfile() const {
         return profile;
     }

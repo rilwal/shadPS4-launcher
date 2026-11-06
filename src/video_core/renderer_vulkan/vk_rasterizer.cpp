@@ -52,13 +52,21 @@ Rasterizer::Rasterizer(const Instance& instance_, Scheduler& scheduler_, Runtime
             std::make_unique<ResourceHeaps>(instance, scheduler, buffer_cache.GetStreamBuffer());
     }
 
+    if (pipeline_cache.PreparesAhead()) {
+        auto& tile_manager = texture_cache.GetTileManager();
+        tile_manager.SetKeyObserver([this](u64 key) { pipeline_cache.NoteTilingKey(key); });
+        tile_manager.Prepare([this] { return pipeline_cache.SavedTilingKeys(); });
+    }
+
     scheduler.SetSubmitCallback([this](Vulkan::SubmitInfo& info) {
         runtime.FlushBarriers();
         buffer_cache.SubmitPendingArenaBinds(info);
     });
 }
 
-Rasterizer::~Rasterizer() = default;
+Rasterizer::~Rasterizer() {
+    texture_cache.GetTileManager().StopPrepare();
+}
 
 bool Rasterizer::WouldDraw() const {
     // FilterDraw's checks without its side effects: the draws it handles itself use no

@@ -1951,6 +1951,15 @@ void PipelineCache::RequeueHeldLocked() {
     precompile.held.clear();
 }
 
+std::vector<u64> PipelineCache::SavedTilingKeys() {
+    shader_scanner->WaitUntilLoaded();
+    return shader_scanner->TilingKeys();
+}
+
+void PipelineCache::NoteTilingKey(u64 key) {
+    shader_scanner->NoteTilingKey(key);
+}
+
 void PipelineCache::JoinPrecompile(u64 hash) {
     // A worker already part way through the program is done sooner than starting again here.
     // Bounded, in case it's stuck on a slow driver compile.

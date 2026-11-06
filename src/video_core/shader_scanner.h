@@ -105,6 +105,10 @@ public:
     /// in this game, saved with the list.
     bool ThirdCoordinateOff();
     void SetThirdCoordinateOff();
+    /// Tiling pipelines (TileManager's packed keys) the game used, saved with the list so they
+    /// can be built ahead next time.
+    std::vector<u64> TilingKeys();
+    void NoteTilingKey(u64 key);
 
     /// Waits until the shaders saved by earlier runs are loaded.
     void WaitUntilLoaded() const;
@@ -165,6 +169,7 @@ private:
     u32 use_counter{};
     int semantic_base{-1};
     bool third_coordinate_off{};
+    std::vector<u64> tiling_keys;
     size_t recent_use_index{};
     /// Scan totals, for the per-pass log.
     u32 pass_new{};
