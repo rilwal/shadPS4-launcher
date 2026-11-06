@@ -7,8 +7,10 @@
 #include <queue>
 #include <xbyak/xbyak.h>
 #include <xbyak/xbyak_util.h>
+#include <xxhash.h>
 #include "common/arch.h"
 #include "common/decoder.h"
+#include "common/hash.h"
 #include "common/io_file.h"
 #include "common/logging/log.h"
 #include "common/path_util.h"
@@ -861,6 +863,40 @@ void FlattenExtendedUserdataPass(IR::Program& program) {
         ASSERT(pass_info.vn_to_inst.contains(pass_info.gvn_table.GetValueNumber(readconst)));
         IR::Inst* original = pass_info.DeduplicateInstruction(readconst);
         SetFlatbufOffset(readconst, GetFlatbufOffset(original));
+    }
+
+    // What each flattened dword is read from: its kind, offset, the register or flattened dword
+    // its pointer comes from, and its offset in the table (or that it's computed).
+    {
+        std::vector<std::array<u32, 4>> layout;
+        for (IR::Inst* readconst : all_readconsts) {
+            if (pass_info.DeduplicateInstruction(readconst) != readconst) {
+                continue;
+            }
+            std::array<u32, 4> entry{u32(readconst->GetOpcode()), GetFlatbufOffset(readconst), ~0u,
+                                     ~0u};
+            if (readconst->GetOpcode() == IR::Opcode::ReadConst) {
+                const IR::Inst* base = readconst->Arg(0).TryInst();
+                IR::Inst* ptr_lo = base ? base->Arg(0).TryInst() : nullptr;
+                if (ptr_lo && ptr_lo->GetOpcode() == IR::Opcode::GetUserData) {
+                    entry[2] = u32(ptr_lo->Arg(0).ScalarReg());
+                } else if (ptr_lo && (ptr_lo->GetOpcode() == IR::Opcode::ReadConst ||
+                                      ptr_lo->GetOpcode() == IR::Opcode::ReadConstBuffer)) {
+                    entry[2] =
+                        0x10000u | GetFlatbufOffset(pass_info.DeduplicateInstruction(ptr_lo));
+                }
+                if (readconst->Arg(1).IsImmediate()) {
+                    entry[3] = readconst->Arg(1).U32();
+                }
+            }
+            layout.push_back(entry);
+        }
+        std::ranges::sort(layout);
+        program.info.flat_layout =
+            layout.empty()
+                ? 0
+                : HashCombine(XXH3_64bits(layout.data(), layout.size() * sizeof(layout[0])),
+                              u64(program.info.srt_info.flattened_bufsize_dw));
     }
 
     // A translation without the draw's state finds image types by where their T#s are read.

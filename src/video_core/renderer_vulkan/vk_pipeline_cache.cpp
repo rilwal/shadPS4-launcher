@@ -273,7 +273,18 @@ static Shader::PsColorBuffer UnboundTarget(AmdGpu::ShaderExportFormat export_for
 
 const Shader::RuntimeInfo& PipelineCache::BuildRuntimeInfo(HwStage stage, SwStage l_stage) {
     auto& info = runtime_infos[u32(l_stage)];
-    const auto& regs = liverpool->regs;
+    FillRuntimeInfo(info, stage, l_stage, liverpool->regs,
+                    stage == HwStage::Compute ? &liverpool->GetCsRegs() : nullptr,
+                    graphics_key.color_buffers, draw_indirect_params,
+                    infos[u32(SwStage::TessellationControl)]);
+    return info;
+}
+
+void PipelineCache::FillRuntimeInfo(Shader::RuntimeInfo& info, HwStage stage, SwStage l_stage,
+                                    const AmdGpu::Regs& regs, const AmdGpu::ComputeProgram* cs_regs,
+                                    const ColorBuffers& color_buffers,
+                                    const DrawIndirectParams& indirect,
+                                    const Shader::Info* hull_info) {
     const auto BuildCommon = [&](const auto& program) {
         info.props.fp_denorm_mode32 = program.settings.fp_denorm_mode32;
         info.props.fp_denorm_mode16_64 = program.settings.fp_denorm_mode64;
@@ -289,7 +300,7 @@ const Shader::RuntimeInfo& PipelineCache::BuildRuntimeInfo(HwStage stage, SwStag
     case HwStage::Local: {
         BuildCommon(regs.ls_program);
         Shader::TessellationDataConstantBuffer tess_constants{};
-        const auto* hull_info = infos[u32(SwStage::TessellationControl)];
+        ASSERT(hull_info);
         hull_info->ReadTessConstantBuffer(tess_constants);
         info.hw.ls.ls_stride = tess_constants.ls_stride;
         break;
@@ -389,7 +400,7 @@ const Shader::RuntimeInfo& PipelineCache::BuildRuntimeInfo(HwStage stage, SwStag
             };
         }
         for (u32 i = 0; i < Shader::MaxColorBuffers; i++) {
-            auto target = graphics_key.color_buffers[i];
+            auto target = color_buffers[i];
             if (profile.runtime_target_swizzles && !info.hw.fs.dual_source_blending) {
                 // The shader exports what its export format says whatever the draw binds;
                 // exports to a location without an attachment are dropped.
@@ -420,7 +431,8 @@ const Shader::RuntimeInfo& PipelineCache::BuildRuntimeInfo(HwStage stage, SwStag
         break;
     }
     case HwStage::Compute: {
-        const auto& cs_pgm = liverpool->GetCsRegs();
+        ASSERT(cs_regs);
+        const auto& cs_pgm = *cs_regs;
         info.props.num_user_data = cs_pgm.settings.num_user_regs;
         info.props.num_allocated_vgprs = cs_pgm.settings.num_vgprs * 4;
         info.props.fp_denorm_mode32 = cs_pgm.settings.fp_denorm_mode32;
@@ -460,9 +472,9 @@ const Shader::RuntimeInfo& PipelineCache::BuildRuntimeInfo(HwStage stage, SwStag
                 info.props.num_input_vgprs = 3;
             }
         }
-        info.sw.vs.vertex_sgpr_offset = draw_indirect_params.vertex_sgpr_offset;
-        info.sw.vs.instance_sgpr_offset = draw_indirect_params.instance_sgpr_offset;
-        info.sw.vs.is_indirect = draw_indirect_params.is_indirect;
+        info.sw.vs.vertex_sgpr_offset = indirect.vertex_sgpr_offset;
+        info.sw.vs.instance_sgpr_offset = indirect.instance_sgpr_offset;
+        info.sw.vs.is_indirect = indirect.is_indirect;
         info.sw.vs.tess_emulated_primitive =
             regs.primitive_type == AmdGpu::PrimitiveType::RectList ||
             regs.primitive_type == AmdGpu::PrimitiveType::QuadList;
@@ -483,7 +495,6 @@ const Shader::RuntimeInfo& PipelineCache::BuildRuntimeInfo(HwStage stage, SwStag
     default:
         break;
     }
-    return info;
 }
 
 PipelineCache::PipelineCache(const Instance& instance_, Scheduler& scheduler_,
@@ -1273,6 +1284,35 @@ const ComputePipeline* PipelineCache::LookUpComputePipeline(bool prefetch) {
     return it->second.get();
 }
 
+void PipelineCache::FillColorBuffers(const AmdGpu::Regs& regs, ColorBuffers& color_buffers) {
+    if (regs.color_control.mode == AmdGpu::ColorControl::OperationMode::Disable) {
+        return;
+    }
+    for (s32 cb = 0; cb < AmdGpu::NUM_COLOR_BUFFERS; ++cb) {
+        const auto& col_buf = regs.color_buffers[cb];
+        if (!col_buf || !regs.color_target_mask.GetMask(cb)) {
+            // No attachment bound or writing to it is disabled.
+            continue;
+        }
+
+        // Fill color target information
+        auto& color_buffer = color_buffers[cb];
+        color_buffer.data_format = col_buf.GetDataFmt();
+        color_buffer.num_format = col_buf.GetNumberFmt();
+        color_buffer.num_conversion = col_buf.GetNumberConversion();
+        color_buffer.export_format = regs.color_export_format.GetFormat(cb);
+        color_buffer.swizzle = col_buf.Swizzle();
+
+        const auto& bc = regs.blend_control[cb];
+        color_buffer.blend_self_scale =
+            bc.enable && !col_buf.info.blend_bypass &&
+            (bc.color_func == AmdGpu::BlendControl::BlendFunc::Min ||
+             bc.color_func == AmdGpu::BlendControl::BlendFunc::Max) &&
+            bc.color_src_factor == AmdGpu::BlendControl::BlendFactor::SrcColor &&
+            bc.color_dst_factor == AmdGpu::BlendControl::BlendFactor::DstColor;
+    }
+}
+
 bool PipelineCache::RefreshGraphicsKey() {
     std::memset(&graphics_key, 0, sizeof(GraphicsPipelineKey));
     const auto& regs = liverpool->regs;
@@ -1302,29 +1342,7 @@ bool PipelineCache::RefreshGraphicsKey() {
         regs.color_control.mode == AmdGpu::ColorControl::OperationMode::Disable;
 
     // First pass to fill render target information needed by shader recompiler
-    for (s32 cb = 0; cb < AmdGpu::NUM_COLOR_BUFFERS && !skip_cb_binding; ++cb) {
-        const auto& col_buf = regs.color_buffers[cb];
-        if (!col_buf || !regs.color_target_mask.GetMask(cb)) {
-            // No attachment bound or writing to it is disabled.
-            continue;
-        }
-
-        // Fill color target information
-        auto& color_buffer = key.color_buffers[cb];
-        color_buffer.data_format = col_buf.GetDataFmt();
-        color_buffer.num_format = col_buf.GetNumberFmt();
-        color_buffer.num_conversion = col_buf.GetNumberConversion();
-        color_buffer.export_format = regs.color_export_format.GetFormat(cb);
-        color_buffer.swizzle = col_buf.Swizzle();
-
-        const auto& bc = regs.blend_control[cb];
-        color_buffer.blend_self_scale =
-            bc.enable && !col_buf.info.blend_bypass &&
-            (bc.color_func == AmdGpu::BlendControl::BlendFunc::Min ||
-             bc.color_func == AmdGpu::BlendControl::BlendFunc::Max) &&
-            bc.color_src_factor == AmdGpu::BlendControl::BlendFactor::SrcColor &&
-            bc.color_dst_factor == AmdGpu::BlendControl::BlendFactor::DstColor;
-    }
+    FillColorBuffers(regs, key.color_buffers);
 
     // Compile and bind shader stages
     if (!RefreshGraphicsStages()) {
@@ -1792,8 +1810,13 @@ void PipelineCache::RunPrecompile(std::stop_token stop) {
                     if (!precompile.seen.insert(hash).second) {
                         continue;
                     }
-                    // A stage saved by an earlier run needs no learning.
-                    if (const auto saved = shader_scanner->StageOf(hash)) {
+                    // A stage saved by an earlier run, or one its recorded states were drawn
+                    // as, needs no learning.
+                    auto saved = shader_scanner->StageOf(hash);
+                    if (!saved) {
+                        saved = shader_scanner->StateStageOf(hash);
+                    }
+                    if (saved) {
                         if (const auto stage = static_cast<HwStage>(*saved);
                             PrecompilesStage(stage)) {
                             precompile.queue.push_back(MakePrecompileJob(hash, stage));
@@ -2005,29 +2028,28 @@ bool PipelineCache::PrepareVariant(Program& program, Precompiled& done, const Sh
 
 namespace {
 
-/// Recorded draw states: the version, then the stages, the runtime info, the user data, the
-/// flattened user data, the fetch shader and the vertex buffer V#s. Laid out in this build's
-/// structs, so the version changes with their sizes. The top byte changes with what a
-/// shader's flattened user data holds (2: image LOD queries' samplers).
-constexpr u32 DrawStateVersion = (2u << 24) ^ u32(sizeof(Shader::RuntimeInfo)) ^
-                                 u32(sizeof(Shader::Gcn::VertexAttribute) << 16) ^
-                                 u32(sizeof(AmdGpu::Buffer) << 20);
-static_assert(std::is_trivially_copyable_v<Shader::RuntimeInfo>);
-static_assert(std::is_trivially_copyable_v<Shader::Gcn::VertexAttribute>);
-static_assert(std::is_trivially_copyable_v<AmdGpu::Buffer>);
+/// Recorded draw states, in terms of the guest's own hardware rather than this build's structs,
+/// so they keep working across emulator changes and can be shared: the registers (as register
+/// numbers and values), the draw's indirect parameters, the user data, the flattened user data
+/// with what identifies its layout, the fetch shader's attributes and the vertex buffer V#s.
+/// They hold no shader code. A blob starts with the format and a key for what it records, which
+/// the scanner dedupes on (ShaderScanner::StateKeyBytes), then the stage.
+constexpr u32 DrawStateFormat = 3;
 
-struct DrawState {
-    HwStage hw_stage;
-    SwStage sw_stage;
-    Shader::RuntimeInfo runtime_info;
-    std::array<u32, Shader::ShaderParams::NumShaderUserData> user_data;
-    std::vector<u32> flat_buf;
-    std::optional<Shader::Gcn::FetchShaderData> fetch;
-    std::vector<std::pair<u32, AmdGpu::Buffer>> vertex_buffers;
-};
+/// The register ranges recorded: config and shader registers, context registers, and user
+/// config registers. Only nonzero registers are kept.
+constexpr std::array<std::pair<u32, u32>, 3> DrawStateRegRanges{{
+    {AmdGpu::Regs::ConfigRegWordOffset, AmdGpu::Regs::ShRegWordOffset + 0x400},
+    {AmdGpu::Regs::ContextRegWordOffset, AmdGpu::Regs::ContextRegWordOffset + 0x400},
+    {AmdGpu::Regs::UconfigRegWordOffset, AmdGpu::Regs::NumRegs},
+}};
+
+/// The compute registers kept, from the dispatch initiator up to the user data.
+constexpr u32 ComputeRegDwords = offsetof(AmdGpu::ComputeProgram, user_data) / sizeof(u32);
 
 template <typename T>
 void PutState(std::vector<u8>& out, const T& value) {
+    static_assert(std::is_trivially_copyable_v<T>);
     const auto* bytes = reinterpret_cast<const u8*>(&value);
     out.insert(out.end(), bytes, bytes + sizeof(T));
 }
@@ -2042,19 +2064,60 @@ bool GetState(std::span<const u8>& in, T& value) {
     return true;
 }
 
-std::optional<DrawState> ParseDrawState(std::span<const u8> in) {
-    u32 version{};
+} // namespace
+
+std::optional<PipelineCache::DrawState> PipelineCache::ParseDrawState(std::span<const u8> in) {
+    u32 format{};
+    u64 key{};
     u8 hw{};
     u8 sw{};
-    DrawState state{};
-    u32 flat_size{};
-    if (!GetState(in, version) || version != DrawStateVersion || !GetState(in, hw) ||
-        !GetState(in, sw) || !GetState(in, state.runtime_info) || !GetState(in, state.user_data) ||
-        !GetState(in, flat_size) || in.size() < flat_size * sizeof(u32)) {
+    if (!GetState(in, format) || format != DrawStateFormat || !GetState(in, key) ||
+        !GetState(in, hw) || !GetState(in, sw)) {
         return std::nullopt;
     }
+    DrawState state{};
     state.hw_stage = static_cast<HwStage>(hw);
     state.sw_stage = static_cast<SwStage>(sw);
+    // Only the stages compiled early: the others need more than registers (the hull shader's
+    // constants, the geometry stage's copy shader).
+    if (state.hw_stage != HwStage::Vertex && state.hw_stage != HwStage::Fragment &&
+        state.hw_stage != HwStage::Compute) {
+        return std::nullopt;
+    }
+    thread_local auto regs = std::make_unique<AmdGpu::Regs>();
+    std::ranges::fill(regs->reg_array, 0u);
+    u32 num_regs{};
+    if (!GetState(in, num_regs) || num_regs > AmdGpu::Regs::NumRegs) {
+        return std::nullopt;
+    }
+    for (u32 i = 0; i < num_regs; ++i) {
+        u16 index{};
+        u32 value{};
+        if (!GetState(in, index) || !GetState(in, value) || index >= AmdGpu::Regs::NumRegs) {
+            return std::nullopt;
+        }
+        regs->reg_array[index] = value;
+    }
+    AmdGpu::ComputeProgram cs_regs{};
+    u32 num_cs_dwords{};
+    if (!GetState(in, num_cs_dwords) || num_cs_dwords > ComputeRegDwords ||
+        in.size() < num_cs_dwords * sizeof(u32)) {
+        return std::nullopt;
+    }
+    std::memcpy(&cs_regs, in.data(), num_cs_dwords * sizeof(u32));
+    in = in.subspan(num_cs_dwords * sizeof(u32));
+    DrawIndirectParams indirect{};
+    u8 is_indirect{};
+    if (!GetState(in, indirect.vertex_sgpr_offset) ||
+        !GetState(in, indirect.instance_sgpr_offset) || !GetState(in, is_indirect) ||
+        !GetState(in, state.user_data) || !GetState(in, state.flat_layout)) {
+        return std::nullopt;
+    }
+    indirect.is_indirect = is_indirect != 0;
+    u32 flat_size{};
+    if (!GetState(in, flat_size) || in.size() < flat_size * sizeof(u32)) {
+        return std::nullopt;
+    }
     state.flat_buf.resize(flat_size);
     std::memcpy(state.flat_buf.data(), in.data(), flat_size * sizeof(u32));
     in = in.subspan(flat_size * sizeof(u32));
@@ -2071,11 +2134,20 @@ std::optional<DrawState> ParseDrawState(std::span<const u8> in) {
             return std::nullopt;
         }
         for (u32 i = 0; i < num_attributes; ++i) {
-            Shader::Gcn::VertexAttribute attribute{};
-            if (!GetState(in, attribute)) {
+            std::array<u8, 8> fields{};
+            if (!GetState(in, fields)) {
                 return std::nullopt;
             }
-            fetch.attributes.push_back(attribute);
+            fetch.attributes.push_back(Shader::Gcn::VertexAttribute{
+                .dest_vgpr = fields[0],
+                .num_elements = fields[1],
+                .sgpr_base = fields[2],
+                .dword_offset = fields[3],
+                .instance_data = fields[4],
+                .inst_offset = fields[5],
+                .data_format = fields[6],
+                .num_format = fields[7],
+            });
         }
     }
     u32 num_buffers{};
@@ -2084,15 +2156,20 @@ std::optional<DrawState> ParseDrawState(std::span<const u8> in) {
     }
     for (u32 i = 0; i < num_buffers; ++i) {
         std::pair<u32, AmdGpu::Buffer> buffer{};
-        if (!GetState(in, buffer.first) || !GetState(in, buffer.second)) {
+        std::array<u32, 4> dwords{};
+        if (!GetState(in, buffer.first) || !GetState(in, dwords)) {
             return std::nullopt;
         }
+        static_assert(sizeof(AmdGpu::Buffer) == sizeof(dwords));
+        std::memcpy(&buffer.second, dwords.data(), sizeof(dwords));
         state.vertex_buffers.push_back(buffer);
     }
+    ColorBuffers color_buffers{};
+    FillColorBuffers(*regs, color_buffers);
+    FillRuntimeInfo(state.runtime_info, state.hw_stage, state.sw_stage, *regs, &cs_regs,
+                    color_buffers, indirect, nullptr);
     return state;
 }
-
-} // namespace
 
 void PipelineCache::RecordDrawState(const Shader::Info& info,
                                     const Shader::RuntimeInfo& runtime_info,
@@ -2100,31 +2177,74 @@ void PipelineCache::RecordDrawState(const Shader::Info& info,
     if (!precompile.active || !PrecompilesStage(PrecompileStageOf(info.hw_stage, info.sw_stage))) {
         return;
     }
-    std::vector<u8> out;
-    PutState(out, DrawStateVersion);
-    PutState(out, static_cast<u8>(info.hw_stage));
-    PutState(out, static_cast<u8>(info.sw_stage));
-    PutState(out, runtime_info);
     std::array<u32, Shader::ShaderParams::NumShaderUserData> user_data{};
     std::copy_n(info.user_data.begin(), std::min(info.user_data.size(), user_data.size()),
                 user_data.begin());
-    PutState(out, user_data);
-    PutState(out, static_cast<u32>(info.flattened_ud_buf.size()));
+
+    // What the state comes to in this build, for the scanner to keep one of each.
+    std::vector<u8> derived;
+    PutState(derived, runtime_info);
+    PutState(derived, user_data);
     const auto* flat = reinterpret_cast<const u8*>(info.flattened_ud_buf.data());
+    derived.insert(derived.end(), flat, flat + info.flattened_ud_buf.size() * sizeof(u32));
+    for (const auto& attribute : fetch.attributes) {
+        PutState(derived, attribute);
+        PutState(derived,
+                 info.ReadUdReg<AmdGpu::Buffer>(attribute.sgpr_base, attribute.dword_offset));
+    }
+
+    std::vector<u8> out;
+    PutState(out, DrawStateFormat);
+    PutState(out, XXH3_64bits(derived.data(), derived.size()));
+    PutState(out, static_cast<u8>(info.hw_stage));
+    PutState(out, static_cast<u8>(info.sw_stage));
+    const auto& regs = liverpool->regs;
+    const size_t count_at = out.size();
+    PutState(out, u32{0});
+    u32 num_regs = 0;
+    for (const auto [begin, end] : DrawStateRegRanges) {
+        for (u32 index = begin; index < end; ++index) {
+            if (const u32 value = regs.reg_array[index]; value != 0) {
+                PutState(out, static_cast<u16>(index));
+                PutState(out, value);
+                ++num_regs;
+            }
+        }
+    }
+    std::memcpy(out.data() + count_at, &num_regs, sizeof(num_regs));
+    if (info.hw_stage == HwStage::Compute) {
+        PutState(out, ComputeRegDwords);
+        const auto* cs = reinterpret_cast<const u8*>(&liverpool->GetCsRegs());
+        out.insert(out.end(), cs, cs + ComputeRegDwords * sizeof(u32));
+    } else {
+        PutState(out, u32{0});
+    }
+    PutState(out, draw_indirect_params.vertex_sgpr_offset);
+    PutState(out, draw_indirect_params.instance_sgpr_offset);
+    PutState(out, static_cast<u8>(draw_indirect_params.is_indirect));
+    PutState(out, user_data);
+    PutState(out, info.flat_layout);
+    PutState(out, static_cast<u32>(info.flattened_ud_buf.size()));
     out.insert(out.end(), flat, flat + info.flattened_ud_buf.size() * sizeof(u32));
     PutState(out, fetch.size);
     if (fetch.size != 0) {
         PutState(out, fetch.vertex_offset_sgpr);
         PutState(out, fetch.instance_offset_sgpr);
         PutState(out, static_cast<u32>(fetch.attributes.size()));
-        for (const auto& attribute : fetch.attributes) {
-            PutState(out, attribute);
+        for (const auto& a : fetch.attributes) {
+            PutState(out, std::array<u8, 8>{a.dest_vgpr, a.num_elements, a.sgpr_base,
+                                            a.dword_offset, a.instance_data, a.inst_offset,
+                                            a.data_format, a.num_format});
         }
     }
     PutState(out, static_cast<u32>(fetch.attributes.size()));
     for (const auto& attribute : fetch.attributes) {
         PutState(out, static_cast<u32>(attribute.dword_offset));
-        PutState(out, info.ReadUdReg<AmdGpu::Buffer>(attribute.sgpr_base, attribute.dword_offset));
+        const auto buffer =
+            info.ReadUdReg<AmdGpu::Buffer>(attribute.sgpr_base, attribute.dword_offset);
+        std::array<u32, 4> dwords{};
+        std::memcpy(dwords.data(), &buffer, sizeof(dwords));
+        PutState(out, dwords);
     }
     shader_scanner->NoteState(info.pgm_hash, std::move(out));
 }
@@ -2138,6 +2258,15 @@ bool PipelineCache::PrecompileRecorded(const Precompile::Job& job,
     Precompiled done{.hash = job.hash};
     u32 objects = 0;
     u32 variants = 0;
+    u32 stale_layouts = 0;
+    SCOPE_EXIT {
+        if (stale_layouts != 0) {
+            LOG_INFO(Render_Vulkan,
+                     "{} recorded draw states of {} shader {:#x} flatten its user data "
+                     "differently from this build",
+                     stale_layouts, job.stage, job.hash);
+        }
+    };
     for (const auto& blob : states) {
         const auto state = ParseDrawState(blob);
         if (!state || state->hw_stage != job.stage) {
@@ -2162,6 +2291,11 @@ bool PipelineCache::PrecompileRecorded(const Precompile::Job& job,
             const Common::SoftAsserts soft_asserts;
             const auto ir_program =
                 Shader::TranslateProgram(found.code, replay_pools, info, runtime_info, profile);
+            if (info.flat_layout != state->flat_layout) {
+                // Recorded by a build that flattens this shader's user data differently.
+                ++stale_layouts;
+                continue;
+            }
             spv = Shader::Backend::SPIRV::EmitSPIRV(profile, runtime_info, ir_program, binding);
         } catch (const Common::SoftAssertFailure&) {
             LOG_INFO(Render_Vulkan, "Recorded draw state of {} shader {:#x} doesn't translate",

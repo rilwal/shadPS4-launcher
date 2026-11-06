@@ -159,6 +159,11 @@ struct Info : InfoPersistent {
     };
     std::vector<FlatSource> guess_flat_sources;
 
+    /// Identifies what each flattened user data dword holds (where its value is read from), so
+    /// a flattened buffer recorded by another build is only used if it's laid out the same.
+    /// Zero when only user data registers are flattened.
+    u64 flat_layout{};
+
     /// A draw's state recorded at an earlier first use, to translate the shader for exactly
     /// that draw without reading guest memory: the flattened user data (which holds every
     /// sharp the shader reads), the fetch shader and the vertex buffer V#s by dword offset.

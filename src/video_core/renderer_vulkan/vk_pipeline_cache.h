@@ -150,6 +150,16 @@ private:
                                                    size_t perm_idx,
                                                    Shader::Backend::Bindings& binding);
     const Shader::RuntimeInfo& BuildRuntimeInfo(Shader::HwStage stage, Shader::SwStage l_stage);
+    using ColorBuffers = std::array<Shader::PsColorBuffer, AmdGpu::NUM_COLOR_BUFFERS>;
+    /// Builds a stage's runtime info from the registers, so a draw recorded as its registers can
+    /// be built again later. The compute registers are needed for compute, the hull shader's
+    /// info for the local stage.
+    void FillRuntimeInfo(Shader::RuntimeInfo& info, Shader::HwStage stage, Shader::SwStage l_stage,
+                         const AmdGpu::Regs& regs, const AmdGpu::ComputeProgram* cs_regs,
+                         const ColorBuffers& color_buffers, const DrawIndirectParams& indirect,
+                         const Shader::Info* hull_info);
+    /// The render targets as the shader recompiler sees them, before draws mask them.
+    static void FillColorBuffers(const AmdGpu::Regs& regs, ColorBuffers& color_buffers);
     /// A render target as the fragment shader is specialized on it.
     Shader::PsColorBuffer ShaderColorBuffer(const Shader::PsColorBuffer& target) const;
 
@@ -478,6 +488,18 @@ private:
     bool PrecompileRecorded(const Precompile::Job& job,
                             const VideoCore::ShaderScanner::Shader& found,
                             const std::vector<std::vector<u8>>& states);
+    /// A recorded draw state, built again for this build.
+    struct DrawState {
+        Shader::HwStage hw_stage;
+        Shader::SwStage sw_stage;
+        Shader::RuntimeInfo runtime_info;
+        std::array<u32, Shader::ShaderParams::NumShaderUserData> user_data;
+        u64 flat_layout;
+        std::vector<u32> flat_buf;
+        std::optional<Shader::Gcn::FetchShaderData> fetch;
+        std::vector<std::pair<u32, AmdGpu::Buffer>> vertex_buffers;
+    };
+    std::optional<DrawState> ParseDrawState(std::span<const u8> blob);
     /// Records the draw state a first use was translated for, for PrecompileRecorded next time.
     void RecordDrawState(const Shader::Info& info, const Shader::RuntimeInfo& runtime_info,
                          const Shader::Gcn::FetchShaderData& fetch);

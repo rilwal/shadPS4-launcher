@@ -110,11 +110,16 @@ public:
     std::vector<u64> TilingKeys();
     void NoteTilingKey(u64 key);
 
-    /// Draw states recorded at first uses, as PipelineCache's opaque blobs, so later launches
-    /// can compile shaders for exactly what they were drawn with. Saved apart from the list, in
-    /// a file with no shader code, so it can be shared.
+    /// Draw states recorded at first uses, as PipelineCache's blobs, so later launches can
+    /// compile shaders for exactly what they were drawn with. Saved apart from the list, in a
+    /// file with no shader code, so it can be shared. A blob starts with StateKeyBytes that
+    /// identify what it records (one with the same start isn't kept twice), then its hardware
+    /// stage as a byte.
+    static constexpr size_t StateKeyBytes = 12;
     void NoteState(u64 hash, std::vector<u8> state);
     std::vector<std::vector<u8>> StatesOf(u64 hash);
+    /// The hardware stage a shader's recorded states were drawn as, if it has any.
+    std::optional<u8> StateStageOf(u64 hash);
 
     /// Waits until the shaders saved by earlier runs are loaded.
     void WaitUntilLoaded() const;

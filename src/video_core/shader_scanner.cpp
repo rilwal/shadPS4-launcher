@@ -60,7 +60,7 @@ constexpr u64 MaxSaveSize = 1_GB;
 /// The recorded draw states, in their own file with no shader code: magic, version, size,
 /// then compressed per shader its hash, a count and the states, each a size and its bytes.
 constexpr u32 StatesMagic = 0x41545353; // "SSTA"
-constexpr u32 StatesVersion = 1;
+constexpr u32 StatesVersion = 2;
 constexpr u32 MaxStatesPerShader = 8;
 constexpr u32 MaxStateSize = 64_KB;
 
@@ -433,6 +433,9 @@ bool ShaderScanner::TryAdd(u64 info_addr) {
             dirty = true;
             if (has_header) {
                 ++with_registers;
+            }
+            // Without a header, only recorded draw states (maybe from elsewhere) say enough.
+            if (has_header || states.contains(info.shader_hash)) {
                 found_order.push_back(info.shader_hash);
             }
             return true;
@@ -572,7 +575,7 @@ void ShaderScanner::Load() {
         const bool has_header = !shader.header.empty();
         // One without a header can still be compiled early from the draw states recorded when
         // an earlier run used it, which its saved stage says it did.
-        const bool was_used = stage != NoStage;
+        const bool was_used = stage != NoStage || states.contains(hash);
         if (shaders.try_emplace(hash, std::move(shader)).second) {
             ++loaded;
             if (has_header) {
@@ -613,9 +616,11 @@ void ShaderScanner::LoadStates() {
                             states_path.string());
                 return;
             }
-            list.emplace_back(in.begin(), in.begin() + size);
+            if (size > StateKeyBytes) {
+                list.emplace_back(in.begin(), in.begin() + size);
+                ++loaded_states;
+            }
             in = in.subspan(size);
-            ++loaded_states;
         }
     }
     LOG_INFO(Render, "Shader scan: {} draw states of {} shaders from earlier runs", loaded_states,
@@ -623,16 +628,28 @@ void ShaderScanner::LoadStates() {
 }
 
 void ShaderScanner::NoteState(u64 hash, std::vector<u8> state) {
-    if (state.size() > MaxStateSize) {
+    if (state.size() > MaxStateSize || state.size() <= StateKeyBytes) {
         return;
     }
     std::scoped_lock lock{mutex};
     auto& list = states[hash];
-    if (list.size() >= MaxStatesPerShader || std::ranges::find(list, state) != list.end()) {
+    const auto same = [&](const std::vector<u8>& held) {
+        return std::equal(held.begin(), held.begin() + StateKeyBytes, state.begin());
+    };
+    if (list.size() >= MaxStatesPerShader || std::ranges::any_of(list, same)) {
         return;
     }
     list.push_back(std::move(state));
     dirty = true;
+}
+
+std::optional<u8> ShaderScanner::StateStageOf(u64 hash) {
+    std::scoped_lock lock{mutex};
+    const auto it = states.find(hash);
+    if (it == states.end() || it->second.empty()) {
+        return std::nullopt;
+    }
+    return it->second.front()[StateKeyBytes];
 }
 
 std::vector<std::vector<u8>> ShaderScanner::StatesOf(u64 hash) {
