@@ -193,16 +193,6 @@ void Inst::Invalidate() {
     ReplaceOpcode(Opcode::Void);
 }
 
-void Inst::InvalidateUnlinked() {
-    if (op == Opcode::Phi) {
-        phi_args.clear();
-    } else {
-        std::memset(reinterpret_cast<char*>(&args), 0, sizeof(args));
-    }
-    uses.clear();
-    ReplaceOpcode(Opcode::Void);
-}
-
 void Inst::ClearArgs() {
     if (op == Opcode::Phi) {
         for (auto i = 0; i < phi_args.size(); i++) {

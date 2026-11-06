@@ -193,17 +193,6 @@ public:
     void Invalidate();
     void ClearArgs();
 
-    /// Turns this instruction into a Void without removing it from its operands' use lists, and
-    /// drops its own uses. For passes that remove many instructions and then fix the use lists
-    /// of the survivors in one go with EraseUsesIf.
-    void InvalidateUnlinked();
-
-    /// Removes every use whose entry matches pred, keeping the order of the rest.
-    template <typename Pred>
-    void EraseUsesIf(Pred&& pred) {
-        uses.remove_if(pred);
-    }
-
     u32 scc_index{};
 
 private:
