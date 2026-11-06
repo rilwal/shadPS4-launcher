@@ -6,7 +6,6 @@
 #include "common/io_file.h"
 #include "common/path_util.h"
 #include "common/singleton.h"
-#include "video_core/perf_stats.h"
 #include "core/debug_state.h"
 #include "core/devtools/layer.h"
 #include "core/emulator_settings.h"
@@ -22,6 +21,7 @@
 #include "launcher/session.h"
 #include "sdl_window.h"
 #include "video_core/buffer_cache/buffer.h"
+#include "video_core/perf_stats.h"
 #include "video_core/renderdoc.h"
 #include "video_core/renderer_vulkan/vk_platform.h"
 #include "video_core/renderer_vulkan/vk_presenter.h"
@@ -682,11 +682,15 @@ static vk::Format GetFrameViewFormat(const Libraries::VideoOut::PixelFormat form
 
 Frame* Presenter::PrepareFrame(const Libraries::VideoOut::BufferAttributeGroup& attribute,
                                VAddr cpu_address) {
+    // A slow flip says where its time went, to find what holds the GPU thread up in it.
+    const u64 flip_start = VideoCore::PerfStats::NowNs();
     auto desc = VideoCore::TextureCache::ImageDesc{attribute, cpu_address};
     const auto image_id = texture_cache.FindImage(desc);
     texture_cache.UpdateImage(image_id);
+    const u64 found_ns = VideoCore::PerfStats::NowNs();
 
     Frame* frame = GetRenderFrame();
+    const u64 frame_ns = VideoCore::PerfStats::NowNs();
 
     const auto frame_subresources = vk::ImageSubresourceRange{
         .aspectMask = vk::ImageAspectFlagBits::eColor,
@@ -757,6 +761,7 @@ Frame* Presenter::PrepareFrame(const Libraries::VideoOut::BufferAttributeGroup& 
                     vk::PipelineStageFlagBits2::eFragmentShader, vk::AccessFlagBits2::eShaderRead);
     runtime.FlushBarriers();
 
+    const u64 passes_start = VideoCore::PerfStats::NowNs();
     image_view = fsr_pass.Render(cmdbuf, image_view, image_size, {frame->width, frame->height},
                                  fsr_settings, frame->is_hdr);
 
@@ -765,6 +770,7 @@ Frame* Presenter::PrepareFrame(const Libraries::VideoOut::BufferAttributeGroup& 
     pp_settings.srgb_input =
         attribute.attrib.pixel_format == Libraries::VideoOut::PixelFormat::A2R10G10B10Srgb;
     pp_pass.Render(cmdbuf, image_view, image_size, *frame, pp_settings);
+    const u64 passes_ns = VideoCore::PerfStats::NowNs();
 
     DebugState.game_resolution = {image_size.width, image_size.height};
     DebugState.output_resolution = {frame->width, frame->height};
@@ -781,6 +787,17 @@ Frame* Presenter::PrepareFrame(const Libraries::VideoOut::BufferAttributeGroup& 
     frame->ready_tick = draw_scheduler.CurrentTick();
     SubmitInfo info{};
     draw_scheduler.Flush(info);
+    const u64 flip_end = VideoCore::PerfStats::NowNs();
+    if (flip_end - flip_start > 20'000'000) {
+        LOG_INFO(Render_Vulkan,
+                 "Slow flip {:.1f} ms ({}x{}): image {:.1f}, waiting for a free frame {:.1f} "
+                 "(recreating it {:.1f}), setup {:.1f}, scaling and post passes {:.1f}, submit "
+                 "{:.1f}",
+                 (flip_end - flip_start) / 1e6, image_size.width, image_size.height,
+                 (found_ns - flip_start) / 1e6, (frame_ns - found_ns - last_recreate_ns) / 1e6,
+                 last_recreate_ns / 1e6, (passes_start - frame_ns) / 1e6,
+                 (passes_ns - passes_start) / 1e6, (flip_end - passes_ns) / 1e6);
+    }
     return frame;
 }
 
@@ -880,6 +897,7 @@ void Presenter::Present(Frame* frame, bool is_reusing_frame, bool is_game_frame)
         return;
     }
 
+    const u64 present_start = VideoCore::PerfStats::NowNs();
     // Recreate the swapchain if the window was resized, or its settings changed.
     const bool settings_changed = recreate_swapchain.exchange(false);
     if (settings_changed || window.GetWidth() != swapchain.GetWidth() ||
@@ -898,6 +916,7 @@ void Presenter::Present(Frame* frame, bool is_reusing_frame, bool is_game_frame)
         }
     }
 
+    const u64 acquired_ns = VideoCore::PerfStats::NowNs();
     // Reset fence for queue submission. Do it here instead of GetRenderFrame() because we may
     // skip frame because of slow swapchain recreation. If a frame skip occurs, we skip signal
     // the frame's present fence and future GetRenderFrame() call will hang waiting for this frame.
@@ -939,6 +958,7 @@ void Presenter::Present(Frame* frame, bool is_reusing_frame, bool is_game_frame)
         }
     }
 
+    const u64 overlay_ns = VideoCore::PerfStats::NowNs();
     const u32 capture_with_overlays_count = VideoCore::ConsumeWithOverlaysScreenshotRequests();
     std::optional<ScreenshotReadback> pending_screenshot;
 
@@ -1178,8 +1198,10 @@ void Presenter::Present(Frame* frame, bool is_reusing_frame, bool is_game_frame)
     info.AddSignal(swapchain.GetPresentReadySemaphore());
     info.AddSignal(frame->present_done);
     const u64 present_tick = scheduler.CurrentTick();
+    const u64 drawn_ns = VideoCore::PerfStats::NowNs();
     scheduler.Flush(info);
     Launcher::Overlay::End(present_tick);
+    const u64 submitted_ns = VideoCore::PerfStats::NowNs();
 
     // Present to swapchain.
     {
@@ -1187,6 +1209,15 @@ void Presenter::Present(Frame* frame, bool is_reusing_frame, bool is_game_frame)
         if (!swapchain.Present()) {
             swapchain.Recreate(window.GetWidth(), window.GetHeight());
         }
+    }
+    if (const u64 present_end = VideoCore::PerfStats::NowNs();
+        present_end - present_start > 50'000'000) {
+        LOG_INFO(Render_Vulkan,
+                 "Slow present {:.1f} ms: acquiring {:.1f} (with any swapchain recreation), "
+                 "overlay {:.1f}, drawing {:.1f}, submitting {:.1f}, presenting {:.1f}",
+                 (present_end - present_start) / 1e6, (acquired_ns - present_start) / 1e6,
+                 (overlay_ns - acquired_ns) / 1e6, (drawn_ns - overlay_ns) / 1e6,
+                 (submitted_ns - drawn_ns) / 1e6, (present_end - submitted_ns) / 1e6);
     }
 
     free_frame();
@@ -1203,6 +1234,8 @@ void Presenter::Present(Frame* frame, bool is_reusing_frame, bool is_game_frame)
 Frame* Presenter::GetRenderFrame() {
     // Wait for free presentation frames
     Frame* frame;
+    const VideoCore::PerfStats::ScopedCost waiting{VideoCore::PerfStats::Cost::Presents};
+    last_recreate_ns = 0;
     {
         std::unique_lock lock{free_mutex};
         free_cv.wait(lock, [this] { return !free_queue.empty(); });
@@ -1233,7 +1266,9 @@ Frame* Presenter::GetRenderFrame() {
 
     if (frame->width != expected_frame_width || frame->height != expected_frame_height ||
         frame->is_hdr != swapchain.GetHDR()) {
+        const u64 start = VideoCore::PerfStats::NowNs();
         RecreateFrame(frame, expected_frame_width, expected_frame_height);
+        last_recreate_ns = VideoCore::PerfStats::NowNs() - start;
     }
 
     return frame;
