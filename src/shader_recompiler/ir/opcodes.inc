@@ -433,7 +433,7 @@ OPCODE(ImageSampleDrefExplicitLod,                          F32x4,          Opaq
 OPCODE(ImageGather,                                         F32x4,          Opaque,         Opaque,         Opaque,                                         )
 OPCODE(ImageGatherDref,                                     F32x4,          Opaque,         Opaque,         Opaque,         F32,                            )
 OPCODE(ImageQueryDimensions,                                U32x4,          Opaque,         U32,            U1,                                             )
-OPCODE(ImageQueryLod,                                       F32x4,          Opaque,         Opaque,                                                         )
+OPCODE(ImageQueryLod,                                       F32x4,          Opaque,         Opaque,         Opaque,                                         )
 OPCODE(ImageGradient,                                       F32x4,          Opaque,         Opaque,         Opaque,         Opaque,         Opaque,         F32,          )
 OPCODE(ImageRead,                                           F32x4,          Opaque,         Opaque,         U32,            U32,                            )
 OPCODE(ImageWrite,                                          Void,           Opaque,         Opaque,         U32,            U32,            F32x4,          )

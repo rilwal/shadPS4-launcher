@@ -2007,8 +2007,9 @@ namespace {
 
 /// Recorded draw states: the version, then the stages, the runtime info, the user data, the
 /// flattened user data, the fetch shader and the vertex buffer V#s. Laid out in this build's
-/// structs, so the version changes with their sizes.
-constexpr u32 DrawStateVersion = (1u << 24) ^ u32(sizeof(Shader::RuntimeInfo)) ^
+/// structs, so the version changes with their sizes. The top byte changes with what a
+/// shader's flattened user data holds (2: image LOD queries' samplers).
+constexpr u32 DrawStateVersion = (2u << 24) ^ u32(sizeof(Shader::RuntimeInfo)) ^
                                  u32(sizeof(Shader::Gcn::VertexAttribute) << 16) ^
                                  u32(sizeof(AmdGpu::Buffer) << 20);
 static_assert(std::is_trivially_copyable_v<Shader::RuntimeInfo>);

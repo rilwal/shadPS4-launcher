@@ -407,7 +407,7 @@ public:
                                             const U1& skip_mips, TextureInstInfo info);
 
     [[nodiscard]] Value ImageQueryLod(const Value& handle, const Value& coords,
-                                      TextureInstInfo info);
+                                      const Value& sampler, TextureInstInfo info);
     [[nodiscard]] Value ImageGather(const Value& handle, const Value& coords, const Value& offset,
                                     TextureInstInfo info);
     [[nodiscard]] Value ImageGatherDref(const Value& handle, const Value& coords,

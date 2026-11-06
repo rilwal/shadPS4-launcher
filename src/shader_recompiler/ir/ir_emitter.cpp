@@ -2169,8 +2169,9 @@ Value IREmitter::ImageQueryDimension(const Value& handle, const IR::U32& lod,
     return Inst(Opcode::ImageQueryDimensions, Flags{info}, handle, lod, skip_mips);
 }
 
-Value IREmitter::ImageQueryLod(const Value& handle, const Value& coords, TextureInstInfo info) {
-    return Inst(Opcode::ImageQueryLod, Flags{info}, handle, coords);
+Value IREmitter::ImageQueryLod(const Value& handle, const Value& coords, const Value& sampler,
+                               TextureInstInfo info) {
+    return Inst(Opcode::ImageQueryLod, Flags{info}, handle, coords, sampler);
 }
 
 Value IREmitter::ImageGradient(const Value& handle, const Value& coords,
