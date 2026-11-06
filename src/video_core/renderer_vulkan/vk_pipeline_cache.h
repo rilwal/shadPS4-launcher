@@ -384,6 +384,8 @@ private:
     void ReleaseHeldPrecompiles();
     /// Learns which binary type is which stage from programs the game uses. GPU thread.
     void NotePrecompileType(u64 hash, Shader::HwStage hw_stage);
+    /// Index of the queued shader a worker should compile next. Under the precompile lock.
+    size_t PickPrecompileJob();
     /// A prepared program's first use: whether its guess served the draw.
     void NotePreparedUse(Program& program, u64 hash, bool served,
                          const Shader::StageSpecialization& spec, u64 perm_hash);
@@ -396,10 +398,21 @@ private:
     struct Precompile {
         std::mutex mutex;
         std::condition_variable_any cv;
+        struct Job {
+            u64 hash;
+            Shader::HwStage stage;
+            /// Where the scan found it, 0 if not known.
+            u64 addr;
+        };
         /// Waiting for a worker, newest last.
-        std::vector<std::pair<u64, Shader::HwStage>> queue;
+        std::vector<Job> queue;
         /// Programs queued, translated or already used by the game.
         tsl::robin_set<u64> seen;
+        /// Programs the game has used.
+        tsl::robin_set<u64> used;
+        /// Whether workers take the queued shader found nearest the latest first uses, or else
+        /// the newest found.
+        bool order_near{true};
         /// Per binary type: the stage it's compiled early as, and whether a first use showed
         /// otherwise.
         std::array<Shader::HwStage, 16> type_stage;
@@ -420,6 +433,8 @@ private:
         u32 served{};
         u32 missed{};
         u32 duplicate{};
+        /// Queued shaders the game used before a worker got to them.
+        u32 skipped_used{};
         /// Shaders whose guessed translation failed, so they wait for their draw.
         u32 rejected{};
         /// First uses that waited for the worker compiling them, and how long.

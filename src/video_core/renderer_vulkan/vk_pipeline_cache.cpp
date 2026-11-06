@@ -870,11 +870,13 @@ void PipelineCache::FlushCompileStats(u64 now_ns) {
                      "pipelines) in {:.0f} ms of worker time; first uses: {} served, {} needed "
                      "another variant; {} came too late; {} queued; "
                      "{} dropped as the wrong stage; {} first uses waited {:.1f} ms for the "
-                     "worker compiling them",
+                     "worker compiling them; {} queued were used before a worker got to them",
                      seconds, precompile.translated, precompile.shader_objects,
                      precompile.compute_pipelines, precompile.worker_ns / 1e6, precompile.served,
                      precompile.missed, precompile.duplicate, precompile.queue.size(),
-                     precompile.rejected, precompile.joined, precompile.joined_ns / 1e6);
+                     precompile.rejected, precompile.joined, precompile.joined_ns / 1e6,
+                     precompile.skipped_used);
+            precompile.skipped_used = 0;
             precompile.joined = 0;
             precompile.joined_ns = 0;
             precompile.translated = precompile.shader_objects = precompile.compute_pipelines = 0;
@@ -1638,11 +1640,15 @@ void PipelineCache::StartPrecompile(u32 num_threads) {
     precompile.type_stage[0] = HwStage::Fragment;
     precompile.type_stage[1] = HwStage::Vertex;
     precompile.type_stage[4] = HwStage::Compute;
+    if (const char* order = std::getenv("SHADPS4_PRECOMPILE_ORDER")) {
+        precompile.order_near = std::string_view{order} != "newest";
+    }
     precompile.active = true;
     for (u32 i = 0; i < num_threads; ++i) {
         precompile.threads.emplace_back([this](std::stop_token stop) { RunPrecompile(stop); });
     }
-    LOG_INFO(Render_Vulkan, "Compiling found shaders early on {} threads", num_threads);
+    LOG_INFO(Render_Vulkan, "Compiling found shaders early on {} threads, {} first", num_threads,
+             precompile.order_near ? "nearest the latest draws" : "newest found");
 }
 
 void PipelineCache::StopPrecompile() {
@@ -1671,7 +1677,7 @@ void PipelineCache::RunPrecompile(std::stop_token stop) {
     Common::SetCurrentThreadName("shadPS4:Precompile");
     Common::SetCurrentThreadPriority(Common::ThreadPriority::Low);
     while (!stop.stop_requested()) {
-        std::pair<u64, HwStage> job;
+        Precompile::Job job;
         {
             std::unique_lock lock{precompile.mutex};
             // The scan has no way to wake the workers, so they look for new finds now and then.
@@ -1684,7 +1690,8 @@ void PipelineCache::RunPrecompile(std::stop_token stop) {
                     if (const auto saved = shader_scanner->StageOf(hash)) {
                         if (const auto stage = static_cast<HwStage>(*saved);
                             PrecompilesStage(stage)) {
-                            precompile.queue.emplace_back(hash, stage);
+                            precompile.queue.push_back(
+                                {hash, stage, shader_scanner->AddressOf(hash)});
                         }
                         continue;
                     }
@@ -1694,7 +1701,7 @@ void PipelineCache::RunPrecompile(std::stop_token stop) {
                         continue;
                     }
                     if (PrecompilesStage(stage)) {
-                        precompile.queue.emplace_back(hash, stage);
+                        precompile.queue.push_back({hash, stage, shader_scanner->AddressOf(hash)});
                     }
                 }
             };
@@ -1707,14 +1714,20 @@ void PipelineCache::RunPrecompile(std::stop_token stop) {
                 }
                 take_found();
             }
-            job = precompile.queue.back();
-            precompile.queue.pop_back();
-            precompile.in_flight.insert(job.first);
+            const size_t index = PickPrecompileJob();
+            job = precompile.queue[index];
+            precompile.queue.erase(precompile.queue.begin() + index);
+            if (precompile.used.contains(job.hash)) {
+                // The game compiled it itself while it waited here.
+                ++precompile.skipped_used;
+                continue;
+            }
+            precompile.in_flight.insert(job.hash);
         }
-        PrecompileOne(job.first, job.second);
+        PrecompileOne(job.hash, job.stage);
         {
             std::scoped_lock lock{precompile.mutex};
-            precompile.in_flight.erase(job.first);
+            precompile.in_flight.erase(job.hash);
         }
         precompile.finished.notify_all();
     }
@@ -1845,7 +1858,8 @@ void PipelineCache::ReleaseHeldPrecompiles() {
         std::scoped_lock lock{precompile.mutex};
         for (const u64 hash : precompile.held) {
             if (!program_cache.contains(hash)) {
-                precompile.queue.emplace_back(hash, HwStage::Fragment);
+                precompile.queue.push_back(
+                    {hash, HwStage::Fragment, shader_scanner->AddressOf(hash)});
             }
         }
         LOG_INFO(Render_Vulkan, "{} pixel shaders held for their inputs are queued again",
@@ -1907,10 +1921,42 @@ void PipelineCache::TakePrecompiled() {
     }
 }
 
+size_t PipelineCache::PickPrecompileJob() {
+    const size_t newest = precompile.queue.size() - 1;
+    if (!precompile.order_near || newest == 0) {
+        return newest;
+    }
+    const auto recent = shader_scanner->RecentUses();
+    if (std::ranges::all_of(recent, [](u64 addr) { return addr == 0; })) {
+        return newest;
+    }
+    // Nearest to any of the latest first uses; ties and unknown addresses go to the newest.
+    size_t best = newest;
+    u64 best_distance = std::numeric_limits<u64>::max();
+    for (size_t i = precompile.queue.size(); i-- > 0;) {
+        const u64 addr = precompile.queue[i].addr;
+        if (addr == 0) {
+            continue;
+        }
+        for (const u64 use : recent) {
+            if (use == 0) {
+                continue;
+            }
+            const u64 distance = addr > use ? addr - use : use - addr;
+            if (distance < best_distance) {
+                best_distance = distance;
+                best = i;
+            }
+        }
+    }
+    return best;
+}
+
 void PipelineCache::NotePrecompileType(u64 hash, HwStage hw_stage) {
     const auto type = shader_scanner->TypeOf(hash);
     std::scoped_lock lock{precompile.mutex};
     precompile.seen.insert(hash);
+    precompile.used.insert(hash);
     if (!type) {
         return;
     }

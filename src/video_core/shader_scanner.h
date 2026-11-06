@@ -3,6 +3,7 @@
 
 #pragma once
 
+#include <array>
 #include <atomic>
 #include <condition_variable>
 #include <filesystem>
@@ -32,6 +33,9 @@ public:
         u8 type;
         /// When the scan found it.
         u64 found_ns;
+        /// Guest address of the copy with the shader struct, 0 until the scan finds it in this
+        /// run (shaders from the saved list start without one).
+        u64 addr{};
         /// The hardware stage it was first used as (a Shader::Stage), NoStage until then.
         /// Saved with it, so later launches know it before any draw.
         u8 stage = NoStage;
@@ -59,6 +63,16 @@ public:
 
     /// The shader with this hash, if the scan found it.
     std::optional<Shader> Find(u64 hash);
+
+    /// Guest address of the shader with this hash, 0 when not known.
+    u64 AddressOf(u64 hash);
+
+    /// Number of recent first uses remembered by address.
+    static constexpr size_t NumRecentUses = 8;
+    /// Guest addresses of the latest first uses of found shaders, 0 where none yet. Games keep
+    /// the shaders of a level or material together, so what is found near them is likely
+    /// drawn soon.
+    std::array<u64, NumRecentUses> RecentUses();
 
     /// The binary type of the shader with this hash, if the scan found it.
     std::optional<u8> TypeOf(u64 hash);
@@ -128,6 +142,8 @@ private:
     std::vector<u64> found_order;
     u32 first_uses{};
     u32 found_ahead{};
+    std::array<u64, NumRecentUses> recent_uses{};
+    size_t recent_use_index{};
     /// Scan totals, for the per-pass log.
     u32 pass_new{};
     /// Shaders found through file reads and loads, between passes.

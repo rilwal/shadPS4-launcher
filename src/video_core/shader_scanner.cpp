@@ -305,6 +305,10 @@ bool ShaderScanner::TryAdd(u64 info_addr) {
         std::scoped_lock lock{mutex};
         if (const auto it = shaders.find(info.shader_hash);
             it != shaders.end() && !it->second.header.empty()) {
+            // A shader from the saved list learns where it is in this run.
+            if (it->second.addr == 0) {
+                it.value().addr = info_addr;
+            }
             return false;
         }
     }
@@ -335,12 +339,16 @@ bool ShaderScanner::TryAdd(u64 info_addr) {
             .found_ns = PerfStats::NowNs(),
         };
         const bool has_header = !shader.header.empty();
+        if (has_header) {
+            shader.addr = info_addr;
+        }
         std::scoped_lock lock{mutex};
         if (const auto it = shaders.find(info.shader_hash); it != shaders.end()) {
             if (!has_header || !it.value().header.empty()) {
                 return false;
             }
             it.value().header = std::move(shader.header);
+            it.value().addr = info_addr;
             ++with_registers;
             found_order.push_back(info.shader_hash);
             dirty = true;
@@ -440,8 +448,8 @@ void ShaderScanner::Load() {
         u32 code_dwords{};
         u32 header_bytes{};
         if (!Get(in, hash) || !Get(in, type) || !Get(in, stage) || !Get(in, code_dwords) ||
-            !Get(in, header_bytes) ||
-            code_dwords > MaxCodeLength / sizeof(u32) || header_bytes > MaxHeaderLength ||
+            !Get(in, header_bytes) || code_dwords > MaxCodeLength / sizeof(u32) ||
+            header_bytes > MaxHeaderLength ||
             in.size() < code_dwords * sizeof(u32) + header_bytes) {
             LOG_WARNING(Render, "Saved shader list {} is cut short after {} shaders",
                         save_path.string(), i);
@@ -465,8 +473,8 @@ void ShaderScanner::Load() {
             }
         }
     }
-    LOG_INFO(Render, "Shader scan: {} shaders from earlier runs ({} with stage registers)",
-             loaded, with_registers);
+    LOG_INFO(Render, "Shader scan: {} shaders from earlier runs ({} with stage registers)", loaded,
+             with_registers);
 }
 
 void ShaderScanner::Save() {
@@ -562,6 +570,17 @@ std::vector<u64> ShaderScanner::KnownWithStage() {
     return hashes;
 }
 
+u64 ShaderScanner::AddressOf(u64 hash) {
+    std::scoped_lock lock{mutex};
+    const auto it = shaders.find(hash);
+    return it == shaders.end() ? 0 : it->second.addr;
+}
+
+std::array<u64, ShaderScanner::NumRecentUses> ShaderScanner::RecentUses() {
+    std::scoped_lock lock{mutex};
+    return recent_uses;
+}
+
 std::optional<u8> ShaderScanner::TypeOf(u64 hash) {
     std::scoped_lock lock{mutex};
     const auto it = shaders.find(hash);
@@ -589,6 +608,10 @@ void ShaderScanner::NoteFirstUse(u64 hash, u8 stage) {
     if (it != shaders.end()) {
         ++found_ahead;
         leads.push_back((now - it->second.found_ns) / 1e9);
+        if (it->second.addr != 0) {
+            recent_uses[recent_use_index] = it->second.addr;
+            recent_use_index = (recent_use_index + 1) % NumRecentUses;
+        }
         // The draw knows the stage; a saved one from an older launch can be wrong.
         if (it->second.stage != stage) {
             it.value().stage = stage;
