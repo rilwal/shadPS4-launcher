@@ -13,6 +13,7 @@
 #include "video_core/buffer_cache/buffer_cache.h"
 #include "video_core/buffer_cache/memory_tracker.h"
 #include "video_core/buffer_cache/region_definitions.h"
+#include "video_core/perf_stats.h"
 #include "video_core/renderer_vulkan/vk_graphics_pipeline.h"
 #include "video_core/renderer_vulkan/vk_instance.h"
 #include "video_core/renderer_vulkan/vk_runtime.h"
@@ -214,6 +215,7 @@ void BufferCache::DownloadMemory(const Buffer* arena, VAddr device_addr, u64 siz
 
 std::pair<const Buffer*, u64> BufferCache::ObtainBuffer(VAddr device_addr, u32 size,
                                                         ObtainBufferFlags flags) {
+    const VideoCore::PerfStats::ScopedCost cost{VideoCore::PerfStats::Cost::Buffers};
     const bool is_written = True(flags & ObtainBufferFlags::IsWritten);
     const bool is_texel_buffer = True(flags & ObtainBufferFlags::IsTexelBuffer);
     const bool skip_stream_buffer = True(flags & ObtainBufferFlags::IgnoreStreamBuffer);

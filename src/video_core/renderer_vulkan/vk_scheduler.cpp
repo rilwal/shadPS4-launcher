@@ -6,6 +6,7 @@
 #include "common/thread.h"
 #include "core/emulator_settings.h"
 #include "imgui/renderer/texture_manager.h"
+#include "video_core/perf_stats.h"
 #include "video_core/renderer_vulkan/vk_instance.h"
 #include "video_core/renderer_vulkan/vk_scheduler.h"
 
@@ -136,6 +137,7 @@ void Scheduler::Finish() {
 }
 
 void Scheduler::Wait(u64 tick) {
+    const VideoCore::PerfStats::ScopedCost cost{VideoCore::PerfStats::Cost::GpuWaits};
     if (tick >= work_semaphore.CurrentTick()) {
         // Make sure we are not waiting for the current tick without signalling
         SubmitInfo info{};
@@ -210,6 +212,7 @@ void Scheduler::EndSession() {
 }
 
 void Scheduler::SubmitExecution(SubmitInfo& info) {
+    const VideoCore::PerfStats::ScopedCost cost{VideoCore::PerfStats::Cost::Submits};
     std::scoped_lock lk{submit_mutex};
     const u64 signal_value = work_semaphore.NextTick();
 

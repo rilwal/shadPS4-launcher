@@ -15,6 +15,7 @@
 #include "core/memory.h"
 #include "core/signals.h"
 #include "video_core/page_manager.h"
+#include "video_core/perf_stats.h"
 #include "video_core/renderer_vulkan/vk_rasterizer.h"
 
 #ifndef _WIN64
@@ -396,8 +397,10 @@ public:
             // Notify rasterizer about the fault.
             const VAddr addr = msg.arg.pagefault.address;
             const auto ptid = msg.arg.pagefault.feat.ptid;
+            const u64 start = VideoCore::PerfStats::NowNs();
             rasterizer->InvalidateMemory(addr, 1,
                                          ptid == rasterizer->GetGpuCommandProcessorThreadId());
+            VideoCore::PerfStats::frames.AddFault(VideoCore::PerfStats::NowNs() - start);
 
             // Some calls to InvalidateMemory never reach the UFFDIO_WRITEPROTECT ioctl in
             // ::Protect, therefore we use MODE_DONTWAKE and wake the thread with UFFDIO_WAKE here
@@ -436,12 +439,14 @@ struct SignalImpl : public PageManager::Impl {
         const auto size = std::min<u64>(8, PageManager::GetNextPageAddr(addr) - addr);
         const auto is_gpu_thread =
             std::this_thread::get_id() == rasterizer->GetGpuCommandProcessorThread();
-        if (Common::IsWriteError(context)) {
-            return rasterizer->InvalidateMemory(addr, size, is_gpu_thread);
-        } else {
-            return rasterizer->ReadMemory(addr, size, is_gpu_thread);
+        const u64 start = VideoCore::PerfStats::NowNs();
+        const bool handled = Common::IsWriteError(context)
+                                 ? rasterizer->InvalidateMemory(addr, size, is_gpu_thread)
+                                 : rasterizer->ReadMemory(addr, size, is_gpu_thread);
+        if (handled) {
+            VideoCore::PerfStats::frames.AddFault(VideoCore::PerfStats::NowNs() - start);
         }
-        return false;
+        return handled;
     }
 };
 

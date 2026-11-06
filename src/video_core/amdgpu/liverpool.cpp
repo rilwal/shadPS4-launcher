@@ -43,6 +43,13 @@ static const char* acb_task_name[] = NAME_ARRAY(ACB_TASK, MAX_NAMES);
 #define YIELD_GFX() YIELD(dcb_task_name)
 #define YIELD_ASC(id) YIELD(acb_task_name[id])
 
+/// Set when a task yields because it's waiting on the guest (every yield is), so the processing
+/// loop can tell short resumes that only checked a wait from real work.
+static thread_local bool yielded_waiting = false;
+#define WAIT_YIELD(yield)                                                                          \
+    yielded_waiting = true;                                                                        \
+    yield
+
 #define RESUME(task, name)                                                                         \
     FIBER_EXIT;                                                                                    \
     task.handle.resume();                                                                          \
@@ -126,6 +133,8 @@ void Liverpool::ProcessCommands() {
 void Liverpool::Process(std::stop_token stoken) {
     Common::SetCurrentThreadName("shadPS4:GpuCommandProcessor");
     gpu_id = std::this_thread::get_id();
+    VideoCore::PerfStats::is_gpu_thread = true;
+    const bool costs = VideoCore::PerfStats::CostsEnabled();
 #ifdef __linux__
     gpu_tid = gettid();
 #endif
@@ -145,6 +154,21 @@ void Liverpool::Process(std::stop_token stoken) {
         curr_qid = -1;
 
         while ((num_submits || num_commands) && !stoken.stop_requested()) {
+            // A short pass that ended on a wait was only checking it: count it as waiting, and
+            // everything else as busy.
+            const u64 pass_start = costs ? VideoCore::PerfStats::NowNs() : 0;
+            yielded_waiting = false;
+            SCOPE_EXIT {
+                if (costs) {
+                    const u64 pass_ns = VideoCore::PerfStats::NowNs() - pass_start;
+                    constexpr u64 CheckNs = 20'000;
+                    VideoCore::PerfStats::frames.AddCost(
+                        yielded_waiting && pass_ns < CheckNs
+                            ? VideoCore::PerfStats::Cost::GuestWaits
+                            : VideoCore::PerfStats::Cost::Busy,
+                        pass_ns);
+                }
+            };
             ProcessCommands();
             ProcessCeQueue();
 
@@ -175,6 +199,14 @@ void Liverpool::Process(std::stop_token stoken) {
         }
 
         if (submit_done) {
+            const u64 flush_start = costs ? VideoCore::PerfStats::NowNs() : 0;
+            SCOPE_EXIT {
+                if (costs) {
+                    VideoCore::PerfStats::frames.AddCost(VideoCore::PerfStats::Cost::Busy,
+                                                         VideoCore::PerfStats::NowNs() -
+                                                             flush_start);
+                }
+            };
             VideoCore::EndCapture();
             if (rasterizer) {
                 rasterizer->OnSubmit();
@@ -234,7 +266,7 @@ Liverpool::Task Liverpool::ProcessCeUpdate(std::span<const u32> ccb) {
             const auto diff = it_body[0];
             while (cblock.ce_count >= cblock.de_count &&
                    (cblock.ce_count - cblock.de_count) >= diff) {
-                YIELD_CE();
+                WAIT_YIELD(YIELD_CE());
             }
             break;
         }
@@ -248,7 +280,7 @@ Liverpool::Task Liverpool::ProcessCeUpdate(std::span<const u32> ccb) {
             RESUME_CE(task);
 
             while (!task.handle.done()) {
-                YIELD_CE();
+                WAIT_YIELD(YIELD_CE());
                 RESUME_CE(task);
             }
             break;
@@ -259,7 +291,7 @@ Liverpool::Task Liverpool::ProcessCeUpdate(std::span<const u32> ccb) {
             }
             const auto* rewind = reinterpret_cast<const PM4CmdRewind*>(header);
             while (!rewind->Valid()) {
-                YIELD_CE();
+                WAIT_YIELD(YIELD_CE());
             }
             break;
         }
@@ -1023,7 +1055,7 @@ Liverpool::Task Liverpool::ProcessGraphics(std::span<const u32> dcb) {
                     mem_semaphore->Signal();
                 } else {
                     while (!mem_semaphore->Signaled()) {
-                        YIELD_GFX();
+                        WAIT_YIELD(YIELD_GFX());
                     }
                     mem_semaphore->Decrement();
                 }
@@ -1039,7 +1071,7 @@ Liverpool::Task Liverpool::ProcessGraphics(std::span<const u32> dcb) {
                 }
                 const PM4CmdRewind* rewind = reinterpret_cast<const PM4CmdRewind*>(header);
                 while (!rewind->Valid()) {
-                    YIELD_GFX();
+                    WAIT_YIELD(YIELD_GFX());
                 }
                 break;
             }
@@ -1053,11 +1085,13 @@ Liverpool::Task Liverpool::ProcessGraphics(std::span<const u32> dcb) {
                 const u64* wait_addr = wait_reg_mem->Address<u64*>();
                 if (vo_port->IsVoLabel(wait_addr) &&
                     num_submits == mapped_queues[GfxQueueId].submits.size()) {
+                    const VideoCore::PerfStats::ScopedCost cost{
+                        VideoCore::PerfStats::Cost::Presents};
                     vo_port->WaitVoLabel([&] { return wait_reg_mem->Test(regs.reg_array); });
                     break;
                 }
                 while (!wait_reg_mem->Test(regs.reg_array)) {
-                    YIELD_GFX();
+                    WAIT_YIELD(YIELD_GFX());
                 }
                 break;
             }
@@ -1078,7 +1112,7 @@ Liverpool::Task Liverpool::ProcessGraphics(std::span<const u32> dcb) {
                 RESUME_GFX(task);
 
                 while (!task.handle.done()) {
-                    YIELD_GFX();
+                    WAIT_YIELD(YIELD_GFX());
                     RESUME_GFX(task);
                 }
                 break;
@@ -1089,7 +1123,7 @@ Liverpool::Task Liverpool::ProcessGraphics(std::span<const u32> dcb) {
             }
             case PM4ItOpcode::WaitOnCeCounter: {
                 while (cblock.ce_count <= cblock.de_count) {
-                    YIELD_GFX();
+                    WAIT_YIELD(YIELD_GFX());
                 }
                 break;
             }
@@ -1252,7 +1286,7 @@ Liverpool::Task Liverpool::ProcessCompute(std::span<const u32> acb, u32 vqid) {
             RESUME_ASC(task, vqid);
 
             while (!task.handle.done()) {
-                YIELD_ASC(vqid);
+                WAIT_YIELD(YIELD_ASC(vqid));
                 RESUME_ASC(task, vqid);
             }
             break;
@@ -1312,7 +1346,7 @@ Liverpool::Task Liverpool::ProcessCompute(std::span<const u32> acb, u32 vqid) {
             }
             const PM4CmdRewind* rewind = reinterpret_cast<const PM4CmdRewind*>(header);
             while (!rewind->Valid()) {
-                YIELD_ASC(vqid);
+                WAIT_YIELD(YIELD_ASC(vqid));
             }
             break;
         }
@@ -1403,7 +1437,7 @@ Liverpool::Task Liverpool::ProcessCompute(std::span<const u32> acb, u32 vqid) {
                 mem_semaphore->Signal();
             } else {
                 while (!mem_semaphore->Signaled()) {
-                    YIELD_ASC(vqid);
+                    WAIT_YIELD(YIELD_ASC(vqid));
                 }
                 mem_semaphore->Decrement();
             }
@@ -1413,7 +1447,7 @@ Liverpool::Task Liverpool::ProcessCompute(std::span<const u32> acb, u32 vqid) {
             const auto* wait_reg_mem = reinterpret_cast<const PM4CmdWaitRegMem*>(header);
             ASSERT(wait_reg_mem->engine.Value() == PM4CmdWaitRegMem::Engine::Me);
             while (!wait_reg_mem->Test(regs.reg_array)) {
-                YIELD_ASC(vqid);
+                WAIT_YIELD(YIELD_ASC(vqid));
             }
             break;
         }
