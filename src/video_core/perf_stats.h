@@ -52,6 +52,16 @@ enum class Cost : u32 {
     ImageBytes,   ///< Their guest size (bytes).
     /// Bytes of image uploads skipped because the guest memory matched the image's last upload.
     ImageSameBytes,
+    Draws,      ///< Draws recorded (a count).
+    Dispatches, ///< Dispatches recorded (a count).
+    // Command translation for draws and dispatches, split only with SHADPS4_DRAW_COSTS=1; the
+    // named costs above (shaders, textures, buffers) stay out of these.
+    DrawChecks,  ///< Pending GPU operations, draw filters, render state set-up.
+    Pipelines,   ///< Building pipeline keys and finding the pipeline and shader variants.
+    Bindings,    ///< Reading the shaders' sharps and gathering their buffers and images.
+    Targets,     ///< Finding render targets and starting rendering.
+    Descriptors, ///< Writing the draw's descriptors.
+    Recording,   ///< Vertex and index buffers, barriers, dynamic state and the Vulkan calls.
     Count,
 };
 
@@ -59,6 +69,16 @@ enum class Cost : u32 {
     static const bool enabled = [] {
         const char* env = std::getenv("SHADPS4_FRAME_COSTS");
         return env == nullptr || env[0] != '0';
+    }();
+    return enabled;
+}
+
+/// Splits command translation for each draw into its steps. Off by default: the extra clock
+/// reads cost about as much as the textures and buffers scopes already do.
+[[nodiscard]] inline bool DrawCostsEnabled() {
+    static const bool enabled = [] {
+        const char* env = std::getenv("SHADPS4_DRAW_COSTS");
+        return env != nullptr && env[0] == '1';
     }();
     return enabled;
 }
@@ -93,11 +113,7 @@ struct Frames {
     /// GPU-thread time spent on shaders and pipelines (translating, creating, waiting for
     /// workers), added by the pipeline cache, so a stutter's log line says how much of it they
     /// explain.
-    void AddShaderTime(u64 ns) {
-        if (is_gpu_thread) {
-            AddCost(Cost::Shaders, ns);
-        }
-    }
+    void AddShaderTime(u64 ns);
 
     void AddFault(u64 ns) {
         AddCost(Cost::Faults, ns);
@@ -197,26 +213,41 @@ struct Frames {
     /// One line of costs, as the stutter log prints them.
     static std::string DescribeCosts(const std::array<u64, CostCount>& c) {
         const auto ms = [&](Cost cost) { return c[static_cast<size_t>(cost)] / 1e6; };
-        const u64 named = c[size_t(Cost::Shaders)] + c[size_t(Cost::Textures)] +
-                          c[size_t(Cost::Buffers)] + c[size_t(Cost::GpuWaits)] +
-                          c[size_t(Cost::Submits)] + c[size_t(Cost::Presents)] +
-                          c[size_t(Cost::Flips)] + c[size_t(Cost::Dma)];
+        u64 named = c[size_t(Cost::Shaders)] + c[size_t(Cost::Textures)] +
+                    c[size_t(Cost::Buffers)] + c[size_t(Cost::GpuWaits)] +
+                    c[size_t(Cost::Submits)] + c[size_t(Cost::Presents)] + c[size_t(Cost::Flips)] +
+                    c[size_t(Cost::Dma)];
+        u64 draw_steps = 0;
+        for (size_t i = size_t(Cost::DrawChecks); i <= size_t(Cost::Recording); ++i) {
+            draw_steps += c[i];
+        }
+        named += draw_steps;
         const u64 busy = c[size_t(Cost::Busy)];
+        // Without the split, "other" is all of command translation.
+        const std::string steps =
+            draw_steps == 0
+                ? std::string{}
+                : fmt::format(", draw checks {:.1f}, pipelines {:.1f}, bindings {:.1f}, targets "
+                              "{:.1f}, descriptors {:.1f}, recording {:.1f}",
+                              ms(Cost::DrawChecks), ms(Cost::Pipelines), ms(Cost::Bindings),
+                              ms(Cost::Targets), ms(Cost::Descriptors), ms(Cost::Recording));
         return fmt::format(
+            "{} draws and {} dispatches; "
             "busy {:.1f} ms (shaders {:.1f}, textures {:.1f} for {} images of {:.1f} MB{}, "
             "buffers {:.1f} for {:.1f} MB, GPU "
-            "waits {:.1f}, submits {:.1f}, present waits {:.1f}, flips {:.1f}, DMA {:.1f}, "
+            "waits {:.1f}, submits {:.1f}, present waits {:.1f}, flips {:.1f}, DMA {:.1f}{}, "
             "other {:.1f}), "
             "guest waits {:.1f} ms; page faults {} taking {:.1f} ms, {} pages "
             "unprotected ahead",
-            busy / 1e6, ms(Cost::Shaders), ms(Cost::Textures), c[size_t(Cost::ImageUploads)],
+            c[size_t(Cost::Draws)], c[size_t(Cost::Dispatches)], busy / 1e6, ms(Cost::Shaders),
+            ms(Cost::Textures), c[size_t(Cost::ImageUploads)],
             c[size_t(Cost::ImageBytes)] / 1048576.0,
             c[size_t(Cost::ImageSameBytes)] != 0
                 ? fmt::format(", {:.1f} MB unchanged and skipped",
                               c[size_t(Cost::ImageSameBytes)] / 1048576.0)
                 : std::string{},
             ms(Cost::Buffers), c[size_t(Cost::BufferBytes)] / 1048576.0, ms(Cost::GpuWaits),
-            ms(Cost::Submits), ms(Cost::Presents), ms(Cost::Flips), ms(Cost::Dma),
+            ms(Cost::Submits), ms(Cost::Presents), ms(Cost::Flips), ms(Cost::Dma), steps,
             busy > named ? (busy - named) / 1e6 : 0.0, ms(Cost::GuestWaits),
             c[size_t(Cost::NumFaults)], ms(Cost::Faults), c[size_t(Cost::PagesAhead)]);
     }
@@ -275,8 +306,9 @@ inline Frames frames;
 /// each nanosecond lands in one cost only (a buffer sync that waits on the GPU is a GPU wait).
 class ScopedCost {
 public:
-    explicit ScopedCost(Cost cost_) : cost{cost_} {
-        if (!is_gpu_thread || !CostsEnabled()) {
+    /// A detail scope only counts with SHADPS4_DRAW_COSTS=1.
+    explicit ScopedCost(Cost cost_, bool detail = false) : cost{cost_} {
+        if (!is_gpu_thread || !CostsEnabled() || (detail && !DrawCostsEnabled())) {
             return;
         }
         active = true;
@@ -302,6 +334,26 @@ public:
     ScopedCost(const ScopedCost&) = delete;
     ScopedCost& operator=(const ScopedCost&) = delete;
 
+    /// Ends this cost and goes on counting the next one, for code that runs in steps. Only
+    /// called while no scope nested in this one is alive.
+    void Switch(Cost next) {
+        if (!active) {
+            return;
+        }
+        const u64 now = NowNs();
+        frames.AddCost(cost, now - start);
+        cost = next;
+        start = now;
+    }
+
+    /// Takes time that was counted as another cost (shaders) out of the scope it happened in.
+    static void Exclude(u64 ns) {
+        if (current == nullptr) {
+            return;
+        }
+        current->start = std::min(current->start + ns, NowNs());
+    }
+
 private:
     static inline thread_local ScopedCost* current = nullptr;
     Cost cost;
@@ -309,6 +361,13 @@ private:
     ScopedCost* parent = nullptr;
     u64 start = 0;
 };
+
+inline void Frames::AddShaderTime(u64 ns) {
+    if (is_gpu_thread) {
+        AddCost(Cost::Shaders, ns);
+        ScopedCost::Exclude(ns);
+    }
+}
 
 } // namespace PerfStats
 

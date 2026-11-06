@@ -296,6 +296,8 @@ void Rasterizer::EliminateFastClear() {
 
 void Rasterizer::Draw(bool is_indexed, u32 index_offset) {
     RENDERER_TRACE;
+    using VideoCore::PerfStats::Cost;
+    VideoCore::PerfStats::ScopedCost step{Cost::DrawChecks, true};
 
     scheduler.PopPendingOperations();
 
@@ -304,6 +306,7 @@ void Rasterizer::Draw(bool is_indexed, u32 index_offset) {
     }
 
     const auto& regs = liverpool->regs;
+    step.Switch(Cost::Pipelines);
     const GraphicsPipeline* pipeline = pipeline_cache.GetGraphicsPipeline();
     if (!pipeline) {
         return;
@@ -312,16 +315,20 @@ void Rasterizer::Draw(bool is_indexed, u32 index_offset) {
         // The look-ahead used the shaders' infos for later draws; set them up for this one.
         pipeline = pipeline_cache.GetGraphicsPipeline();
     }
+    step.Switch(Cost::DrawChecks);
     if (SkipPendingDraw(pipeline)) {
         return;
     }
 
     PrepareRenderState(pipeline);
+    step.Switch(Cost::Bindings);
     if (!BindResources(pipeline)) {
         return;
     }
+    step.Switch(Cost::Targets);
     const auto state = BeginRendering(pipeline);
 
+    step.Switch(Cost::Recording);
     BindVertexBuffers(pipeline);
     if (is_indexed) {
         BindIndexBuffer(index_offset);
@@ -331,7 +338,9 @@ void Rasterizer::Draw(bool is_indexed, u32 index_offset) {
         runtime.FlushBarriers();
     }
 
+    step.Switch(Cost::Descriptors);
     CommitResources(pipeline);
+    step.Switch(Cost::Recording);
     UpdateDynamicState(pipeline, is_indexed);
     scheduler.BeginRendering(state);
 
@@ -352,6 +361,7 @@ void Rasterizer::Draw(bool is_indexed, u32 index_offset) {
                     instance_offset);
     }
     DebugState.IncDrawCall();
+    VideoCore::PerfStats::frames.AddGpuCount(Cost::Draws, 1);
 
     ResetBindings(false);
 }
@@ -360,6 +370,8 @@ void Rasterizer::DrawIndirect(bool is_indexed, VAddr arg_address, u32 offset, u3
                               u32 max_count, VAddr count_address, u16 vertex_sgpr_offset,
                               u16 instance_sgpr_offset) {
     RENDERER_TRACE;
+    using VideoCore::PerfStats::Cost;
+    VideoCore::PerfStats::ScopedCost step{Cost::DrawChecks, true};
 
     scheduler.PopPendingOperations();
 
@@ -372,6 +384,7 @@ void Rasterizer::DrawIndirect(bool is_indexed, VAddr arg_address, u32 offset, u3
         .instance_sgpr_offset = instance_sgpr_offset,
         .is_indirect = true,
     };
+    step.Switch(Cost::Pipelines);
     const GraphicsPipeline* pipeline = pipeline_cache.GetGraphicsPipeline(params);
     if (!pipeline) {
         return;
@@ -379,16 +392,20 @@ void Rasterizer::DrawIndirect(bool is_indexed, VAddr arg_address, u32 offset, u3
     if (!pipeline->IsReady() && liverpool->LookAhead()) {
         pipeline = pipeline_cache.GetGraphicsPipeline(params);
     }
+    step.Switch(Cost::DrawChecks);
     if (SkipPendingDraw(pipeline)) {
         return;
     }
 
     PrepareRenderState(pipeline);
+    step.Switch(Cost::Bindings);
     if (!BindResources(pipeline)) {
         return;
     }
+    step.Switch(Cost::Targets);
     const auto state = BeginRendering(pipeline);
 
+    step.Switch(Cost::Recording);
     BindVertexBuffers(pipeline);
     if (is_indexed) {
         BindIndexBuffer(0, true);
@@ -412,12 +429,15 @@ void Rasterizer::DrawIndirect(bool is_indexed, VAddr arg_address, u32 offset, u3
         runtime.FlushBarriers();
     }
 
+    step.Switch(Cost::Descriptors);
     CommitResources(pipeline);
+    step.Switch(Cost::Recording);
     UpdateDynamicState(pipeline, is_indexed);
     scheduler.BeginRendering(state);
 
     const auto cmdbuf = scheduler.CommandBuffer();
     BindGraphics(pipeline);
+    VideoCore::PerfStats::frames.AddGpuCount(Cost::Draws, 1);
 
     if (is_indexed) {
         ASSERT(sizeof(VkDrawIndexedIndirectCommand) == stride);
@@ -450,10 +470,13 @@ void Rasterizer::DrawIndirect(bool is_indexed, VAddr arg_address, u32 offset, u3
 
 void Rasterizer::DispatchDirect() {
     RENDERER_TRACE;
+    using VideoCore::PerfStats::Cost;
+    VideoCore::PerfStats::ScopedCost step{Cost::DrawChecks, true};
 
     scheduler.PopPendingOperations();
 
     const auto& cs_program = liverpool->GetCsRegs();
+    step.Switch(Cost::Pipelines);
     const ComputePipeline* pipeline = pipeline_cache.GetComputePipeline();
     if (!pipeline) {
         return;
@@ -462,26 +485,32 @@ void Rasterizer::DispatchDirect() {
         // The look-ahead used the shader's info for later dispatches; set it up for this one.
         pipeline = pipeline_cache.GetComputePipeline();
     }
+    step.Switch(Cost::DrawChecks);
 
     const auto& cs = pipeline->GetStage(Shader::SwStage::Compute);
     if (ExecuteShaderHLE(cs, liverpool->regs, cs_program, *this)) {
         return;
     }
 
+    step.Switch(Cost::Bindings);
     if (!BindResources(pipeline)) {
         return;
     }
 
+    step.Switch(Cost::Recording);
     if (needs_barrier) {
         runtime.FlushBarriers();
     }
 
     scheduler.EndRendering();
+    step.Switch(Cost::Descriptors);
     CommitResources(pipeline);
+    step.Switch(Cost::Recording);
 
     const auto cmdbuf = scheduler.CommandBuffer();
     cmdbuf.bindPipeline(vk::PipelineBindPoint::eCompute, pipeline->Handle());
     scheduler.SetGpuSection(Scheduler::GpuSection::Dispatches);
+    VideoCore::PerfStats::frames.AddGpuCount(Cost::Dispatches, 1);
     cmdbuf.dispatch(cs_program.dim_x, cs_program.dim_y, cs_program.dim_z);
     DebugState.IncDispatch();
 
@@ -490,10 +519,13 @@ void Rasterizer::DispatchDirect() {
 
 void Rasterizer::DispatchIndirect(VAddr address, u32 offset, u32 size) {
     RENDERER_TRACE;
+    using VideoCore::PerfStats::Cost;
+    VideoCore::PerfStats::ScopedCost step{Cost::DrawChecks, true};
 
     scheduler.PopPendingOperations();
 
     const auto& cs_program = liverpool->GetCsRegs();
+    step.Switch(Cost::Pipelines);
     const ComputePipeline* pipeline = pipeline_cache.GetComputePipeline();
     if (!pipeline) {
         return;
@@ -502,11 +534,14 @@ void Rasterizer::DispatchIndirect(VAddr address, u32 offset, u32 size) {
         // The look-ahead used the shader's info for later dispatches; set it up for this one.
         pipeline = pipeline_cache.GetComputePipeline();
     }
+    step.Switch(Cost::DrawChecks);
 
+    step.Switch(Cost::Bindings);
     if (!BindResources(pipeline)) {
         return;
     }
 
+    step.Switch(Cost::Recording);
     const auto [buffer, base] = buffer_cache.ObtainBuffer(address + offset, size);
     needs_barrier |= runtime.IsBufferAccessed(buffer, base, size);
     bound_buffers.emplace_back(buffer, base, size, vk::AccessFlagBits2::eIndirectCommandRead);
@@ -516,7 +551,10 @@ void Rasterizer::DispatchIndirect(VAddr address, u32 offset, u32 size) {
     }
 
     scheduler.EndRendering();
+    step.Switch(Cost::Descriptors);
     CommitResources(pipeline);
+    step.Switch(Cost::Recording);
+    VideoCore::PerfStats::frames.AddGpuCount(Cost::Dispatches, 1);
 
     const auto cmdbuf = scheduler.CommandBuffer();
     cmdbuf.bindPipeline(vk::PipelineBindPoint::eCompute, pipeline->Handle());
