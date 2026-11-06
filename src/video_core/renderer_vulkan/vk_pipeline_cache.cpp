@@ -1982,11 +1982,12 @@ bool PipelineCache::PrepareVariant(Program& program, Precompiled& done, const Sh
                             &mappings.info, driver_ns);
         made_object = true;
     } else if (hw_stage == HwStage::Compute) {
+        // The pipeline keeps a pointer to the program's info, as pipelines made for draws do.
         ComputePipeline::SerializationSupport sdata{};
         done.computes.emplace_back(perm_hash, std::make_unique<ComputePipeline>(
                                                   instance, scheduler, desc_heap, profile,
                                                   *pipeline_cache, ComputePipelineKey{perm_hash},
-                                                  info, module, sdata, false, nullptr));
+                                                  program.info, module, sdata, false, nullptr));
     } else if (shader_objects) {
         shader_objects->Register(module, spv);
     }
@@ -2165,13 +2166,16 @@ bool PipelineCache::PrecompileRecorded(const Precompile::Job& job,
                            program->modules.end()) {
             continue;
         }
-        const bool first = !program;
-        if (first) {
+        if (!program) {
+            // The first state's translation is the program's info, which pipelines point at.
             program = std::make_unique<Program>(state->hw_stage, state->sw_stage, params);
-        }
-        objects += PrepareVariant(*program, done, info, std::move(spec), std::move(spv)) ? 1 : 0;
-        if (first) {
             program->info = std::move(info);
+            objects +=
+                PrepareVariant(*program, done, program->info, std::move(spec), std::move(spv)) ? 1
+                                                                                               : 0;
+        } else {
+            objects +=
+                PrepareVariant(*program, done, info, std::move(spec), std::move(spv)) ? 1 : 0;
         }
         ++variants;
     }

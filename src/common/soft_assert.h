@@ -25,6 +25,9 @@ public:
 
     /// Whether the calling thread is inside a SoftAsserts scope.
     static bool Active();
+    /// Makes failures on the calling thread fatal again, for good: for signal handlers, where
+    /// throwing would unwind through a frame the signal interrupted.
+    static void EndOnThisThread();
 };
 
 } // namespace Common

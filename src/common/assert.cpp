@@ -1,6 +1,7 @@
 // SPDX-FileCopyrightText: Copyright 2021 yuzu Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+#include <limits>
 #include "common/arch.h"
 #include "common/assert.h"
 #include "common/soft_assert.h"
@@ -32,6 +33,10 @@ SoftAsserts::~SoftAsserts() {
 
 bool SoftAsserts::Active() {
     return soft_asserts > 0;
+}
+
+void SoftAsserts::EndOnThisThread() {
+    soft_asserts = std::numeric_limits<int>::min() / 2;
 }
 
 } // namespace Common
