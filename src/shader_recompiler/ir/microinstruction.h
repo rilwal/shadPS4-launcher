@@ -3,8 +3,12 @@
 
 #pragma once
 
+#include <algorithm>
 #include <bit>
+#include <cstddef>
 #include <cstring>
+#include <memory>
+#include <new>
 #include <type_traits>
 
 #include <boost/container/list.hpp>
@@ -17,6 +21,67 @@
 #include "shader_recompiler/ir/value.h"
 
 namespace Shader::IR {
+
+/// Allocates single list nodes from a free list per thread, carved from larger blocks. Use
+/// lists gain and lose a node with every argument set, so the general allocator took about a
+/// third of translation time. A node freed on another thread goes to that thread's list; blocks
+/// stay with the process.
+template <typename T>
+struct NodeAllocator {
+    using value_type = T;
+
+    NodeAllocator() = default;
+    template <typename U>
+    NodeAllocator(const NodeAllocator<U>&) noexcept {}
+
+    T* allocate(size_t n) {
+        if (n != 1) {
+            return std::allocator<T>{}.allocate(n);
+        }
+        void*& head = FreeList();
+        if (head == nullptr) {
+            Refill(head);
+        }
+        void* node = head;
+        head = *static_cast<void**>(node);
+        return static_cast<T*>(node);
+    }
+
+    void deallocate(T* p, size_t n) noexcept {
+        if (n != 1) {
+            std::allocator<T>{}.deallocate(p, n);
+            return;
+        }
+        void*& head = FreeList();
+        *reinterpret_cast<void**>(p) = head;
+        head = p;
+    }
+
+    template <typename U>
+    bool operator==(const NodeAllocator<U>&) const noexcept {
+        return true;
+    }
+
+private:
+    static constexpr size_t SlotSize =
+        (std::max(sizeof(T), sizeof(void*)) + alignof(std::max_align_t) - 1) &
+        ~(alignof(std::max_align_t) - 1);
+    static constexpr size_t SlotsPerBlock = 256;
+
+    static void*& FreeList() {
+        thread_local void* head = nullptr;
+        return head;
+    }
+
+    static void Refill(void*& head) {
+        auto* block = static_cast<std::byte*>(::operator new(SlotSize * SlotsPerBlock));
+        for (size_t i = SlotsPerBlock; i-- > 0;) {
+            void* slot = block + i * SlotSize;
+            *static_cast<void**>(slot) = head;
+            head = slot;
+        }
+    }
+};
 
 struct Use {
     Inst* user;
@@ -150,7 +215,7 @@ private:
         std::array<Value, 6> args;
     };
 
-    boost::container::list<IR::Use> uses;
+    boost::container::list<IR::Use, NodeAllocator<IR::Use>> uses;
 };
 static_assert(sizeof(Inst) <= 184, "Inst size unintentionally increased");
 
