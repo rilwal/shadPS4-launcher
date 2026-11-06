@@ -394,13 +394,11 @@ private:
         std::condition_variable_any cv;
         /// Waiting for a worker, newest last.
         std::vector<std::pair<u64, Shader::HwStage>> queue;
-        /// Found shaders whose binary type isn't known as a stage yet.
-        std::vector<std::pair<u64, u8>> untyped;
         /// Programs queued, translated or already used by the game.
         tsl::robin_set<u64> seen;
-        /// Per binary type: the stage it was seen as and how often.
+        /// Per binary type: the stage it's compiled early as, and whether a first use showed
+        /// otherwise.
         std::array<Shader::HwStage, 16> type_stage;
-        std::array<u32, 16> type_votes{};
         std::array<bool, 16> type_conflict{};
         size_t found_cursor{};
         std::vector<Precompiled> done;

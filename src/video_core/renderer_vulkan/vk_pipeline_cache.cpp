@@ -863,12 +863,12 @@ void PipelineCache::FlushCompileStats(u64 now_ns) {
             LOG_INFO(Render_Vulkan,
                      "Compiled early over {:.1f} s: {} shaders ({} shader objects, {} compute "
                      "pipelines) in {:.0f} ms of worker time; first uses: {} served, {} needed "
-                     "another variant; {} came too late; {} queued, {} waiting for their type; "
+                     "another variant; {} came too late; {} queued; "
                      "{} dropped as the wrong stage",
                      seconds, precompile.translated, precompile.shader_objects,
                      precompile.compute_pipelines, precompile.worker_ns / 1e6, precompile.served,
                      precompile.missed, precompile.duplicate, precompile.queue.size(),
-                     precompile.untyped.size(), precompile.rejected);
+                     precompile.rejected);
             precompile.translated = precompile.shader_objects = precompile.compute_pipelines = 0;
             precompile.served = precompile.missed = precompile.duplicate = 0;
             precompile.rejected = 0;
@@ -1620,11 +1620,15 @@ PipelineCache::Result PipelineCache::GetProgram(HwStage hw_stage, SwStage sw_sta
     return std::make_tuple(&program->info, module, perm_hash);
 }
 
-/// A binary type not yet seen as any stage.
-constexpr auto UnseenStage = static_cast<HwStage>(~0u);
-
 void PipelineCache::StartPrecompile(u32 num_threads) {
-    precompile.type_stage.fill(UnseenStage);
+    // The binary info's type is the program type the shader was compiled as. Seen in every
+    // game so far: 0 pixel, 1 vertex (on the vertex stage), 4 compute; the rest are the other
+    // stage arrangements (export, local, hull, geometry, domain), which aren't compiled early.
+    // First uses still check it, and a type used otherwise stops being compiled early.
+    precompile.type_stage.fill(UnguessedStage);
+    precompile.type_stage[0] = HwStage::Fragment;
+    precompile.type_stage[1] = HwStage::Vertex;
+    precompile.type_stage[4] = HwStage::Compute;
     precompile.active = true;
     for (u32 i = 0; i < num_threads; ++i) {
         precompile.threads.emplace_back([this](std::stop_token stop) { RunPrecompile(stop); });
@@ -1680,12 +1684,8 @@ void PipelineCache::RunPrecompile(std::stop_token stop) {
                     if (precompile.type_conflict[type]) {
                         continue;
                     }
-                    if (precompile.type_votes[type] >= 3) {
-                        if (PrecompilesStage(stage)) {
-                            precompile.queue.emplace_back(hash, stage);
-                        }
-                    } else {
-                        precompile.untyped.emplace_back(hash, type);
+                    if (PrecompilesStage(stage)) {
+                        precompile.queue.emplace_back(hash, stage);
                     }
                 }
             };
@@ -1854,31 +1854,12 @@ void PipelineCache::NotePrecompileType(u64 hash, HwStage hw_stage) {
     if (precompile.type_conflict[t]) {
         return;
     }
-    if (stage != UnseenStage && stage != hw_stage) {
+    if (stage != hw_stage) {
         precompile.type_conflict[t] = true;
         LOG_WARNING(Render_Vulkan,
-                    "Shader binary type {} is used as both {} and {}; not "
-                    "compiling it early",
-                    t, name(stage), name(hw_stage));
-        std::erase_if(precompile.untyped, [t](const auto& u) { return u.second == t; });
-        return;
+                    "Shader binary type {} is used as {}, not {}; not compiling it early", t,
+                    name(hw_stage), name(stage));
     }
-    stage = hw_stage;
-    if (++precompile.type_votes[t] != 3) {
-        return;
-    }
-    LOG_INFO(Render_Vulkan, "Shader binary type {} is {} shaders", t, name(hw_stage));
-    if (!PrecompilesStage(hw_stage)) {
-        std::erase_if(precompile.untyped, [t](const auto& u) { return u.second == t; });
-        return;
-    }
-    for (const auto& [h, ut] : precompile.untyped) {
-        if (ut == t && !program_cache.contains(h)) {
-            precompile.queue.emplace_back(h, hw_stage);
-        }
-    }
-    std::erase_if(precompile.untyped, [t](const auto& u) { return u.second == t; });
-    precompile.cv.notify_all();
 }
 
 void PipelineCache::NotePreparedUse(Program& program, u64 hash, bool served,
