@@ -570,10 +570,15 @@ void ShaderScanner::Load() {
         shader.reflection.assign(in.begin(), in.begin() + reflection_bytes);
         in = in.subspan(reflection_bytes);
         const bool has_header = !shader.header.empty();
+        // One without a header can still be compiled early from the draw states recorded when
+        // an earlier run used it, which its saved stage says it did.
+        const bool was_used = stage != NoStage;
         if (shaders.try_emplace(hash, std::move(shader)).second) {
             ++loaded;
             if (has_header) {
                 ++with_registers;
+            }
+            if (has_header || was_used) {
                 found_order.push_back(hash);
             }
         }
