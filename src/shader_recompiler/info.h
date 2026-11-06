@@ -155,6 +155,9 @@ struct Info : InfoPersistent {
     /// 2 and wrong for 25 of Bloodborne's used shaders, and right for 13 and wrong for 8 of
     /// The Last Guardian's.
     bool guess_coordinate_3d{};
+    /// Set by a guess translation without guess_coordinate_3d when some image's coordinates
+    /// would have made it 3D, so a 3D variant is worth compiling as well.
+    bool saw_3d_coordinates{};
     /// With guess_state, where the flattening put dwords read straight from a table a user data
     /// register points at: flattened offset, register, dword offset in the table.
     struct FlatSource {

@@ -383,11 +383,15 @@ void PatchImageSharp(const ResourceDiscovery& resource, Info& info, Descriptors&
     if (info.guess_state) {
         if (const auto reflected = ReflectedImageType(image_res.sharp_fetch, info)) {
             image_res.guess_type = *reflected;
-        } else if (info.guess_coordinate_3d && image_res.guess_type == AmdGpu::ImageType::Color2D &&
+        } else if (image_res.guess_type == AmdGpu::ImageType::Color2D &&
                    UsesThirdCoordinate(inst)) {
-            image_res.guess_type = AmdGpu::ImageType::Color3D;
-            LOG_INFO(Render_Recompiler,
-                     "Guessing an image of shader {:#x} as 3D from its coordinates", info.pgm_hash);
+            info.saw_3d_coordinates = true;
+            if (info.guess_coordinate_3d) {
+                image_res.guess_type = AmdGpu::ImageType::Color3D;
+                LOG_INFO(Render_Recompiler,
+                         "Guessing an image of shader {:#x} as 3D from its coordinates",
+                         info.pgm_hash);
+            }
         }
     }
 

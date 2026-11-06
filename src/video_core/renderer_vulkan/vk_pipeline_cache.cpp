@@ -323,14 +323,15 @@ void PipelineCache::FlushCompileStats(u64 now_ns) {
                      "{} dropped as the wrong stage; {} first uses waited {:.1f} ms for the "
                      "worker compiling them; {} queued were used before a worker got to them; "
                      "{} compiled from recorded draw states ({} variants); {} guessed with "
-                     "image types from their reflection",
+                     "image types from their reflection; {} also compiled with 3D images",
                      seconds, precompile.translated, precompile.shader_objects,
                      precompile.compute_pipelines, precompile.worker_ns / 1e6, precompile.served,
                      precompile.missed, precompile.duplicate, precompile.queue.size(),
                      precompile.rejected, precompile.joined, precompile.joined_ns / 1e6,
                      precompile.skipped_used, precompile.replayed, precompile.replayed_variants,
-                     precompile.reflected);
+                     precompile.reflected, precompile.guessed_3d);
             precompile.replayed = precompile.replayed_variants = precompile.reflected = 0;
+            precompile.guessed_3d = 0;
             precompile.skipped_used = 0;
             precompile.joined = 0;
             precompile.joined_ns = 0;
@@ -1066,8 +1067,10 @@ void PipelineCache::StartPrecompile(u32 num_threads) {
     if (const char* ignore = std::getenv("SHADPS4_GUESS_IGNORE_REFLECTION")) {
         precompile.use_reflection = std::string_view{ignore} != "1";
     }
+    // 1: guess 3D from coordinates alone (no 2D variant); 0: never; else both variants.
     if (const char* coordinate_3d = std::getenv("SHADPS4_GUESS_COORDINATE_3D")) {
         precompile.coordinate_3d = std::string_view{coordinate_3d} == "1";
+        precompile.coordinate_3d_variants = std::string_view{coordinate_3d} != "0";
     }
     if (const char* order = std::getenv("SHADPS4_PRECOMPILE_ORDER")) {
         precompile.order_near = std::string_view{order} != "newest";
@@ -1280,20 +1283,61 @@ void PipelineCache::PrecompileOne(const Precompile::Job& job) {
         return;
     }
     auto spec = Shader::StageSpecialization(info, *runtime_info, profile, {});
+    const bool try_3d =
+        info.saw_3d_coordinates && !info.guess_coordinate_3d && precompile.coordinate_3d_variants;
     info.guess_state = false;
     info.guessed_fetch = nullptr;
     info.guessed_images = {};
     info.guess_flat_sources = {};
 
     Precompiled done{.hash = hash};
-    const bool made_object = PrepareVariant(*program, done, info, std::move(spec), std::move(spv));
+    u32 made_objects =
+        PrepareVariant(*program, done, info, std::move(spec), std::move(spv)) ? 1 : 0;
+
+    // Most images are 2D, so the variant above guesses 2D. Where an image's coordinates look 3D
+    // (three made alike), a 3D variant is compiled as well: alone, that tell was right about as
+    // often as it was wrong.
+    bool made_3d = false;
+    if (try_3d) {
+        Shader::Info extra{hw_stage, sw_stage, params};
+        extra.guess_state = true;
+        extra.guess_coordinate_3d = true;
+        extra.guessed_fetch = fetch ? &*fetch : nullptr;
+        extra.guessed_images = reflected_images;
+        auto extra_runtime = *runtime_info;
+        Shader::Backend::Bindings extra_binding{};
+        try {
+            const Common::SoftAsserts soft_asserts;
+            const auto ir_program =
+                Shader::TranslateProgram(found->code, worker_pools, extra, extra_runtime, profile);
+            if (GuessTranslated(extra, hw_stage)) {
+                auto extra_spv = Shader::Backend::SPIRV::EmitSPIRV(profile, extra_runtime,
+                                                                   ir_program, extra_binding);
+                auto extra_spec = Shader::StageSpecialization(extra, extra_runtime, profile, {});
+                extra.guess_state = false;
+                extra.guessed_fetch = nullptr;
+                extra.guessed_images = {};
+                extra.guess_flat_sources = {};
+                if (std::ranges::find(program->modules, extra_spec, &Program::Module::spec) ==
+                    program->modules.end()) {
+                    made_objects += PrepareVariant(*program, done, extra, std::move(extra_spec),
+                                                   std::move(extra_spv))
+                                        ? 1
+                                        : 0;
+                    made_3d = true;
+                }
+            }
+        } catch (const Common::SoftAssertFailure&) {
+        }
+    }
     program->prepared = true;
     done.program = std::move(program);
 
     std::scoped_lock lock{precompile.mutex};
     ++precompile.translated;
     precompile.reflected += reflected_images.empty() ? 0 : 1;
-    precompile.shader_objects += made_object ? 1 : 0;
+    precompile.shader_objects += made_objects;
+    precompile.guessed_3d += made_3d ? 1 : 0;
     precompile.compute_pipelines += static_cast<u32>(done.computes.size());
     precompile.worker_ns += VideoCore::PerfStats::NowNs() - start;
     precompile.done.push_back(std::move(done));

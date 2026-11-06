@@ -83,6 +83,8 @@ struct Options {
     u32 rounds = 20;
     bool reflection = true;
     bool coordinate_3d = false;
+    /// Also try a 3D variant where coordinates look 3D, as the emulator's workers do.
+    bool variants_3d = true;
     /// -2: the saved one; -1: each shader's lowest semantic; else this base.
     int semantic_base = -2;
     bool verbose = false;
@@ -94,6 +96,7 @@ struct Translated {
     u64 spv_hash;
     Shader::StageSpecialization spec;
     u64 flat_layout;
+    bool saw_3d_coordinates;
 };
 
 std::optional<Translated> Translate(const Shader::Profile& profile, Shader::Pools& pools,
@@ -112,6 +115,7 @@ std::optional<Translated> Translate(const Shader::Profile& profile, Shader::Pool
             .spv_hash = XXH3_64bits(spv.data(), spv.size() * sizeof(u32)),
             .spec = Shader::StageSpecialization(info, runtime_info, profile, {}),
             .flat_layout = info.flat_layout,
+            .saw_3d_coordinates = info.saw_3d_coordinates,
         };
     } catch (const Common::SoftAssertFailure&) {
         return std::nullopt;
@@ -292,6 +296,9 @@ int Score(const Game& game, const Options& options) {
         u32 same_spirv{};
         /// With the draw's own registers, only resources guessed.
         u32 served_resources{};
+        /// Misses that also got a 3D variant, and those it served (counted in served too).
+        u32 tried_3d{};
+        u32 served_3d{};
     };
     std::map<HwStage, StageScore> scores;
     std::map<std::string, u32> wrong;
@@ -332,7 +339,7 @@ int Score(const Game& game, const Options& options) {
                     ? ReflectedImages(state->hw_stage, shader.header, shader.reflection)
                     : std::vector<Shader::Info::GuessedImage>{};
             const auto guess = [&](const Shader::RuntimeInfo& runtime,
-                                   const Shader::Gcn::FetchShaderData* fetch) {
+                                   const Shader::Gcn::FetchShaderData* fetch, bool coordinate_3d) {
                 const Shader::ShaderParams params{
                     .user_data = NoUserData,
                     .code = shader.code,
@@ -340,14 +347,15 @@ int Score(const Game& game, const Options& options) {
                 };
                 Shader::Info info{state->hw_stage, state->sw_stage, params};
                 info.guess_state = true;
-                info.guess_coordinate_3d = options.coordinate_3d;
+                info.guess_coordinate_3d = coordinate_3d;
                 info.guessed_fetch = fetch;
                 info.guessed_images = guess_images;
                 return Translate(profile, pools, info, runtime, shader.code, true);
             };
             // Resources only: the draw's registers and fetch shader.
             if (const auto resources =
-                    guess(state->runtime_info, state->fetch ? &*state->fetch : nullptr)) {
+                    guess(state->runtime_info, state->fetch ? &*state->fetch : nullptr,
+                          options.coordinate_3d)) {
                 if (resources->spec == truth->spec) {
                     ++score.served_resources;
                 } else {
@@ -367,7 +375,7 @@ int Score(const Game& game, const Options& options) {
                 ++score.unguessable;
                 continue;
             }
-            const auto full = guess(*runtime, fetch ? &*fetch : nullptr);
+            const auto full = guess(*runtime, fetch ? &*fetch : nullptr, options.coordinate_3d);
             if (!full) {
                 ++score.unguessable;
                 continue;
@@ -376,6 +384,15 @@ int Score(const Game& game, const Options& options) {
             if (full->spec == truth->spec) {
                 ++score.served;
                 continue;
+            }
+            if (options.variants_3d && !options.coordinate_3d && full->saw_3d_coordinates) {
+                ++score.tried_3d;
+                if (const auto as_3d = guess(*runtime, fetch ? &*fetch : nullptr, true);
+                    as_3d && as_3d->spec == truth->spec) {
+                    ++score.served;
+                    ++score.served_3d;
+                    continue;
+                }
             }
             const auto parts = SpecDifferences(truth->spec, full->spec);
             for (const auto& part : parts) {
@@ -405,10 +422,16 @@ int Score(const Game& game, const Options& options) {
         total.served += s.served;
         total.same_spirv += s.same_spirv;
         total.served_resources += s.served_resources;
+        total.tried_3d += s.tried_3d;
+        total.served_3d += s.served_3d;
     }
     fmt::print("  {:<5} {:7} {:10} {:6} {:12} {:12} {:7} {:12} {:10}\n", "all", total.states,
                total.no_struct, total.stale, total.truth_failed, total.unguessable, total.served,
                total.same_spirv, total.served_resources);
+    if (options.variants_3d && !options.coordinate_3d) {
+        fmt::print("3D variants: {} misses also tried as 3D, {} of them served\n", total.tried_3d,
+                   total.served_3d);
+    }
     const auto print_kinds = [](const char* title, const std::map<std::string, u32>& kinds) {
         std::vector<std::pair<u32, std::string>> sorted;
         for (const auto& [kind, n] : kinds) {
@@ -473,6 +496,7 @@ int Usage() {
         "options:\n"
         "  --no-reflection        ignore the PSSL reflection's image types\n"
         "  --coordinate-3d        guess untyped images as 3D from their coordinates\n"
+        "  --no-3d-variants       don't also try 3D where coordinates look 3D\n"
         "  --semantic-base N      pixel shader semantic base (default: the saved one; -1 for\n"
         "                         each shader's lowest)\n"
         "  -v                     list each miss\n"
@@ -498,6 +522,8 @@ int main(int argc, char** argv) {
             options.reflection = false;
         } else if (arg == "--coordinate-3d") {
             options.coordinate_3d = true;
+        } else if (arg == "--no-3d-variants") {
+            options.variants_3d = false;
         } else if (arg == "--semantic-base" && i + 1 < argc) {
             options.semantic_base = std::atoi(argv[++i]);
         } else if (arg == "-v") {

@@ -453,6 +453,10 @@ private:
         bool use_reflection{true};
         /// Info::guess_coordinate_3d, from SHADPS4_GUESS_COORDINATE_3D=1.
         bool coordinate_3d{};
+        /// Whether shaders whose coordinates look 3D also get a 3D variant (off with
+        /// SHADPS4_GUESS_COORDINATE_3D=0), and how many did.
+        bool coordinate_3d_variants{true};
+        u32 guessed_3d{};
         u32 replayed_variants{};
         /// First uses that waited for the worker compiling them, and how long.
         u32 joined{};
