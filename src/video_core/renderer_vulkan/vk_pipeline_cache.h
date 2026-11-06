@@ -378,6 +378,8 @@ private:
     void PrecompileOne(u64 hash, Shader::HwStage hw_stage);
     /// Moves finished precompiles into the program and pipeline caches. GPU thread.
     void TakePrecompiled();
+    /// Waits a little for a worker compiling the program, so its first use can take that.
+    void JoinPrecompile(u64 hash);
     /// Learns which binary type is which stage from programs the game uses. GPU thread.
     void NotePrecompileType(u64 hash, Shader::HwStage hw_stage);
     /// A prepared program's first use: whether its guess served the draw.
@@ -403,6 +405,9 @@ private:
         size_t found_cursor{};
         std::vector<Precompiled> done;
         std::atomic<bool> has_done{};
+        /// Programs a worker is compiling now, and a signal for each one it finishes.
+        tsl::robin_set<u64> in_flight;
+        std::condition_variable finished;
         // For the compile summary, since the last one.
         u32 translated{};
         u32 shader_objects{};
@@ -413,6 +418,9 @@ private:
         u32 duplicate{};
         /// Shaders whose guessed translation failed, so they wait for their draw.
         u32 rejected{};
+        /// First uses that waited for the worker compiling them, and how long.
+        u32 joined{};
+        u64 joined_ns{};
         bool active{};
         std::vector<std::jthread> threads;
     } precompile;

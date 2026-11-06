@@ -864,11 +864,14 @@ void PipelineCache::FlushCompileStats(u64 now_ns) {
                      "Compiled early over {:.1f} s: {} shaders ({} shader objects, {} compute "
                      "pipelines) in {:.0f} ms of worker time; first uses: {} served, {} needed "
                      "another variant; {} came too late; {} queued; "
-                     "{} dropped as the wrong stage",
+                     "{} dropped as the wrong stage; {} first uses waited {:.1f} ms for the "
+                     "worker compiling them",
                      seconds, precompile.translated, precompile.shader_objects,
                      precompile.compute_pipelines, precompile.worker_ns / 1e6, precompile.served,
                      precompile.missed, precompile.duplicate, precompile.queue.size(),
-                     precompile.rejected);
+                     precompile.rejected, precompile.joined, precompile.joined_ns / 1e6);
+            precompile.joined = 0;
+            precompile.joined_ns = 0;
             precompile.translated = precompile.shader_objects = precompile.compute_pipelines = 0;
             precompile.served = precompile.missed = precompile.duplicate = 0;
             precompile.rejected = 0;
@@ -1508,6 +1511,7 @@ PipelineCache::Result PipelineCache::GetProgram(HwStage hw_stage, SwStage sw_sta
                                                 Shader::Backend::Bindings& binding) {
     auto runtime_info = BuildRuntimeInfo(hw_stage, sw_stage);
     if (precompile.active) {
+        JoinPrecompile(params.hash);
         TakePrecompiled();
     }
     auto [it_pgm, new_program] = program_cache.try_emplace(params.hash);
@@ -1700,8 +1704,14 @@ void PipelineCache::RunPrecompile(std::stop_token stop) {
             }
             job = precompile.queue.back();
             precompile.queue.pop_back();
+            precompile.in_flight.insert(job.first);
         }
         PrecompileOne(job.first, job.second);
+        {
+            std::scoped_lock lock{precompile.mutex};
+            precompile.in_flight.erase(job.first);
+        }
+        precompile.finished.notify_all();
     }
 }
 
@@ -1804,6 +1814,26 @@ void PipelineCache::PrecompileOne(u64 hash, HwStage hw_stage) {
     precompile.worker_ns += VideoCore::PerfStats::NowNs() - start;
     precompile.done.push_back(std::move(done));
     precompile.has_done.store(true, std::memory_order_release);
+}
+
+void PipelineCache::JoinPrecompile(u64 hash) {
+    // A worker already part way through the program is done sooner than starting again here.
+    // Bounded, in case it's stuck on a slow driver compile.
+    constexpr auto MaxWait = std::chrono::milliseconds{100};
+    if (program_cache.contains(hash)) {
+        return;
+    }
+    std::unique_lock lock{precompile.mutex};
+    if (!precompile.in_flight.contains(hash)) {
+        return;
+    }
+    const u64 start = VideoCore::PerfStats::NowNs();
+    precompile.finished.wait_for(lock, MaxWait,
+                                 [&] { return !precompile.in_flight.contains(hash); });
+    const u64 waited = VideoCore::PerfStats::NowNs() - start;
+    ++precompile.joined;
+    precompile.joined_ns += waited;
+    VideoCore::PerfStats::frames.AddShaderTime(waited);
 }
 
 void PipelineCache::TakePrecompiled() {
