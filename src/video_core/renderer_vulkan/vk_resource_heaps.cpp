@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 #include <algorithm>
+#include <cstdlib>
 #include <cstring>
 
 #include "common/alignment.h"
@@ -20,6 +21,9 @@ namespace {
 
 /// Resource slots for draws to write into; at 32 bytes a slot this is 16 MiB.
 constexpr u32 MaxResourceSlots = 512 * 1024;
+
+/// Of those, slots kept by image views (and null descriptors) for as long as they live.
+constexpr u32 KeptResourceSlots = 64 * 1024;
 
 constexpr u32 NoBorder = ~0u;
 
@@ -123,8 +127,19 @@ ResourceHeaps::ResourceHeaps(const Instance& instance_, Scheduler& scheduler_,
                                                   std::max<u64>(props.resourceHeapAlignment, 1));
     const u64 max_resource_slots =
         (props.maxResourceHeapSize - resource_reserved) / geometry.resource_stride;
-    resource_slots = static_cast<u32>(std::min<u64>(max_resource_slots, MaxResourceSlots));
-    const u64 resource_size = u64(resource_slots) * geometry.resource_stride;
+    const u32 total_slots = static_cast<u32>(std::min<u64>(max_resource_slots, MaxResourceSlots));
+    const u64 resource_size = u64(total_slots) * geometry.resource_stride;
+    const char* keep_env = std::getenv("SHADPS4_KEEP_DESCRIPTORS");
+    keep_descriptors =
+        (keep_env == nullptr || keep_env[0] != '0') && total_slots >= 2 * KeptResourceSlots;
+    // The ring is what's left after the kept slots, which are handed out lowest first.
+    resource_slots = keep_descriptors ? total_slots - KeptResourceSlots : total_slots;
+    if (keep_descriptors) {
+        free_kept.reserve(KeptResourceSlots);
+        for (u32 slot = total_slots; slot-- > resource_slots;) {
+            free_kept.push_back(slot);
+        }
+    }
     resource_heap = std::make_unique<VideoCore::Buffer>(
         instance, 0, resource_size + resource_reserved, VideoCore::MemoryType::Stream,
         "Resource heap", vk::BufferUsageFlagBits::eDescriptorHeapEXT);
@@ -164,8 +179,10 @@ ResourceHeaps::ResourceHeaps(const Instance& instance_, Scheduler& scheduler_,
     }
 
     LOG_INFO(Render_Vulkan,
-             "Descriptor heap: {} resource slots of {} bytes, {} sampler slots of {} bytes",
-             resource_slots, geometry.resource_stride, sampler_slots, geometry.sampler_stride);
+             "Descriptor heap: {} resource slots of {} bytes ({} kept by image views), {} sampler "
+             "slots of {} bytes",
+             total_slots, geometry.resource_stride, keep_descriptors ? KeptResourceSlots : 0,
+             sampler_slots, geometry.sampler_stride);
 }
 
 ResourceHeaps::~ResourceHeaps() = default;
@@ -257,6 +274,89 @@ void ResourceHeaps::ReleaseSampler(u32 index, u32 border) {
     }
 }
 
+void ResourceHeaps::ReleaseKeptSlot(u32 index) {
+    // Views are only destroyed once the GPU is done with them.
+    std::scoped_lock lock{kept_mutex};
+    free_kept.push_back(index);
+}
+
+u32 ResourceHeaps::TakeKeptSlot() {
+    std::scoped_lock lock{kept_mutex};
+    if (free_kept.empty()) {
+        return NoSlot;
+    }
+    const u32 slot = free_kept.back();
+    free_kept.pop_back();
+    return slot;
+}
+
+void ResourceHeaps::WriteSlot(u32 slot, const vk::ResourceDescriptorInfoEXT& info) {
+    const vk::HostAddressRangeEXT range{
+        .address = resource_heap->mapped_data.data() + u64(slot) * geometry.resource_stride,
+        .size = geometry.resource_stride,
+    };
+    const auto result = instance.GetDevice().writeResourceDescriptorsEXT(1, &info, &range);
+    ASSERT_MSG(result == vk::Result::eSuccess, "Failed to write a resource descriptor: {}",
+               vk::to_string(result));
+    if (!resource_heap->is_coherent) {
+        resource_heap->Flush(u64(slot) * geometry.resource_stride, geometry.resource_stride);
+    }
+}
+
+u32 ResourceHeaps::KeptSlot(const HeapDraw& draw, const vk::WriteDescriptorSet& write,
+                            u32 element) {
+    if (!keep_descriptors) {
+        return NoSlot;
+    }
+    const auto type = write.descriptorType;
+    const auto take_null = [&](u32 kind) {
+        u32& slot = null_slots[kind];
+        if (slot == NoSlot && (slot = TakeKeptSlot()) != NoSlot) {
+            vk::ResourceDescriptorInfoEXT info{.type = type};
+            if (type == vk::DescriptorType::eStorageBuffer) {
+                info.data.pAddressRange = nullptr;
+            } else {
+                info.data.pImage = nullptr;
+            }
+            WriteSlot(slot, info);
+        }
+        return slot;
+    };
+    if (type == vk::DescriptorType::eStorageBuffer) {
+        // Buffer ranges change from draw to draw, so only null ones are kept.
+        const size_t buffer_index = (write.pBufferInfo + element) - draw.buffer_infos.data();
+        return draw.buffer_addresses[buffer_index] == 0 ? take_null(0) : NoSlot;
+    }
+    const bool is_storage = type == vk::DescriptorType::eStorageImage;
+    const size_t image_index = (write.pImageInfo + element) - draw.image_infos.data();
+    const auto* view = draw.image_views[image_index];
+    if (!view) {
+        return take_null(is_storage ? 2 : 1);
+    }
+    const auto layout = draw.image_infos[image_index].imageLayout;
+    auto& kept = view->heap_slots;
+    if (const u32 slot = kept.Find(type, layout); slot != NoSlot) {
+        return slot;
+    }
+    if (kept.Full()) {
+        return NoSlot;
+    }
+    const u32 slot = TakeKeptSlot();
+    if (slot == NoSlot) {
+        return NoSlot;
+    }
+    ViewInfo v;
+    const vk::ImageDescriptorInfoEXT image{
+        .pView = &view->HeapCreateInfo(v.ci, v.usage, v.min_lod),
+        .layout = layout,
+    };
+    vk::ResourceDescriptorInfoEXT info{.type = type};
+    info.data.pImage = &image;
+    WriteSlot(slot, info);
+    kept.Add(this, slot, type, layout);
+    return slot;
+}
+
 void ResourceHeaps::Bind(const HeapDraw& draw, const Shader::PushData& push_data) {
     Shader::HeapPushData heap_push{.data = push_data, .stage_tables = {}};
     const auto device = instance.GetDevice();
@@ -264,10 +364,17 @@ void ResourceHeaps::Bind(const HeapDraw& draw, const Shader::PushData& push_data
 
     for (const auto& stage : draw.stages) {
         const auto writes = draw.writes.subspan(stage.first_write, stage.num_writes);
+        // Image views and null descriptors point at their kept slots; the rest go in the ring.
+        kept_slots.clear();
         u32 num_resources = 0;
         for (const auto& write : writes) {
-            if (write.descriptorType != vk::DescriptorType::eSampler) {
-                num_resources += write.descriptorCount;
+            if (write.descriptorType == vk::DescriptorType::eSampler) {
+                continue;
+            }
+            for (u32 j = 0; j < write.descriptorCount; ++j) {
+                const u32 kept = KeptSlot(draw, write, j);
+                kept_slots.push_back(kept);
+                num_resources += kept == NoSlot ? 1 : 0;
             }
         }
 
@@ -302,6 +409,7 @@ void ResourceHeaps::Bind(const HeapDraw& draw, const Shader::PushData& push_data
         view_infos.resize(num_resources);
 
         u32 next = 0;
+        size_t next_kept = 0;
         for (const auto& write : writes) {
             for (u32 j = 0; j < write.descriptorCount; ++j) {
                 const u32 binding = write.dstBinding + j;
@@ -309,6 +417,10 @@ void ResourceHeaps::Bind(const HeapDraw& draw, const Shader::PushData& push_data
                 if (write.descriptorType == vk::DescriptorType::eSampler) {
                     const size_t image_index = (write.pImageInfo + j) - draw.image_infos.data();
                     indices[binding] = draw.sampler_slots[image_index];
+                    continue;
+                }
+                if (const u32 kept = kept_slots[next_kept++]; kept != NoSlot) {
+                    indices[binding] = kept;
                     continue;
                 }
                 const u32 slot = first_slot + next;

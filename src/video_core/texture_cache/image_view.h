@@ -3,6 +3,9 @@
 
 #pragma once
 
+#include <array>
+#include <utility>
+
 #include "video_core/amdgpu/pixel_format.h"
 #include "video_core/amdgpu/regs_depth.h"
 #include "video_core/amdgpu/resource.h"
@@ -20,9 +23,69 @@ struct ImageResource;
 namespace Vulkan {
 class Instance;
 class Scheduler;
+class ResourceHeaps;
 } // namespace Vulkan
 
 namespace VideoCore {
+
+/// The descriptors a view keeps in the descriptor heap, one for each descriptor type and layout
+/// it's bound with, so draws point at them instead of writing new ones. Given back when the view
+/// goes, which is after the GPU is done with it.
+class ImageViewHeapSlots {
+public:
+    static constexpr u32 MaxSlots = 4;
+
+    ImageViewHeapSlots() = default;
+    ~ImageViewHeapSlots();
+
+    ImageViewHeapSlots(const ImageViewHeapSlots&) = delete;
+    ImageViewHeapSlots& operator=(const ImageViewHeapSlots&) = delete;
+
+    ImageViewHeapSlots(ImageViewHeapSlots&& other) noexcept
+        : owner{std::exchange(other.owner, nullptr)}, slots{other.slots},
+          count{std::exchange(other.count, 0)} {}
+    ImageViewHeapSlots& operator=(ImageViewHeapSlots&& other) noexcept {
+        if (this != &other) {
+            Release();
+            owner = std::exchange(other.owner, nullptr);
+            slots = other.slots;
+            count = std::exchange(other.count, 0);
+        }
+        return *this;
+    }
+
+    /// The slot holding this view's descriptor of that type and layout, or ~0.
+    [[nodiscard]] u32 Find(vk::DescriptorType type, vk::ImageLayout layout) const noexcept {
+        for (u32 i = 0; i < count; ++i) {
+            if (slots[i].type == type && slots[i].layout == layout) {
+                return slots[i].index;
+            }
+        }
+        return ~0u;
+    }
+
+    [[nodiscard]] bool Full() const noexcept {
+        return count == MaxSlots;
+    }
+
+    void Add(Vulkan::ResourceHeaps* owner_, u32 index, vk::DescriptorType type,
+             vk::ImageLayout layout) noexcept {
+        owner = owner_;
+        slots[count++] = {index, type, layout};
+    }
+
+private:
+    void Release();
+
+    struct Slot {
+        u32 index;
+        vk::DescriptorType type;
+        vk::ImageLayout layout;
+    };
+    Vulkan::ResourceHeaps* owner{};
+    std::array<Slot, MaxSlots> slots{};
+    u32 count{};
+};
 
 struct ImageViewInfo {
     ImageViewInfo() = default;
@@ -61,6 +124,8 @@ struct ImageView {
 
     ImageViewInfo info;
     vk::UniqueImageView image_view;
+    /// Written by the descriptor heap's Bind, which only sees the view as const.
+    mutable ImageViewHeapSlots heap_slots;
 
 private:
     /// The create info without its chain, which is rebuilt by HeapCreateInfo.

@@ -6,6 +6,7 @@
 #include <array>
 #include <deque>
 #include <memory>
+#include <mutex>
 #include <span>
 #include <vector>
 
@@ -87,7 +88,9 @@ struct HeapDraw {
 };
 
 /// Shader resources through VK_EXT_descriptor_heap: a resource heap that each draw writes its
-/// descriptors into as a ring, and a sampler heap with one slot per live sampler.
+/// buffer descriptors into as a ring, and a sampler heap with one slot per live sampler. Image
+/// views and null descriptors keep slots of their own at the end of the resource heap, written
+/// once (SHADPS4_KEEP_DESCRIPTORS=0 writes them into the ring for every draw instead).
 class ResourceHeaps {
 public:
     explicit ResourceHeaps(const Instance& instance, Scheduler& scheduler,
@@ -111,7 +114,22 @@ public:
     /// Gives a sampler's slot back, from the sampler's destructor.
     void ReleaseSampler(u32 index, u32 border);
 
+    /// Gives a kept image view slot back, from the view's destructor.
+    void ReleaseKeptSlot(u32 index);
+
 private:
+    static constexpr u32 NoSlot = ~0u;
+
+    /// The kept slot for one descriptor of a draw (an image view or a null descriptor), writing
+    /// it the first time, or NoSlot when it goes in the ring.
+    u32 KeptSlot(const HeapDraw& draw, const vk::WriteDescriptorSet& write, u32 element);
+
+    /// A free kept slot, or NoSlot when they're all taken.
+    u32 TakeKeptSlot();
+
+    /// Writes one descriptor into a slot.
+    void WriteSlot(u32 slot, const vk::ResourceDescriptorInfoEXT& info);
+
     /// Reserves `count` resource slots for the GPU's next use and returns the first.
     u32 AllocateResources(u32 count);
 
@@ -131,6 +149,16 @@ private:
         u32 end;
     };
     std::deque<Segment> resource_segments;
+
+    /// Slots after the ring, kept by image views and null descriptors.
+    bool keep_descriptors{};
+    /// Views can be destroyed by deferred operations on whichever thread submits.
+    std::mutex kept_mutex;
+    std::vector<u32> free_kept;
+    /// Null storage buffer, sampled image and storage image descriptors.
+    std::array<u32, 3> null_slots{NoSlot, NoSlot, NoSlot};
+    /// Each of the stage's resource descriptors' kept slot, or NoSlot for the ring.
+    std::vector<u32> kept_slots;
 
     std::unique_ptr<VideoCore::Buffer> sampler_heap;
     vk::BindHeapInfoEXT sampler_bind{};

@@ -6,6 +6,7 @@
 #include "video_core/amdgpu/pixel_format.h"
 #include "video_core/renderer_vulkan/liverpool_to_vk.h"
 #include "video_core/renderer_vulkan/vk_instance.h"
+#include "video_core/renderer_vulkan/vk_resource_heaps.h"
 #include "video_core/texture_cache/image.h"
 #include "video_core/texture_cache/image_view.h"
 #include "vulkan/vulkan.hpp"
@@ -163,6 +164,20 @@ ImageView::ImageView(const Vulkan::Instance& instance, const ImageViewInfo& info
 }
 
 ImageView::~ImageView() = default;
+
+ImageViewHeapSlots::~ImageViewHeapSlots() {
+    Release();
+}
+
+void ImageViewHeapSlots::Release() {
+    if (owner) {
+        for (u32 i = 0; i < count; ++i) {
+            owner->ReleaseKeptSlot(slots[i].index);
+        }
+    }
+    owner = nullptr;
+    count = 0;
+}
 
 const vk::ImageViewCreateInfo& ImageView::HeapCreateInfo(
     vk::ImageViewCreateInfo& ci, vk::ImageViewUsageCreateInfo& usage,
