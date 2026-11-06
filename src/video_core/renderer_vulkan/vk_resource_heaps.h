@@ -68,7 +68,7 @@ struct HeapStageWrites {
     /// Render target swizzles, for fragment shaders that read them at run time.
     std::array<u32, 8> target_swizzles{};
     /// Vertex attribute formats, for vertex shaders that read them at run time.
-    std::array<Shader::RuntimeBufferFormat, Shader::StageTable::NumVertexFormats> vertex_formats{};
+    std::array<Shader::RuntimeVertexFormat, Shader::StageTable::NumVertexFormats> vertex_formats{};
     u32 num_vertex_formats{};
 };
 

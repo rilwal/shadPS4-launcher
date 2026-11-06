@@ -92,10 +92,10 @@ Id EmitImageSwizzle(EmitContext& ctx, u32 image_index) {
     return ctx.OpLoad(ctx.U32[1], pointer);
 }
 
-Id EmitVertexFormat(EmitContext& ctx, u32 attribute) {
+Id EmitVertexFormat(EmitContext& ctx, u32 index) {
     const Id pointer{ctx.OpAccessChain(
         ctx.TypePointer(spv::StorageClass::Uniform, ctx.U32[4]), ctx.stage_table_block,
-        ctx.ConstU32(StageTable::VertexFormatsMember), ctx.ConstU32(attribute))};
+        ctx.ConstU32(StageTable::VertexFormatsMember), ctx.ConstU32(index))};
     return ctx.OpLoad(ctx.U32[4], pointer);
 }
 

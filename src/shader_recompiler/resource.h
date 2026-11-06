@@ -294,11 +294,11 @@ struct StageTable {
     static constexpr u32 TargetSwizzlesOffset = ImageSwizzlesOffset + ImageSwizzlesSize;
     static constexpr u32 TargetSwizzlesSize = 8 * sizeof(u32);
     static constexpr u32 TargetSwizzlesMember = ImageSwizzlesMember + 1;
-    /// With runtime vertex formats, a RuntimeBufferFormat (16 bytes) per vertex attribute,
-    /// read as one uvec4 each. Vertex stages only.
+    /// With runtime vertex formats, a RuntimeVertexFormat (32 bytes) per vertex attribute,
+    /// read as two uvec4s each. Vertex stages only.
     static constexpr u32 VertexFormatsOffset = TargetSwizzlesOffset + TargetSwizzlesSize;
     static constexpr u32 NumVertexFormats = 32;
-    static constexpr u32 VertexFormatsSize = NumVertexFormats * 16;
+    static constexpr u32 VertexFormatsSize = NumVertexFormats * 32;
     static constexpr u32 VertexFormatsMember = TargetSwizzlesMember + 1;
     static constexpr u32 IndicesOffset = VertexFormatsOffset + VertexFormatsSize;
     /// Room for every buffer, image binding and sampler a stage can have.

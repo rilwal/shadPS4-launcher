@@ -40,10 +40,6 @@ struct RuntimeBufferFormat {
     u32 address_mask{};
 
     static constexpr u32 SwizzleShift = 4;
-    /// Vertex attributes only: a missing fourth component reads as one, like the vertex
-    /// input fills it, instead of zero; as an integer with the second bit.
-    static constexpr u32 FillAlphaOneBit = 1u << 16;
-    static constexpr u32 FillAlphaIntegerBit = 1u << 17;
 };
 static_assert(sizeof(RuntimeBufferFormat) == 16);
 
@@ -194,6 +190,111 @@ inline bool UsesRuntimeVertexFormat(bool runtime_vertex_formats, const AmdGpu::B
     }
     const u32 align = std::min(size, 4u);
     return buffer.base_address % align == 0 && buffer.GetStride() % align == 0;
+}
+
+/// With runtime vertex formats, how a vertex shader makes each component of an attribute
+/// from the element's raw dwords, as an entry in the vertex stage table. The select is already
+/// applied, so a shader converts only the components it reads.
+struct RuntimeVertexFormat {
+    enum class Mode : u32 {
+        /// The bits as they are, sign-extended if signed.
+        Raw = 0,
+        /// 16-bit float.
+        Half = 1,
+        /// Converted to float and multiplied by the scale: normalised and scaled formats.
+        Float = 2,
+        /// Like Float, clamped to -1.
+        Snorm = 3,
+    };
+    /// What a component made of no bits is.
+    enum class Constant : u32 {
+        Zero = 0,
+        One = 1,
+        IntegerOne = 2,
+    };
+    /// 16 bits per component, two components per word: dword, bit offset in it (or, with no
+    /// width, a Constant), width, signed, mode.
+    std::array<u32, 4> fields{};
+    std::array<float, 4> scales{};
+
+    static constexpr u32 DwordShift = 0;
+    static constexpr u32 OffsetShift = 2;
+    static constexpr u32 WidthShift = 7;
+    static constexpr u32 SignedShift = 13;
+    static constexpr u32 ModeShift = 14;
+
+    void Set(u32 component, u32 dword, u32 offset, u32 width, bool is_signed, Mode mode,
+             float scale) {
+        const u32 field = dword << DwordShift | offset << OffsetShift | width << WidthShift |
+                          u32(is_signed) << SignedShift | static_cast<u32>(mode) << ModeShift;
+        fields[component / 2] |= field << (16 * (component % 2));
+        scales[component] = scale;
+    }
+};
+static_assert(sizeof(RuntimeVertexFormat) == 32);
+
+/// Describes a vertex attribute's V# for a shader to convert at run time. Only for attributes
+/// UsesRuntimeVertexFormat takes. Components the format lacks read like the vertex input fills
+/// them: zero, and one for the fourth.
+inline RuntimeVertexFormat DescribeRuntimeVertexFormat(const AmdGpu::Buffer& buffer) {
+    using Kind = RuntimeBufferFormat::Kind;
+    using Mode = RuntimeVertexFormat::Mode;
+    using Constant = RuntimeVertexFormat::Constant;
+    const auto format = *DescribeRuntimeBufferFormat(buffer);
+    const auto kind = static_cast<Kind>(format.kind_swizzle & 0xf);
+    const bool integer_one =
+        AmdGpu::GetNumberClass(buffer.GetNumberFmt()) != AmdGpu::NumberClass::Float &&
+        buffer.GetNumberConversion() == AmdGpu::NumberConversion::None;
+    RuntimeVertexFormat out{};
+    const auto constant = [&](u32 i, Constant c) {
+        out.Set(i, 0, static_cast<u32>(c), 0, false, Mode::Raw, 0.f);
+    };
+    const auto select = buffer.DstSelect();
+    for (u32 i = 0; i < 4; ++i) {
+        const auto sel = select.array[i];
+        if (sel == AmdGpu::CompSwizzle::Zero) {
+            constant(i, Constant::Zero);
+            continue;
+        }
+        if (sel == AmdGpu::CompSwizzle::One) {
+            constant(i, Constant::One);
+            continue;
+        }
+        const u32 c = static_cast<u32>(sel) - static_cast<u32>(AmdGpu::CompSwizzle::Red);
+        const u32 width = (format.widths >> (c * 8)) & 0xff;
+        if (c >= 4 || width == 0) {
+            constant(i, c == 3 ? (integer_one ? Constant::IntegerOne : Constant::One)
+                               : Constant::Zero);
+            continue;
+        }
+        const u32 offset = (format.offsets >> (c * 8)) & 0xff;
+        const double max = double((u64(1) << width) - 1);
+        const double signed_max = width > 1 ? double((u64(1) << (width - 1)) - 1) : 1.0;
+        switch (kind) {
+        case Kind::Raw:
+            out.Set(i, offset / 32, offset % 32, width, false, Mode::Raw, 1.f);
+            break;
+        case Kind::Sint:
+            out.Set(i, offset / 32, offset % 32, width, true, Mode::Raw, 1.f);
+            break;
+        case Kind::Unorm:
+            out.Set(i, offset / 32, offset % 32, width, false, Mode::Float, float(1.0 / max));
+            break;
+        case Kind::Snorm:
+            out.Set(i, offset / 32, offset % 32, width, true, Mode::Snorm, float(1.0 / signed_max));
+            break;
+        case Kind::Half:
+            out.Set(i, offset / 32, offset % 32, width, false, Mode::Half, 1.f);
+            break;
+        case Kind::Uscaled:
+            out.Set(i, offset / 32, offset % 32, width, false, Mode::Float, 1.f);
+            break;
+        case Kind::Sscaled:
+            out.Set(i, offset / 32, offset % 32, width, true, Mode::Float, 1.f);
+            break;
+        }
+    }
+    return out;
 }
 
 /// A storage image's swizzle for the stage table: the destination select of x, y, z and w in

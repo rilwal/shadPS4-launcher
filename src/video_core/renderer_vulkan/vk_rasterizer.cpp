@@ -595,20 +595,10 @@ bool Rasterizer::BindResources(const Pipeline* pipeline) {
                                                 u32(stage_writes.vertex_formats.size()));
                 for (u32 i = 0; i < count; ++i) {
                     const auto buffer = fetch.attributes[i].GetSharp(*stage);
-                    auto& format = stage_writes.vertex_formats[i];
-                    if (!Shader::UsesRuntimeVertexFormat(true, buffer)) {
-                        format = {};
-                        continue;
-                    }
-                    // A missing fourth component reads as the vertex input would fill it: one,
-                    // an integer for integer classes the conversion leaves alone.
-                    format = *Shader::DescribeRuntimeBufferFormat(buffer);
-                    format.kind_swizzle |= Shader::RuntimeBufferFormat::FillAlphaOneBit;
-                    if (AmdGpu::GetNumberClass(buffer.GetNumberFmt()) !=
-                            AmdGpu::NumberClass::Float &&
-                        buffer.GetNumberConversion() == AmdGpu::NumberConversion::None) {
-                        format.kind_swizzle |= Shader::RuntimeBufferFormat::FillAlphaIntegerBit;
-                    }
+                    stage_writes.vertex_formats[i] =
+                        Shader::UsesRuntimeVertexFormat(true, buffer)
+                            ? Shader::DescribeRuntimeVertexFormat(buffer)
+                            : Shader::RuntimeVertexFormat{};
                 }
                 stage_writes.num_vertex_formats = count;
             }

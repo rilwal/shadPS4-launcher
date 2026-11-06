@@ -123,8 +123,9 @@ public:
     [[nodiscard]] U32 ImageSwizzle(const Value& image_index);
     /// A render target's swizzle from the stage table (see StageTable::TargetSwizzlesOffset).
     [[nodiscard]] U32 TargetSwizzle(const Value& target);
-    /// A vertex attribute's RuntimeBufferFormat from the stage table.
-    [[nodiscard]] Value VertexFormat(const Value& attribute);
+    /// One of the two uvec4s of a vertex attribute's RuntimeVertexFormat from the stage table,
+    /// indexed by attribute * 2 + half.
+    [[nodiscard]] Value VertexFormat(const Value& index);
 
     [[nodiscard]] U8 LoadBufferU8(const Value& handle, const Value& address, BufferInstInfo info);
     [[nodiscard]] U16 LoadBufferU16(const Value& handle, const Value& address, BufferInstInfo info);

@@ -1140,7 +1140,6 @@ set(SHADER_RECOMPILER src/shader_recompiler/profile.h
                       src/shader_recompiler/ir/program.cpp
                       src/shader_recompiler/ir/program.h
                       src/shader_recompiler/ir/reinterpret.h
-                      src/shader_recompiler/ir/runtime_format_decode.h
                       src/shader_recompiler/ir/srt_gvn_table.h
                       src/shader_recompiler/ir/ssa.h
                       src/shader_recompiler/ir/reg.h
