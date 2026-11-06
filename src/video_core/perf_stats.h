@@ -34,19 +34,22 @@ namespace PerfStats {
 /// thread's time outside its idle waits, and what the named costs don't explain of it is command
 /// translation itself.
 enum class Cost : u32 {
-    Shaders,    ///< Translating shaders, creating pipelines, waiting for compile workers.
-    Textures,   ///< Finding and creating images, uploading and detiling them.
-    Buffers,    ///< Obtaining buffers and syncing their memory from the guest.
-    GpuWaits,   ///< Waiting for the host GPU to finish work (scheduler waits).
-    Submits,    ///< Submitting command buffers to the host queue.
-    Presents,   ///< Waiting for the presenter to flip (video out label waits).
-    Flips,      ///< Preparing flipped frames for the presenter (copying, waiting for a frame).
-    Dma,        ///< Buffer copies and fills the guest asked for, and DMA buffer syncs.
-    Busy,       ///< GPU thread time not spent idle or spinning on guest waits.
-    GuestWaits, ///< Spinning on guest waits (wait reg mem, semaphores, CE/DE counters).
-    Faults,     ///< Handling guest page faults on tracked memory, summed over every thread.
-    NumFaults,  ///< How many of those faults (a count, not time).
-    PagesAhead, ///< Pages unprotected ahead of guests writing in order (a count).
+    Shaders,      ///< Translating shaders, creating pipelines, waiting for compile workers.
+    Textures,     ///< Finding and creating images, uploading and detiling them.
+    Buffers,      ///< Obtaining buffers and syncing their memory from the guest.
+    GpuWaits,     ///< Waiting for the host GPU to finish work (scheduler waits).
+    Submits,      ///< Submitting command buffers to the host queue.
+    Presents,     ///< Waiting for the presenter to flip (video out label waits).
+    Flips,        ///< Preparing flipped frames for the presenter (copying, waiting for a frame).
+    Dma,          ///< Buffer copies and fills the guest asked for, and DMA buffer syncs.
+    Busy,         ///< GPU thread time not spent idle or spinning on guest waits.
+    GuestWaits,   ///< Spinning on guest waits (wait reg mem, semaphores, CE/DE counters).
+    Faults,       ///< Handling guest page faults on tracked memory, summed over every thread.
+    NumFaults,    ///< How many of those faults (a count, not time).
+    PagesAhead,   ///< Pages unprotected ahead of guests writing in order (a count).
+    BufferBytes,  ///< Guest memory copied into GPU buffers by the GPU thread (bytes).
+    ImageUploads, ///< Images uploaded from guest memory by the GPU thread (a count).
+    ImageBytes,   ///< Their guest size (bytes).
     Count,
 };
 
@@ -97,6 +100,13 @@ struct Frames {
     void AddFault(u64 ns) {
         AddCost(Cost::Faults, ns);
         AddCost(Cost::NumFaults, 1);
+    }
+
+    /// A count or size from the GPU thread, like the timed costs.
+    void AddGpuCount(Cost cost, u64 amount) {
+        if (is_gpu_thread) {
+            AddCost(cost, amount);
+        }
     }
 
     void AddCost(Cost cost, u64 ns) {
@@ -191,14 +201,17 @@ struct Frames {
                           c[size_t(Cost::Flips)] + c[size_t(Cost::Dma)];
         const u64 busy = c[size_t(Cost::Busy)];
         return fmt::format(
-            "busy {:.1f} ms (shaders {:.1f}, textures {:.1f}, buffers {:.1f}, GPU "
+            "busy {:.1f} ms (shaders {:.1f}, textures {:.1f} for {} images of {:.1f} MB, "
+            "buffers {:.1f} for {:.1f} MB, GPU "
             "waits {:.1f}, submits {:.1f}, present waits {:.1f}, flips {:.1f}, DMA {:.1f}, "
             "other {:.1f}), "
             "guest waits {:.1f} ms; page faults {} taking {:.1f} ms, {} pages "
             "unprotected ahead",
-            busy / 1e6, ms(Cost::Shaders), ms(Cost::Textures), ms(Cost::Buffers),
-            ms(Cost::GpuWaits), ms(Cost::Submits), ms(Cost::Presents), ms(Cost::Flips),
-            ms(Cost::Dma), busy > named ? (busy - named) / 1e6 : 0.0, ms(Cost::GuestWaits),
+            busy / 1e6, ms(Cost::Shaders), ms(Cost::Textures), c[size_t(Cost::ImageUploads)],
+            c[size_t(Cost::ImageBytes)] / 1048576.0, ms(Cost::Buffers),
+            c[size_t(Cost::BufferBytes)] / 1048576.0, ms(Cost::GpuWaits), ms(Cost::Submits),
+            ms(Cost::Presents), ms(Cost::Flips), ms(Cost::Dma),
+            busy > named ? (busy - named) / 1e6 : 0.0, ms(Cost::GuestWaits),
             c[size_t(Cost::NumFaults)], ms(Cost::Faults), c[size_t(Cost::PagesAhead)]);
     }
 

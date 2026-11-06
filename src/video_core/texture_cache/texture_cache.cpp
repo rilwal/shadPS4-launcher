@@ -915,6 +915,9 @@ void TextureCache::RefreshImage(Image& image) {
     }
 
     runtime.UploadImage(&image, buffer, image_copies);
+    VideoCore::PerfStats::frames.AddGpuCount(VideoCore::PerfStats::Cost::ImageUploads, 1);
+    VideoCore::PerfStats::frames.AddGpuCount(VideoCore::PerfStats::Cost::ImageBytes,
+                                             image.info.guest_size);
 }
 
 Sampler& TextureCache::GetSampler(const AmdGpu::Sampler& sharp,

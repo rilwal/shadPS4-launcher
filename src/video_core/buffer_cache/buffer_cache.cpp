@@ -229,6 +229,7 @@ std::pair<const Buffer*, u64> BufferCache::ObtainBuffer(VAddr device_addr, u32 s
         const auto [data, offset] = stream_buffer.Map(size, instance.UniformMinAlignment());
         memory->CopySparseMemory(device_addr, data, size);
         stream_buffer.Commit();
+        VideoCore::PerfStats::frames.AddGpuCount(VideoCore::PerfStats::Cost::BufferBytes, size);
         return {&stream_buffer, offset};
     }
     const u64 first_block = device_addr >> block_shift;
@@ -471,6 +472,8 @@ bool BufferCache::SynchronizeMemory(const Buffer* arena, VAddr device_addr, u32 
         }
         staging.Flush();
         runtime.CopyBuffer(staging.buffer, arena, copies);
+        VideoCore::PerfStats::frames.AddGpuCount(VideoCore::PerfStats::Cost::BufferBytes,
+                                                 total_size_bytes);
     }
     if (is_texel_buffer && !is_written) {
         return SynchronizeMemoryFromImage(arena, device_addr, size);
