@@ -2,7 +2,6 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 #include <vector>
-#include <tsl/robin_set.h>
 #include "shader_recompiler/ir/program.h"
 
 namespace Shader::Optimization {
@@ -10,11 +9,10 @@ namespace Shader::Optimization {
 void DeadCodeEliminationPass(IR::Program& program) {
     // We iterate over the instructions in reverse order.
     // This is because removing an instruction reduces the number of uses for earlier instructions.
-    // Open addressing and a vector stack: a node-based set and a deque allocated per insert, and
-    // this pass runs twice per translation.
-    thread_local tsl::robin_set<IR::Inst*> live;
+    // Live instructions are marked in place rather than kept in a hash set, and the worklist is a
+    // vector stack: this pass runs twice per translation.
+    const u32 live = IR::NextPassEpoch();
     thread_local std::vector<IR::Inst*> worklist;
-    live.clear();
     worklist.clear();
 
     for (IR::Block* block : program.post_order_blocks) {
@@ -26,7 +24,7 @@ void DeadCodeEliminationPass(IR::Program& program) {
                 it->Invalidate();
                 it = block->Instructions().erase(it);
             } else if (has_side_effects) {
-                live.insert(&*it);
+                it->Mark(live);
                 worklist.push_back(&*it);
             }
         }
@@ -41,7 +39,7 @@ void DeadCodeEliminationPass(IR::Program& program) {
                 continue;
             }
             IR::Inst* operand = inst->Arg(i).Inst();
-            if (live.insert(operand).second) {
+            if (operand->Mark(live)) {
                 worklist.push_back(operand);
             }
         }
@@ -49,7 +47,7 @@ void DeadCodeEliminationPass(IR::Program& program) {
 
     for (IR::Block* block : program.post_order_blocks) {
         for (auto it = block->begin(); it != block->end();) {
-            if (live.contains(&*it)) {
+            if (it->IsMarked(live)) {
                 ++it;
             } else {
                 it->Invalidate();

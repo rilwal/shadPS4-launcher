@@ -193,6 +193,20 @@ public:
     void Invalidate();
     void ClearArgs();
 
+    /// Marks this instruction for the pass running under the given epoch. Returns false when it
+    /// was already marked in that epoch. Epochs come from NextPassEpoch, so marks left by earlier
+    /// passes never match.
+    bool Mark(u32 epoch) noexcept {
+        if (pass_mark == epoch) {
+            return false;
+        }
+        pass_mark = epoch;
+        return true;
+    }
+    bool IsMarked(u32 epoch) const noexcept {
+        return pass_mark == epoch;
+    }
+
     u32 scc_index{};
 
 private:
@@ -209,6 +223,7 @@ private:
     u64 flags{};
     IR::Block* parent{};
     RegTag reg_tag{};
+    u32 pass_mark{};
     union {
         NonTriviallyDummy dummy{};
         boost::container::small_vector<std::pair<Block*, Value>, 2> phi_args;
@@ -218,6 +233,9 @@ private:
     boost::container::list<IR::Use, NodeAllocator<IR::Use>> uses;
 };
 static_assert(sizeof(Inst) <= 184, "Inst size unintentionally increased");
+
+/// Returns an epoch no earlier pass has used, for Inst::Mark.
+[[nodiscard]] u32 NextPassEpoch() noexcept;
 
 [[nodiscard]] inline bool IsPhi(const Inst& inst) {
     return inst.GetOpcode() == Opcode::Phi;

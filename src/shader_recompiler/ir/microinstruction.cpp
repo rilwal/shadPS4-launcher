@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 #include <algorithm>
+#include <atomic>
 #include <memory>
 
 #include "shader_recompiler/ir/basic_block.h"
@@ -186,6 +187,11 @@ void Inst::AddPhiOperand(Block* predecessor, const Value& value) {
         Use(inst, phi_args.size());
     }
     phi_args.emplace_back(predecessor, value);
+}
+
+u32 NextPassEpoch() noexcept {
+    static std::atomic<u32> epoch{0};
+    return epoch.fetch_add(1, std::memory_order_relaxed) + 1;
 }
 
 void Inst::Invalidate() {
