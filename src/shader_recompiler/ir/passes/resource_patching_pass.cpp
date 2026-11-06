@@ -260,12 +260,67 @@ static bool UsesCubeCoordinates(const IR::Inst& inst) {
     return false;
 }
 
-/// Whether an image instruction without the array flag addresses three coordinates, so the
-/// image is 3D. The address registers don't say how many there are (the T# does), so this
-/// looks at the first register past what a 2D image reads: it's taken as an address when its
-/// value is used only there, as the same address component of image instructions. A
-/// register left over from other work has other uses, and one holding another
-/// instruction's coordinates sits at another position.
+/// For shaders without reflection: whether an image instruction without the array flag
+/// addresses three coordinates, so the image is 3D. The address registers don't say how many
+/// there are (the T# does), and compilers fill the one past a 2D address with leftovers (in
+/// Bloodborne, an integer bit-cast to float), so a third coordinate counts only when it's
+/// made the same way as x or y, and isn't a reinterpreted or converted integer.
+static bool UsesThirdCoordinate(const IR::Inst& inst) {
+    const auto flags = inst.Flags<IR::TextureInstInfo>();
+    if (flags.is_array || flags.has_derivatives) {
+        return false;
+    }
+    // Address component i: the sample's are spread over packs of four from Arg(2) on, a
+    // read's or write's are one pack in Arg(1).
+    u32 first{};
+    u32 third{};
+    bool sample = false;
+    switch (inst.GetOpcode()) {
+    case IR::Opcode::ImageSampleRaw:
+        sample = true;
+        first = u32(flags.has_offset) + u32(flags.has_bias) + u32(flags.is_depth);
+        third = first + 2 + u32(flags.has_lod) + u32(flags.has_lod_clamp);
+        if (third >= 12) {
+            return false;
+        }
+        break;
+    case IR::Opcode::ImageRead:
+    case IR::Opcode::ImageWrite:
+        third = 2 + u32(flags.has_lod);
+        if (third >= 4) {
+            return false;
+        }
+        break;
+    default:
+        return false;
+    }
+    const auto component = [&](u32 i) -> const IR::Inst* {
+        const IR::Inst* pack = sample ? inst.Arg(2 + i / 4).TryInst() : inst.Arg(1).TryInst();
+        if (!pack || pack->GetOpcode() != IR::Opcode::CompositeConstructF32x4 &&
+                         pack->GetOpcode() != IR::Opcode::CompositeConstructU32x4) {
+            return nullptr;
+        }
+        return pack->Arg(i % 4).TryInst();
+    };
+    const IR::Inst* x = component(first);
+    const IR::Inst* y = component(first + 1);
+    const IR::Inst* z = component(third);
+    if (!x || !y || !z) {
+        return false;
+    }
+    switch (z->GetOpcode()) {
+    case IR::Opcode::UndefU32:
+    case IR::Opcode::UndefF32:
+    case IR::Opcode::BitCastF32U32:
+    case IR::Opcode::ConvertF32U32:
+    case IR::Opcode::ConvertF32S32:
+        return false;
+    default:
+        break;
+    }
+    return z->GetOpcode() == x->GetOpcode() || z->GetOpcode() == y->GetOpcode();
+}
+
 /// With guess_state, the image's type from the shader's reflection, if its T# is read from a
 /// place the reflection names.
 static std::optional<AmdGpu::ImageType> ReflectedImageType(const SharpFetch<AmdGpu::Image>& fetch,
@@ -322,6 +377,9 @@ void PatchImageSharp(const ResourceDiscovery& resource, Info& info, Descriptors&
     if (info.guess_state) {
         if (const auto reflected = ReflectedImageType(image_res.sharp_fetch, info)) {
             image_res.guess_type = *reflected;
+        } else if (image_res.guess_type == AmdGpu::ImageType::Color2D &&
+                   UsesThirdCoordinate(inst)) {
+            image_res.guess_type = AmdGpu::ImageType::Color3D;
         }
     }
 

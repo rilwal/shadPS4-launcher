@@ -1724,6 +1724,10 @@ void PipelineCache::StartPrecompile(u32 num_threads) {
     if (const char* hold = std::getenv("SHADPS4_PRECOMPILE_HOLD_S")) {
         precompile.hold_ns = static_cast<u64>(std::strtod(hold, nullptr) * 1e9);
     }
+    // For measuring the coordinate-based image guess on games that have reflection.
+    if (const char* ignore = std::getenv("SHADPS4_GUESS_IGNORE_REFLECTION")) {
+        precompile.use_reflection = std::string_view{ignore} != "1";
+    }
     if (const char* order = std::getenv("SHADPS4_PRECOMPILE_ORDER")) {
         precompile.order_near = std::string_view{order} != "newest";
     }
@@ -1903,7 +1907,9 @@ void PipelineCache::PrecompileOne(const Precompile::Job& job) {
     auto& info = program->info;
     info.guess_state = true;
     info.guessed_fetch = fetch ? &*fetch : nullptr;
-    const auto reflected_images = ReflectedImages(hw_stage, found->header, found->reflection);
+    const auto reflected_images = precompile.use_reflection
+                                      ? ReflectedImages(hw_stage, found->header, found->reflection)
+                                      : std::vector<Shader::Info::GuessedImage>{};
     info.guessed_images = reflected_images;
     thread_local Shader::Pools worker_pools;
     Shader::Backend::Bindings binding{};
