@@ -196,7 +196,21 @@ void Runtime::RunCopyBench() {
 
 void Runtime::CopyBuffer(const VideoCore::Buffer* src, const VideoCore::Buffer* dst,
                          std::span<const vk::BufferCopy> copies) {
-    const Scheduler::ScopedGpuSection gpu_section{scheduler, Scheduler::GpuSection::BufferCopies};
+    const auto in_host = [](const VideoCore::Buffer* buffer) {
+        // Stream buffers are written by the CPU and sit in host memory once BAR space runs out.
+        return buffer->mem_type == VideoCore::MemoryType::HostUncached ||
+               buffer->mem_type == VideoCore::MemoryType::HostCached ||
+               buffer->mem_type == VideoCore::MemoryType::Stream;
+    };
+    const auto kind = in_host(src)   ? Scheduler::GpuSection::BufferUploads
+                      : in_host(dst) ? Scheduler::GpuSection::BufferDownloads
+                                     : Scheduler::GpuSection::BufferCopies;
+    const Scheduler::ScopedGpuSection gpu_section{scheduler, kind};
+    u64 bytes{};
+    for (const auto& copy : copies) {
+        bytes += copy.size;
+    }
+    scheduler.AddGpuSectionBytes(bytes);
     scheduler.EndRendering();
 
     bool needs_flush{};
@@ -260,6 +274,7 @@ bool Runtime::Transit(VideoCore::Image* image, vk::ImageLayout dst_layout,
 void Runtime::UploadImage(VideoCore::Image* dst, const VideoCore::Buffer* src,
                           std::span<const vk::BufferImageCopy> upload_copies) {
     const Scheduler::ScopedGpuSection gpu_section{scheduler, Scheduler::GpuSection::ImageUploads};
+    scheduler.AddGpuSectionBytes(dst->info.guest_size);
     SetBackingSamples(dst, dst->info.num_samples, false);
     scheduler.EndRendering();
 

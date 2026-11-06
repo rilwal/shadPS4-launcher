@@ -469,12 +469,17 @@ public:
         Detiling,
         ImageUploads,
         ImageCopies,
+        /// Copies and fills between device memory buffers.
         BufferCopies,
+        /// Copies from host memory into device memory.
+        BufferUploads,
+        /// Copies from device memory into host memory.
+        BufferDownloads,
         Count,
     };
     static constexpr std::array<const char*, size_t(GpuSection::Count)> GpuSectionNames = {
-        "other",         "draws",        "dispatches",    "detiling",
-        "image uploads", "image copies", "buffer copies",
+        "other",        "draws",         "dispatches",     "detiling",         "image uploads",
+        "image copies", "buffer copies", "buffer uploads", "buffer downloads",
     };
 
     struct GpuTime {
@@ -496,6 +501,13 @@ public:
     }
     [[nodiscard]] GpuSection CurrentGpuSection() const noexcept {
         return gpu_section;
+    }
+
+    /// Counts bytes moved by work of the current kind, for the slow submit split.
+    void AddGpuSectionBytes(u64 bytes) noexcept {
+        if (current_timed) {
+            timed_bytes[size_t(gpu_section)] += bytes;
+        }
     }
 
     /// Sets a kind for its scope, then goes back to the one before.
@@ -565,12 +577,15 @@ private:
     std::optional<u32> current_timed;
     /// The kind of each timed stretch so far, in order; stretch i ends at query i + 1.
     std::vector<GpuSection> timed_sections;
+    /// Bytes moved by each kind in the submission being recorded.
+    std::array<u64, size_t(GpuSection::Count)> timed_bytes{};
     GpuSection gpu_section{GpuSection::Other};
     bool ending_submit{};
     struct TimedSubmit {
         u32 slot;
         u64 tick;
         std::vector<GpuSection> sections;
+        std::array<u64, size_t(GpuSection::Count)> bytes;
     };
     std::queue<TimedSubmit> timed_submits;
     std::mutex gpu_time_mutex;

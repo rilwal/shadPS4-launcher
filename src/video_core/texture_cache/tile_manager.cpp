@@ -317,6 +317,7 @@ std::pair<const Buffer*, u64> TileManager::DetileImage(const VideoCore::Buffer* 
 
     const Vulkan::Scheduler::ScopedGpuSection gpu_section{scheduler,
                                                           Vulkan::Scheduler::GpuSection::Detiling};
+    scheduler.AddGpuSectionBytes(info.guest_size);
 
     TilingInfo params{};
     params.bank_swizzle = info.bank_swizzle;

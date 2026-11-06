@@ -178,6 +178,7 @@ void Scheduler::BeginSession() {
                                        slot * QueriesPerSubmit);
         current_timed = slot;
         timed_sections.clear();
+        timed_bytes = {};
     }
 
     // Invalidate dynamic state so it gets applied to the new command buffer.
@@ -280,7 +281,7 @@ void Scheduler::SubmitExecution(SubmitInfo& info) {
 
     work_semaphore.Refresh();
     if (current_timed) {
-        timed_submits.push({*current_timed, signal_value, std::move(timed_sections)});
+        timed_submits.push({*current_timed, signal_value, std::move(timed_sections), timed_bytes});
         timed_sections = {};
         current_timed.reset();
     }
@@ -336,10 +337,17 @@ void Scheduler::ReadGpuTimes() {
         if (ns >= SlowSubmitNs) {
             std::string parts;
             for (size_t k = 0; k < section_ns.size(); ++k) {
-                if (section_count[k] != 0) {
-                    fmt::format_to(std::back_inserter(parts), ", {} {:.2f} ms ({})",
-                                   GpuSectionNames[k], section_ns[k] / 1e6, section_count[k]);
+                if (section_count[k] == 0) {
+                    continue;
                 }
+                fmt::format_to(std::back_inserter(parts), ", {} {:.2f} ms ({}", GpuSectionNames[k],
+                               section_ns[k] / 1e6, section_count[k]);
+                if (const u64 bytes = timed.bytes[k]; bytes != 0) {
+                    fmt::format_to(std::back_inserter(parts), ", {:.1f} MB, {:.1f} GB/s",
+                                   bytes / 1e6,
+                                   section_ns[k] ? double(bytes) / section_ns[k] : 0.0);
+                }
+                parts += ')';
             }
             LOG_INFO(Render_Vulkan, "Slow submit {:.2f} ms on the GPU{}{}", ns / 1e6, parts,
                      overflowed ? " (ran out of timestamps)" : "");
