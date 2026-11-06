@@ -24,7 +24,7 @@ Inst::Inst(const Inst& base) : op{base.op}, flags{base.flags} {
     std::construct_at(&args);
     const size_t num_args{base.NumArgs()};
     for (size_t index = 0; index < num_args; ++index) {
-        SetArg(index, base.Arg(index));
+        InitArg(index, base.Arg(index));
     }
 }
 
@@ -170,6 +170,14 @@ void Inst::SetArg(size_t index, Value value) {
     } else {
         args[index] = value;
     }
+}
+
+void Inst::InitArg(size_t index, Value value) {
+    DEBUG_ASSERT(op != Opcode::Phi && index < NumArgs() && Arg(index).IsEmpty());
+    if (auto* inst = value.TryInst()) {
+        Use(inst, index);
+    }
+    args[index] = value;
 }
 
 Block* Inst::PhiBlock(size_t index) const {

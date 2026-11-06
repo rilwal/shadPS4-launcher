@@ -186,6 +186,9 @@ public:
     IR::Type Type() const;
     void ReplaceOpcode(IR::Opcode opcode);
     void SetArg(size_t index, Value value);
+    /// SetArg for an argument that holds nothing yet (a new instruction): skips reading the old
+    /// value to undo its use, which missed the cache on freshly allocated instructions.
+    void InitArg(size_t index, Value value);
 
     Block* PhiBlock(size_t index) const;
     void AddPhiOperand(Block* predecessor, const Value& value);
