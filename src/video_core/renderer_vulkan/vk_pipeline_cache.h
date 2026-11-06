@@ -384,8 +384,6 @@ private:
     void ReleaseHeldPrecompiles();
     /// Learns which binary type is which stage from programs the game uses. GPU thread.
     void NotePrecompileType(u64 hash, Shader::HwStage hw_stage);
-    /// Index of the queued shader a worker should compile next. Under the precompile lock.
-    size_t PickPrecompileJob();
     /// A prepared program's first use: whether its guess served the draw.
     void NotePreparedUse(Program& program, u64 hash, bool served,
                          const Shader::StageSpecialization& spec, u64 perm_hash);
@@ -403,6 +401,8 @@ private:
             Shader::HwStage stage;
             /// Where the scan found it, 0 if not known.
             u64 addr;
+            /// When an earlier run first used it (ShaderScanner::Shader::use_order).
+            u32 use_order;
         };
         /// Waiting for a worker, newest last.
         std::vector<Job> queue;
@@ -410,8 +410,9 @@ private:
         tsl::robin_set<u64> seen;
         /// Programs the game has used.
         tsl::robin_set<u64> used;
-        /// Whether workers take the queued shader found nearest the latest first uses, or else
-        /// the newest found.
+        /// Shaders earlier runs used go first, in the order they were first used. Then whether
+        /// workers take the queued shader found nearest the latest first uses, or else the
+        /// newest found.
         bool order_near{true};
         /// Per binary type: the stage it's compiled early as, and whether a first use showed
         /// otherwise.
@@ -443,6 +444,10 @@ private:
         bool active{};
         std::vector<std::jthread> threads;
     } precompile;
+    /// A queue entry for a found shader, with where it was found and when it was first used.
+    Precompile::Job MakePrecompileJob(u64 hash, Shader::HwStage stage);
+    /// Index of the queued shader a worker should compile next. Under the precompile lock.
+    size_t PickPrecompileJob();
 };
 
 } // namespace Vulkan

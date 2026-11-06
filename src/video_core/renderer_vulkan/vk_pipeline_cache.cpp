@@ -1690,8 +1690,7 @@ void PipelineCache::RunPrecompile(std::stop_token stop) {
                     if (const auto saved = shader_scanner->StageOf(hash)) {
                         if (const auto stage = static_cast<HwStage>(*saved);
                             PrecompilesStage(stage)) {
-                            precompile.queue.push_back(
-                                {hash, stage, shader_scanner->AddressOf(hash)});
+                            precompile.queue.push_back(MakePrecompileJob(hash, stage));
                         }
                         continue;
                     }
@@ -1701,7 +1700,7 @@ void PipelineCache::RunPrecompile(std::stop_token stop) {
                         continue;
                     }
                     if (PrecompilesStage(stage)) {
-                        precompile.queue.push_back({hash, stage, shader_scanner->AddressOf(hash)});
+                        precompile.queue.push_back(MakePrecompileJob(hash, stage));
                     }
                 }
             };
@@ -1858,8 +1857,7 @@ void PipelineCache::ReleaseHeldPrecompiles() {
         std::scoped_lock lock{precompile.mutex};
         for (const u64 hash : precompile.held) {
             if (!program_cache.contains(hash)) {
-                precompile.queue.push_back(
-                    {hash, HwStage::Fragment, shader_scanner->AddressOf(hash)});
+                precompile.queue.push_back(MakePrecompileJob(hash, HwStage::Fragment));
             }
         }
         LOG_INFO(Render_Vulkan, "{} pixel shaders held for their inputs are queued again",
@@ -1921,9 +1919,30 @@ void PipelineCache::TakePrecompiled() {
     }
 }
 
+PipelineCache::Precompile::Job PipelineCache::MakePrecompileJob(u64 hash, HwStage stage) {
+    const auto place = shader_scanner->PlaceOf(hash);
+    return {hash, stage, place.addr, place.use_order};
+}
+
 size_t PipelineCache::PickPrecompileJob() {
     const size_t newest = precompile.queue.size() - 1;
-    if (!precompile.order_near || newest == 0) {
+    if (newest == 0) {
+        return 0;
+    }
+    // What earlier runs drew is what this one will draw first.
+    size_t earliest = newest;
+    u32 earliest_order = std::numeric_limits<u32>::max();
+    for (size_t i = 0; i <= newest; ++i) {
+        const u32 order = precompile.queue[i].use_order;
+        if (order != 0 && order < earliest_order) {
+            earliest_order = order;
+            earliest = i;
+        }
+    }
+    if (earliest_order != std::numeric_limits<u32>::max()) {
+        return earliest;
+    }
+    if (!precompile.order_near) {
         return newest;
     }
     const auto recent = shader_scanner->RecentUses();

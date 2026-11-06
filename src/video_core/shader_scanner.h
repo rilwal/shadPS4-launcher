@@ -39,6 +39,9 @@ public:
         /// The hardware stage it was first used as (a Shader::Stage), NoStage until then.
         /// Saved with it, so later launches know it before any draw.
         u8 stage = NoStage;
+        /// Its place in the order of first uses over this and earlier runs, from 1; 0 if the
+        /// game hasn't used it yet. Saved with it.
+        u32 use_order{};
     };
     static constexpr u8 NoStage = 0xff;
 
@@ -64,8 +67,14 @@ public:
     /// The shader with this hash, if the scan found it.
     std::optional<Shader> Find(u64 hash);
 
-    /// Guest address of the shader with this hash, 0 when not known.
-    u64 AddressOf(u64 hash);
+    struct Place {
+        /// Guest address of the copy with the shader struct, 0 when not known.
+        u64 addr;
+        /// Shader::use_order.
+        u32 use_order;
+    };
+    /// Where the shader with this hash was found, and when it was first used.
+    Place PlaceOf(u64 hash);
 
     /// Number of recent first uses remembered by address.
     static constexpr size_t NumRecentUses = 8;
@@ -143,6 +152,8 @@ private:
     u32 first_uses{};
     u32 found_ahead{};
     std::array<u64, NumRecentUses> recent_uses{};
+    /// The last use_order given.
+    u32 use_counter{};
     size_t recent_use_index{};
     /// Scan totals, for the per-pass log.
     u32 pass_new{};

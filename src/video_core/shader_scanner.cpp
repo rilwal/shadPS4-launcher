@@ -50,7 +50,7 @@ constexpr u64 MaxHeaderLength = 2_KB;
 constexpr u64 HeaderPgmLoOffset = 8;
 /// The saved list: magic, version, the uncompressed size, then the entries compressed.
 constexpr u32 SaveMagic = 0x4e435353; // "SSCN"
-constexpr u32 SaveVersion = 3;
+constexpr u32 SaveVersion = 4;
 constexpr u64 SaveInterval = 30'000'000'000ULL;
 /// Bigger than any real list, so a corrupt size can't ask for a huge allocation.
 constexpr u64 MaxSaveSize = 1_GB;
@@ -445,11 +445,12 @@ void ShaderScanner::Load() {
         u64 hash{};
         u8 type{};
         u8 stage{};
+        u32 use_order{};
         u32 code_dwords{};
         u32 header_bytes{};
-        if (!Get(in, hash) || !Get(in, type) || !Get(in, stage) || !Get(in, code_dwords) ||
-            !Get(in, header_bytes) || code_dwords > MaxCodeLength / sizeof(u32) ||
-            header_bytes > MaxHeaderLength ||
+        if (!Get(in, hash) || !Get(in, type) || !Get(in, stage) || !Get(in, use_order) ||
+            !Get(in, code_dwords) || !Get(in, header_bytes) ||
+            code_dwords > MaxCodeLength / sizeof(u32) || header_bytes > MaxHeaderLength ||
             in.size() < code_dwords * sizeof(u32) + header_bytes) {
             LOG_WARNING(Render, "Saved shader list {} is cut short after {} shaders",
                         save_path.string(), i);
@@ -458,7 +459,8 @@ void ShaderScanner::Load() {
         if (code_dwords == 0) {
             break;
         }
-        Shader shader{.type = type, .found_ns = now, .stage = stage};
+        Shader shader{.type = type, .found_ns = now, .stage = stage, .use_order = use_order};
+        use_counter = std::max(use_counter, use_order);
         shader.code.resize(code_dwords);
         std::memcpy(shader.code.data(), in.data(), code_dwords * sizeof(u32));
         in = in.subspan(code_dwords * sizeof(u32));
@@ -495,6 +497,7 @@ void ShaderScanner::Save() {
             Put(raw, hash);
             Put(raw, shader.type);
             Put(raw, shader.stage);
+            Put(raw, shader.use_order);
             Put(raw, static_cast<u32>(shader.code.size()));
             Put(raw, static_cast<u32>(shader.header.size()));
             const auto* code = reinterpret_cast<const u8*>(shader.code.data());
@@ -570,10 +573,13 @@ std::vector<u64> ShaderScanner::KnownWithStage() {
     return hashes;
 }
 
-u64 ShaderScanner::AddressOf(u64 hash) {
+ShaderScanner::Place ShaderScanner::PlaceOf(u64 hash) {
     std::scoped_lock lock{mutex};
     const auto it = shaders.find(hash);
-    return it == shaders.end() ? 0 : it->second.addr;
+    if (it == shaders.end()) {
+        return {};
+    }
+    return {it->second.addr, it->second.use_order};
 }
 
 std::array<u64, ShaderScanner::NumRecentUses> ShaderScanner::RecentUses() {
@@ -611,6 +617,10 @@ void ShaderScanner::NoteFirstUse(u64 hash, u8 stage) {
         if (it->second.addr != 0) {
             recent_uses[recent_use_index] = it->second.addr;
             recent_use_index = (recent_use_index + 1) % NumRecentUses;
+        }
+        if (it->second.use_order == 0) {
+            it.value().use_order = ++use_counter;
+            dirty = true;
         }
         // The draw knows the stage; a saved one from an older launch can be wrong.
         if (it->second.stage != stage) {
