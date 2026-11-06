@@ -70,8 +70,12 @@ const char* TranslatePhaseName(TranslatePhase phase) {
         return "control flow graph";
     case TranslatePhase::Translate:
         return "GCN to IR";
+    case TranslatePhase::SsaRewrite:
+        return "SSA rewrite";
+    case TranslatePhase::EarlyConstants:
+        return "early constant propagation";
     case TranslatePhase::EarlyPasses:
-        return "SSA and early passes";
+        return "other early passes";
     case TranslatePhase::ResourceDiscover:
         return "resource discovery";
     case TranslatePhase::ResourcePatch:
@@ -84,8 +88,16 @@ const char* TranslatePhaseName(TranslatePhase phase) {
         return "structurizing";
     case TranslatePhase::SsaRepair:
         return "SSA repair";
-    case TranslatePhase::LatePasses:
-        return "late passes";
+    case TranslatePhase::SharedMemoryBarriers:
+        return "late: shared memory barriers";
+    case TranslatePhase::DeadCode:
+        return "late: dead code elimination";
+    case TranslatePhase::Wave64Ballots:
+        return "late: wave64 ballots";
+    case TranslatePhase::HardwareIntrinsics:
+        return "late: hardware intrinsics";
+    case TranslatePhase::LateConstants:
+        return "late: constant propagation";
     case TranslatePhase::CollectInfo:
         return "info collection";
     default:
@@ -143,8 +155,11 @@ IR::Program TranslateProgram(const std::span<const u32>& code, Pools& pools, Inf
     if (!profile.support_float64) {
         Shader::Optimization::LowerFp64ToFp32(program);
     }
+    mark(TranslatePhase::EarlyPasses);
     Shader::Optimization::SsaRewritePass(program);
+    mark(TranslatePhase::SsaRewrite);
     Shader::Optimization::ConstantPropagationPass(program.post_order_blocks);
+    mark(TranslatePhase::EarlyConstants);
     Shader::Optimization::ReadLaneEliminationPass(program);
     if (info.sw_stage == SwStage::TessellationControl) {
         Shader::Optimization::TessellationPreprocess(program, runtime_info);
@@ -191,12 +206,17 @@ IR::Program TranslateProgram(const std::span<const u32>& code, Pools& pools, Inf
     Shader::Optimization::SsaRewritePass(program);
     mark(TranslatePhase::SsaRepair);
     Shader::Optimization::SharedMemoryBarrierPass(program, runtime_info, profile);
+    mark(TranslatePhase::SharedMemoryBarriers);
     Shader::Optimization::DeadCodeEliminationPass(program);
+    mark(TranslatePhase::DeadCode);
     Shader::Optimization::LowerWave64BallotPass(program, runtime_info, profile);
+    mark(TranslatePhase::Wave64Ballots);
     Shader::Optimization::LowerHardwareIntrinsics(program);
+    mark(TranslatePhase::HardwareIntrinsics);
     Shader::Optimization::ConstantPropagationPass(program.post_order_blocks);
+    mark(TranslatePhase::LateConstants);
     Shader::Optimization::DeadCodeEliminationPass(program);
-    mark(TranslatePhase::LatePasses);
+    mark(TranslatePhase::DeadCode);
     Shader::Optimization::CollectShaderInfoPass(program, profile);
     Shader::IR::DumpProgram(program, info);
     mark(TranslatePhase::CollectInfo);
