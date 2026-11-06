@@ -112,7 +112,11 @@ public:
         VAddr device_addr, u32 size, ObtainBufferFlags flags = ObtainBufferFlags::None);
 
     /// Attempts to obtain a buffer without modifying the cache contents.
-    [[nodiscard]] std::pair<const Buffer*, u64> ObtainBufferForImage(VAddr device_addr, u32 size);
+    /// Returns a buffer holding the guest memory of an image. With device_local, memory that
+    /// only the CPU wrote is copied into device memory first, so that a shader reading it in a
+    /// scattered order (the detiler) doesn't read host memory across the bus.
+    [[nodiscard]] std::pair<const Buffer*, u64> ObtainBufferForImage(VAddr device_addr, u32 size,
+                                                                     bool device_local);
 
     /// Return true when a region is modified from the CPU
     [[nodiscard]] bool IsRegionCpuModified(VAddr addr, size_t size);

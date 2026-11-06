@@ -556,7 +556,7 @@ private:
     /// Each timed submission gets a slot of timestamps: its start, one per change of kind, and
     /// its end. Slots are used as a ring.
     static constexpr u32 NumTimedSubmits = 64;
-    static constexpr u32 QueriesPerSubmit = 512;
+    static constexpr u32 QueriesPerSubmit = 2048;
     /// Submissions that took this long on the GPU log their split.
     static constexpr u64 SlowSubmitNs = 30'000'000;
     vk::UniqueQueryPool timestamp_pool;

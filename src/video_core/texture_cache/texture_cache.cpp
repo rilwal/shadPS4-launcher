@@ -2,7 +2,9 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 #include <algorithm>
+#include <cstdlib>
 #include <limits>
+#include <string_view>
 #include <xxhash.h>
 
 #include "common/assert.h"
@@ -23,6 +25,16 @@
 #include "video_core/texture_cache/tile_manager.h"
 
 namespace VideoCore {
+
+/// Whether tiled images are copied into device memory before the detiler reads them.
+/// SHADPS4_DETILE_SOURCE=host reads them straight from host memory, as upstream does.
+static bool DetilesFromDevice() {
+    static const bool from_device = [] {
+        const char* env = std::getenv("SHADPS4_DETILE_SOURCE");
+        return !env || std::string_view{env} != "host";
+    }();
+    return from_device;
+}
 
 static constexpr u32 MAX_IMAGES = std::numeric_limits<u16>::max();
 static constexpr u32 MAX_IMAGE_VIEWS = std::numeric_limits<u16>::max();
@@ -908,7 +920,8 @@ void TextureCache::RefreshImage(Image& image) {
     scheduler.EndRendering();
 
     const auto [in_buffer, in_offset] =
-        buffer_cache.ObtainBufferForImage(image.info.guest_address, image.info.guest_size);
+        buffer_cache.ObtainBufferForImage(image.info.guest_address, image.info.guest_size,
+                                          image.info.props.is_tiled && DetilesFromDevice());
     const auto [buffer, offset] = tile_manager.DetileImage(in_buffer, in_offset, image.info);
     for (auto& copy : image_copies) {
         copy.bufferOffset += offset;

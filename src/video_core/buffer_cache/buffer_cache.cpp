@@ -246,7 +246,8 @@ std::pair<const Buffer*, u64> BufferCache::ObtainBuffer(VAddr device_addr, u32 s
     return {arena, arena->Offset(device_addr)};
 }
 
-std::pair<const Buffer*, u64> BufferCache::ObtainBufferForImage(VAddr device_addr, u32 size) {
+std::pair<const Buffer*, u64> BufferCache::ObtainBufferForImage(VAddr device_addr, u32 size,
+                                                                bool device_local) {
     if (IsRegionGpuModified(device_addr, size)) {
         return ObtainBuffer(device_addr, size);
     }
@@ -254,7 +255,14 @@ std::pair<const Buffer*, u64> BufferCache::ObtainBufferForImage(VAddr device_add
                                               instance.StorageMinAlignment());
     memory->CopySparseMemory(device_addr, staging.mapped, staging.size);
     staging.Flush();
-    return {staging.buffer, staging.offset};
+    if (!device_local) {
+        return {staging.buffer, staging.offset};
+    }
+    const auto local = staging_pool.Request(size, VideoCore::MemoryType::DeviceLocal,
+                                            instance.StorageMinAlignment());
+    const vk::BufferCopy copy{staging.offset, local.offset, size};
+    runtime.CopyBuffer(staging.buffer, local.buffer, std::span{&copy, 1});
+    return {local.buffer, local.offset};
 }
 
 bool BufferCache::IsRegionCpuModified(VAddr addr, size_t size) {

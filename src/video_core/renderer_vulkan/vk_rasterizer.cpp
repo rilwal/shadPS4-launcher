@@ -58,6 +58,8 @@ Rasterizer::Rasterizer(const Instance& instance_, Scheduler& scheduler_, Runtime
         tile_manager.Prepare([this] { return pipeline_cache.SavedTilingKeys(); });
     }
 
+    runtime.RunCopyBench();
+
     scheduler.SetSubmitCallback([this](Vulkan::SubmitInfo& info) {
         runtime.FlushBarriers();
         buffer_cache.SubmitPendingArenaBinds(info);

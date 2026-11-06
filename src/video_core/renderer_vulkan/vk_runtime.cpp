@@ -1,7 +1,12 @@
 // SPDX-FileCopyrightText: Copyright 2025 shadPS4 Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+#include <chrono>
+#include <cstdlib>
+#include <cstring>
+
 #include "common/alignment.h"
+#include "common/logging/log.h"
 #include "video_core/buffer_cache/buffer.h"
 #include "video_core/renderer_vulkan/liverpool_to_vk.h"
 #include "video_core/renderer_vulkan/vk_instance.h"
@@ -106,6 +111,87 @@ Runtime::Runtime(const Instance& instance_, Scheduler& scheduler_)
 
 void Runtime::TickFrame() {
     staging_pool.TickFrame();
+}
+
+void Runtime::RunCopyBench() {
+    const char* env = std::getenv("SHADPS4_COPY_BENCH");
+    if (!env || env[0] != '1') {
+        return;
+    }
+    using VideoCore::MemoryType;
+    constexpr u64 Size = 256_MB;
+    constexpr int Rounds = 4;
+    const auto gbps = [](double ms) { return double(Size) / (ms * 1e6); };
+    const auto now = [] { return std::chrono::steady_clock::now(); };
+    const auto ms_since = [&](auto start) {
+        return std::chrono::duration<double, std::milli>(now() - start).count();
+    };
+
+    VideoCore::Buffer host{instance, 0, Size, MemoryType::HostUncached, "CopyBench:HostUncached"};
+    VideoCore::Buffer cached{instance, 0, Size, MemoryType::HostCached, "CopyBench:HostCached"};
+    VideoCore::Buffer stream{instance, 0, Size, MemoryType::Stream, "CopyBench:Stream"};
+    VideoCore::Buffer device_a{instance, 0, Size, MemoryType::DeviceLocal, "CopyBench:DeviceA"};
+    VideoCore::Buffer device_b{instance, 0, Size, MemoryType::DeviceLocal, "CopyBench:DeviceB"};
+
+    std::vector<u8> source(Size);
+    for (u64 i = 0; i < Size; i += 4096) {
+        source[i] = u8(i >> 12);
+    }
+    const auto cpu_write = [&](VideoCore::Buffer& buffer, std::string_view name) {
+        if (buffer.mapped_data.empty()) {
+            LOG_INFO(Render_Vulkan, "Copy bench: {} is not host visible", name);
+            return;
+        }
+        double best = 1e9;
+        for (int round = 0; round < Rounds; ++round) {
+            const auto start = now();
+            std::memcpy(buffer.mapped_data.data(), source.data(), Size);
+            best = std::min(best, ms_since(start));
+        }
+        LOG_INFO(Render_Vulkan, "Copy bench: CPU memcpy into {} {:.1f} GB/s ({:.1f} ms)", name,
+                 gbps(best), best);
+    };
+    cpu_write(host, "HostUncached");
+    cpu_write(stream, "Stream");
+
+    const auto gpu_copy = [&](VideoCore::Buffer& src, VideoCore::Buffer& dst,
+                              std::string_view name) {
+        double best = 1e9;
+        for (int round = 0; round < Rounds; ++round) {
+            scheduler.Finish();
+            const auto start = now();
+            const vk::BufferCopy copy{0, 0, Size};
+            scheduler.CommandBuffer().copyBuffer(src.Handle(), dst.Handle(), copy);
+            scheduler.Finish();
+            best = std::min(best, ms_since(start));
+        }
+        LOG_INFO(Render_Vulkan, "Copy bench: GPU copy {} {:.1f} GB/s ({:.1f} ms)", name, gbps(best),
+                 best);
+    };
+    gpu_copy(host, device_a, "HostUncached -> DeviceLocal");
+    gpu_copy(stream, device_a, "Stream -> DeviceLocal");
+    gpu_copy(device_a, device_b, "DeviceLocal -> DeviceLocal");
+    gpu_copy(device_a, cached, "DeviceLocal -> HostCached");
+
+    // Many small copies, like buffer cache uploads of scattered dirty pages.
+    for (const u64 chunk : {u64(4_KB), u64(64_KB), u64(1_MB)}) {
+        std::vector<vk::BufferCopy> copies;
+        for (u64 offset = 0; offset < Size; offset += chunk * 2) {
+            copies.push_back({offset, offset, chunk});
+        }
+        double best = 1e9;
+        for (int round = 0; round < Rounds; ++round) {
+            scheduler.Finish();
+            const auto start = now();
+            scheduler.CommandBuffer().copyBuffer(host.Handle(), device_a.Handle(), copies);
+            scheduler.Finish();
+            best = std::min(best, ms_since(start));
+        }
+        LOG_INFO(Render_Vulkan,
+                 "Copy bench: GPU copy HostUncached -> DeviceLocal in {} KB pieces {:.1f} GB/s "
+                 "({} copies, {:.1f} ms)",
+                 chunk / 1024, double(Size / 2) / (best * 1e6), copies.size(), best);
+    }
 }
 
 void Runtime::CopyBuffer(const VideoCore::Buffer* src, const VideoCore::Buffer* dst,
