@@ -140,6 +140,22 @@ public:
     /// Counts since the last call (known is the running total).
     Counts TakeCounts();
 
+    /// Events for the run's timeline file (<cache>/<serial>_timeline/<start time>.csv), from
+    /// which shader_tool's simulate replays when shaders became known and were used:
+    ///   F found (a: guest address, b: 1 with struct, 2 with reflection)
+    ///   H found again with the struct it lacked (a: address, b: as F)
+    ///   L loaded from the saved list (a: saved stage, b: use order, high bit with struct)
+    ///   Q queued for a worker (a: stage)
+    ///   W worker finished it (a: start, ns since the scan started; b: 1 if it compiled)
+    ///   U first use (a: stage, b: 's' served, 'd' compiled early but differed, 'p' found but
+    ///     not compiled yet, 'n' not found)
+    ///   D a worker finished it after its first use
+    ///   J the first use waited for the worker compiling it (a: ns waited)
+    ///   B semantic base learned (a: base)
+    void NoteEvent(char event, u64 hash, u64 a = 0, u64 b = 0);
+    /// Nanoseconds since the scanner started, the timeline's clock.
+    u64 Clock() const;
+
 private:
     void Run(std::stop_token stop);
     void ScanOnce();
@@ -196,6 +212,21 @@ private:
     std::vector<std::pair<VAddr, u64>> last_ranges;
     std::atomic<u64> scan_ns{};
     std::atomic<u64> scan_bytes{};
+
+    struct Event {
+        u64 t;
+        u64 hash;
+        u64 a;
+        u64 b;
+        char event;
+    };
+    /// Appends the events noted since the last call to the timeline file.
+    void FlushTimeline();
+    std::mutex timeline_mutex;
+    std::vector<Event> timeline;
+    std::filesystem::path timeline_path;
+    bool timeline_started{};
+
     std::jthread thread;
 };
 

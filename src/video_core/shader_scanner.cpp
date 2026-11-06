@@ -7,10 +7,12 @@
 #include <condition_variable>
 #include <cstdlib>
 #include <cstring>
+#include <ctime>
 #include <span>
 
 #ifdef __linux__
 #include <fcntl.h>
+#include <fmt/format.h>
 #include <unistd.h>
 #endif
 
@@ -117,6 +119,16 @@ ShaderScanner::ShaderScanner() {
                     (std::string{serial} + "_shaders.bin");
         states_path = Common::FS::GetUserPath(Common::FS::PathType::CacheDir) /
                       (std::string{serial} + "_shader_states.bin");
+        const char* timeline_env = std::getenv("SHADPS4_SHADER_TIMELINE");
+        if (!timeline_env || timeline_env[0] != '0') {
+            const std::time_t now = std::time(nullptr);
+            std::tm local{};
+            localtime_r(&now, &local);
+            char stamp[32];
+            std::strftime(stamp, sizeof(stamp), "%Y%m%d-%H%M%S", &local);
+            timeline_path = Common::FS::GetUserPath(Common::FS::PathType::CacheDir) /
+                            (std::string{serial} + "_timeline") / (std::string{stamp} + ".csv");
+        }
     }
     thread = std::jthread([this](std::stop_token stop) { Run(stop); });
 #else
@@ -130,6 +142,7 @@ ShaderScanner::~ShaderScanner() {
         thread.request_stop();
         thread.join();
         Save();
+        FlushTimeline();
     }
 #ifdef __linux__
     if (fd >= 0) {
@@ -346,15 +359,19 @@ bool ShaderScanner::TryAdd(u64 info_addr) {
             if (!has_header || !it.value().header.empty()) {
                 return false;
             }
+            const u64 flags = 1 | (shader.reflection.empty() ? 0 : 2);
             it.value().header = std::move(shader.header);
             it.value().reflection = std::move(shader.reflection);
             it.value().addr = info_addr;
             ++with_registers;
+            NoteEvent('H', info.shader_hash, info_addr, flags);
             found_order.push_back(info.shader_hash);
             dirty = true;
             return false;
         }
+        const u64 flags = (has_header ? 1 : 0) | (shader.reflection.empty() ? 0 : 2);
         if (shaders.try_emplace(info.shader_hash, std::move(shader)).second) {
+            NoteEvent('F', info.shader_hash, info_addr, flags);
             ++pass_new;
             dirty = true;
             if (has_header) {
@@ -450,6 +467,8 @@ void ShaderScanner::Load() {
         // an earlier run used it, which its saved stage says it did.
         const bool was_used = listed.stage != NoStage || states.contains(listed.hash);
         if (shaders.try_emplace(listed.hash, std::move(shader)).second) {
+            NoteEvent('L', listed.hash, listed.stage,
+                      listed.use_order | (has_header ? u64{1} << 63 : 0));
             ++loaded;
             if (has_header) {
                 ++with_registers;
@@ -509,7 +528,48 @@ std::vector<std::vector<u8>> ShaderScanner::StatesOf(u64 hash) {
     return it == states.end() ? std::vector<std::vector<u8>>{} : it->second;
 }
 
+void ShaderScanner::NoteEvent(char event, u64 hash, u64 a, u64 b) {
+    if (timeline_path.empty()) {
+        return;
+    }
+    const u64 t = Clock();
+    std::scoped_lock lock{timeline_mutex};
+    timeline.push_back({t, hash, a, b, event});
+}
+
+u64 ShaderScanner::Clock() const {
+    return PerfStats::NowNs() - start_ns;
+}
+
+void ShaderScanner::FlushTimeline() {
+    std::vector<Event> events;
+    {
+        std::scoped_lock lock{timeline_mutex};
+        events.swap(timeline);
+    }
+    if (timeline_path.empty() || (events.empty() && timeline_started)) {
+        return;
+    }
+    std::error_code ec;
+    std::filesystem::create_directories(timeline_path.parent_path(), ec);
+    std::FILE* file = std::fopen(timeline_path.string().c_str(), timeline_started ? "a" : "w");
+    if (!file) {
+        return;
+    }
+    if (!timeline_started) {
+        timeline_started = true;
+        std::fputs(
+            "# shadPS4 shader timeline 1: event,ms,hash,a,b (see ShaderScanner::NoteEvent)\n",
+            file);
+    }
+    for (const auto& e : events) {
+        fmt::print(file, "{},{:.3f},{:#x},{:#x},{:#x}\n", e.event, e.t / 1e6, e.hash, e.a, e.b);
+    }
+    std::fclose(file);
+}
+
 void ShaderScanner::Save() {
+    FlushTimeline();
     if (save_path.empty()) {
         return;
     }

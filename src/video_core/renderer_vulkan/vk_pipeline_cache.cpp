@@ -34,6 +34,9 @@
 
 namespace Vulkan {
 
+/// Whether the precompile job running on this worker thread compiled anything, for the timeline.
+static thread_local bool job_compiled = false;
+
 using Shader::HwStage;
 using Shader::Output;
 using Shader::SwStage;
@@ -944,6 +947,8 @@ PipelineCache::Result PipelineCache::GetProgram(HwStage hw_stage, SwStage sw_sta
         const auto noted_stage = PrecompileStageOf(hw_stage, sw_stage);
         if (shader_scanner) {
             shader_scanner->NoteFirstUse(params.hash, static_cast<u8>(noted_stage));
+            shader_scanner->NoteEvent('U', params.hash, static_cast<u64>(noted_stage),
+                                      shader_scanner->Find(params.hash) ? 'p' : 'n');
         }
         if (precompile.active) {
             NotePrecompileType(params.hash, noted_stage);
@@ -1199,6 +1204,11 @@ void PipelineCache::PrecompileOne(const Precompile::Job& job) {
     const u64 hash = job.hash;
     const HwStage hw_stage = job.stage;
     const u64 start = VideoCore::PerfStats::NowNs();
+    const u64 clock_start = shader_scanner->Clock();
+    job_compiled = false;
+    SCOPE_EXIT {
+        shader_scanner->NoteEvent('W', hash, clock_start, job_compiled ? 1 : 0);
+    };
     const auto found = shader_scanner->Find(hash);
     const auto sw_stage = hw_stage == HwStage::Compute  ? SwStage::Compute
                           : hw_stage == HwStage::Vertex ? SwStage::Vertex
@@ -1341,6 +1351,7 @@ void PipelineCache::PrecompileOne(const Precompile::Job& job) {
     precompile.compute_pipelines += static_cast<u32>(done.computes.size());
     precompile.worker_ns += VideoCore::PerfStats::NowNs() - start;
     precompile.done.push_back(std::move(done));
+    job_compiled = true;
     precompile.has_done.store(true, std::memory_order_release);
 }
 
@@ -1551,6 +1562,7 @@ bool PipelineCache::PrecompileRecorded(const Precompile::Job& job,
     precompile.compute_pipelines += static_cast<u32>(done.computes.size());
     precompile.worker_ns += VideoCore::PerfStats::NowNs() - start;
     precompile.done.push_back(std::move(done));
+    job_compiled = true;
     precompile.has_done.store(true, std::memory_order_release);
     return true;
 }
@@ -1603,6 +1615,7 @@ void PipelineCache::JoinPrecompile(u64 hash) {
     const u64 waited = VideoCore::PerfStats::NowNs() - start;
     ++precompile.joined;
     precompile.joined_ns += waited;
+    shader_scanner->NoteEvent('J', hash, waited);
     VideoCore::PerfStats::frames.AddShaderTime(waited);
 }
 
@@ -1628,6 +1641,7 @@ void PipelineCache::TakePrecompiled() {
                 device.destroyShaderModule(m.module);
             }
             ++precompile.duplicate;
+            shader_scanner->NoteEvent('D', item.hash);
             continue;
         }
         it.value() = std::move(item.program);
@@ -1638,6 +1652,7 @@ void PipelineCache::TakePrecompiled() {
 }
 
 PipelineCache::Precompile::Job PipelineCache::MakePrecompileJob(u64 hash, HwStage stage) {
+    shader_scanner->NoteEvent('Q', hash, static_cast<u64>(stage));
     const auto place = shader_scanner->PlaceOf(hash);
     return {hash, stage, place.addr, place.use_order};
 }
@@ -1722,6 +1737,12 @@ void PipelineCache::NotePreparedUse(Program& program, u64 hash, bool served,
             hash, static_cast<u8>(
                       PrecompileStageOf(spec.runtime_info.hw_stage, spec.runtime_info.sw_stage)));
     }
+    if (shader_scanner) {
+        shader_scanner->NoteEvent('U', hash,
+                                  static_cast<u64>(PrecompileStageOf(spec.runtime_info.hw_stage,
+                                                                     spec.runtime_info.sw_stage)),
+                                  served ? 's' : 'd');
+    }
     if (served) {
         ++precompile.served;
         const auto module_it =
@@ -1785,6 +1806,7 @@ void PipelineCache::LearnSemanticBase(u64 hash, const Shader::RuntimeInfo& runti
             if (++semantic_base_votes == 3) {
                 semantic_base.store(base, std::memory_order_relaxed);
                 shader_scanner->SetSemanticBase(base);
+                shader_scanner->NoteEvent('B', 0, static_cast<u64>(base));
                 ReleaseHeldPrecompiles();
                 LOG_INFO(Render_Vulkan, "Pixel shader inputs are their semantic less {}", base);
             }
