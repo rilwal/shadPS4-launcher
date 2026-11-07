@@ -939,7 +939,8 @@ std::pair<vk::ShaderModule, u64> PipelineCache::CompileModule(Shader::Info& info
 PipelineCache::Result PipelineCache::GetProgram(HwStage hw_stage, SwStage sw_stage,
                                                 const Shader::ShaderParams& params,
                                                 Shader::Backend::Bindings& binding) {
-    auto runtime_info = BuildRuntimeInfo(hw_stage, sw_stage);
+    // Compiling may change its copy (clip distances, tessellation); lookups only read it.
+    const auto& runtime_info = BuildRuntimeInfo(hw_stage, sw_stage);
     if (precompile.active) {
         JoinPrecompile(params.hash);
         TakePrecompiled();
@@ -963,12 +964,13 @@ PipelineCache::Result PipelineCache::GetProgram(HwStage hw_stage, SwStage sw_sta
         it_pgm.value() = std::make_unique<Program>(hw_stage, sw_stage, params);
         auto& program = it_pgm.value();
         auto start = binding;
+        auto compile_info = runtime_info;
         const auto [module, perm_hash] =
-            CompileModule(program->info, runtime_info, params.code, 0, binding);
-        auto spec = Shader::StageSpecialization(program->info, runtime_info, profile, start);
-        RecordDrawState(program->info, runtime_info, spec.fetch_shader_data);
+            CompileModule(program->info, compile_info, params.code, 0, binding);
+        auto spec = Shader::StageSpecialization(program->info, compile_info, profile, start);
+        RecordDrawState(program->info, compile_info, spec.fetch_shader_data);
         if (guess_check && shader_scanner && shader_scanner->Find(params.hash)) {
-            CheckGuess(hw_stage, sw_stage, params, runtime_info, start, spec, perm_hash);
+            CheckGuess(hw_stage, sw_stage, params, compile_info, start, spec, perm_hash);
         }
 
         RegisterShaderMeta(program->info, spec.fetch_shader_data, spec, perm_hash, 0);
@@ -1019,9 +1021,10 @@ PipelineCache::Result PipelineCache::GetProgram(HwStage hw_stage, SwStage sw_sta
         LOG_INFO(Render_Vulkan, "Variant {} of {} shader {:#x} differs in: {}", perm_idx, hw_stage,
                  params.hash, fmt::join(closest, ", "));
         auto new_info = Shader::Info(hw_stage, sw_stage, params);
+        auto compile_info = runtime_info;
         std::tie(module, perm_hash) =
-            CompileModule(new_info, runtime_info, params.code, perm_idx, binding);
-        RecordDrawState(new_info, runtime_info, spec.fetch_shader_data);
+            CompileModule(new_info, compile_info, params.code, perm_idx, binding);
+        RecordDrawState(new_info, compile_info, spec.fetch_shader_data);
 
         if (const auto guessed = guessed_hashes.find(params.hash);
             guessed != guessed_hashes.end()) {

@@ -10,6 +10,7 @@
 #include "common/recursive_lock.h"
 #include "common/shared_first_mutex.h"
 #include "common/unique_function.h"
+#include "shader_recompiler/runtime_buffer_format.h"
 #include "video_core/buffer_cache/buffer_cache.h"
 #include "video_core/page_manager.h"
 #include "video_core/renderer_vulkan/vk_pipeline_cache.h"
@@ -197,6 +198,17 @@ private:
     tsl::robin_map<VAddr, TargetFrames> target_frames;
     /// Targets already noted in target_frames this frame, so repeats skip the map.
     boost::container::static_vector<VAddr, 16> noted_targets;
+
+    /// Shader::DescribeRuntimeBufferFormat, cached by the bits of the sharp it reads.
+    std::optional<Shader::RuntimeBufferFormat> DescribeBufferFormat(const AmdGpu::Buffer& vsharp);
+    /// dst_sel_x..w, num_format and data_format: the low 19 bits of the sharp's last dword.
+    static constexpr u32 FormatKeyMask = (1u << 19) - 1;
+    static constexpr u32 FormatKeyValid = 1u << 31;
+    struct BufferFormatEntry {
+        u32 key{};
+        std::optional<Shader::RuntimeBufferFormat> format;
+    };
+    std::array<BufferFormatEntry, 64> buffer_formats{};
     u64 noted_frame{};
 
     const Instance& instance;

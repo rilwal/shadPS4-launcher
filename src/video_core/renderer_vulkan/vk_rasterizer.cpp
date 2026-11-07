@@ -1147,6 +1147,21 @@ bool Rasterizer::IsComputeImageClear(const Pipeline* pipeline) {
     return true;
 }
 
+std::optional<Shader::RuntimeBufferFormat> Rasterizer::DescribeBufferFormat(
+    const AmdGpu::Buffer& vsharp) {
+    // The description only depends on the swizzle and format bits of the sharp's last dword,
+    // and a frame uses a handful of formats thousands of times.
+    u32 dword3;
+    std::memcpy(&dword3, reinterpret_cast<const u8*>(&vsharp) + 12, sizeof(dword3));
+    const u32 key = (dword3 & FormatKeyMask) | FormatKeyValid;
+    auto& entry = buffer_formats[(key ^ (key >> 9)) % buffer_formats.size()];
+    if (entry.key != key) {
+        entry.key = key;
+        entry.format = Shader::DescribeRuntimeBufferFormat(vsharp);
+    }
+    return entry.format;
+}
+
 void Rasterizer::BindBuffers(const Shader::Info& stage, Shader::Backend::Bindings& binding,
                              Shader::PushData& push_data) {
     const u64 alignment = instance.StorageMinAlignment();
@@ -1244,7 +1259,7 @@ void Rasterizer::BindBuffers(const Shader::Info& stage, Shader::Backend::Binding
                     heap_stage.strides[binding.buffer] = static_cast<u16>(vsharp.GetStride());
                     // The same test as UsesRuntimeBufferFormat, describing the format once.
                     if (runtime_formats && desc.is_formatted && !desc.is_written) {
-                        if (const auto format = Shader::DescribeRuntimeBufferFormat(vsharp)) {
+                        if (const auto format = DescribeBufferFormat(vsharp)) {
                             heap_stage.formats[binding.buffer] = *format;
                             heap_stage.num_formats =
                                 std::max(heap_stage.num_formats, binding.buffer + 1);
