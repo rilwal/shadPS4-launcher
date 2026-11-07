@@ -1104,6 +1104,12 @@ void Rasterizer::BindBuffers(const Shader::Info& stage, Shader::Backend::Binding
                 if (desc.is_formatted) {
                     flags |= VideoCore::ObtainBufferFlags::IsTexelBuffer;
                 }
+                if (desc.is_written) {
+                    // Raw storage-buffer writes can also make an aliased cached image stale.
+                    // Marked before obtaining the buffer, so images it marks GPU-dirty skip
+                    // hashing their memory as maybe GPU-dirty: that hash is never used.
+                    texture_cache.InvalidateMemoryFromGPU(vsharp.base_address, size);
+                }
                 const auto [buffer, offset] =
                     buffer_cache.ObtainBuffer(vsharp.base_address, size, flags);
                 const u64 offset_aligned = Common::AlignDown(offset, alignment);
@@ -1129,10 +1135,6 @@ void Rasterizer::BindBuffers(const Shader::Info& stage, Shader::Backend::Binding
                 }
                 AddBufferInfo(buffer, offset_aligned, size + adjust);
                 bound_buffers.emplace_back(buffer, offset, size, src_access);
-                if (desc.is_written) {
-                    // Raw storage-buffer writes can also make an aliased cached image stale.
-                    texture_cache.InvalidateMemoryFromGPU(vsharp.base_address, size);
-                }
                 needs_barrier |= runtime.IsBufferAccessed(buffer, offset, size, desc.is_written);
             }
         }

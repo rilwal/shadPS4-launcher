@@ -245,7 +245,10 @@ void TextureCache::InvalidateMemoryFromGPU(VAddr address, size_t max_size) {
 
 void TextureCache::MarkAsMaybeGpuDirty(VAddr addr, size_t size) {
     ForEachImageInRegion(addr, size, [&](ImageId image_id, Image& image) {
-        if (image.gpu_hash == 0) {
+        // The hash only matters to an image evicted with GPU-valid data. A GPU-dirty image is
+        // freed instead, or refreshed first, which clears the hash: hashing it (every frame for
+        // compute outputs) is wasted.
+        if (image.gpu_hash == 0 && False(image.flags & ImageFlagBits::GpuDirty)) {
             // Read backing pages directly, without faulting through the guest readback path.
             image.gpu_hash = HashBackingMemory(image.info.guest_address, image.info.guest_size);
         }
