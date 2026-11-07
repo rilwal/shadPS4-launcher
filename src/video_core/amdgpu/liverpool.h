@@ -83,14 +83,10 @@ public:
         submit_cv.notify_one();
     }
 
-    void WaitGpuIdle() noexcept {
-        std::unique_lock lk{submit_mutex};
-        submit_cv.wait(lk, [this] { return num_submits == 0; });
-    }
-
-    bool IsGpuIdle() const {
-        return num_submits == 0;
-    }
+    /// Idle means every submission processed and every fence signal it deferred written:
+    /// the guest may reuse that memory once the GPU is idle.
+    void WaitGpuIdle() noexcept;
+    bool IsGpuIdle() const;
 
     void SetVoPort(Libraries::VideoOut::VideoOutPort* port) {
         vo_port = port;

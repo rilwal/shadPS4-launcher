@@ -119,6 +119,12 @@ public:
     /// right away instead. Returns false (without signaling) when readbacks aren't Fenced.
     bool DeferFenceSignal(Common::UniqueFunction<void>&& signal, bool throttle);
 
+    /// Waits until every deferred fence signal has run, on any thread. They must have been
+    /// submitted (FlushFenceSignals, or any flush) for this to return.
+    void WaitForFenceSignals();
+    /// Whether any deferred fence signal is still to run.
+    bool FenceSignalsPending() const;
+
     /// Buffer cache tracking of a range, for logs. GPU thread.
     std::string DescribeMemoryState(VAddr address, u64 size) {
         return buffer_cache.DescribeMemoryState(address, size);

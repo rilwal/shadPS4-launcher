@@ -170,6 +170,22 @@ void Liverpool::ProcessCommands() {
     }
 }
 
+void Liverpool::WaitGpuIdle() noexcept {
+    {
+        std::unique_lock lk{submit_mutex};
+        submit_cv.wait(lk, [this] { return num_submits == 0; });
+    }
+    // The command processor submits deferred signals on going idle; a late one would land on
+    // memory the guest reuses once it thinks the GPU is done.
+    if (rasterizer) {
+        rasterizer->WaitForFenceSignals();
+    }
+}
+
+bool Liverpool::IsGpuIdle() const {
+    return num_submits == 0 && (!rasterizer || !rasterizer->FenceSignalsPending());
+}
+
 void Liverpool::Process(std::stop_token stoken) {
     Common::SetCurrentThreadName("shadPS4:GpuCommandProcessor");
     gpu_id = std::this_thread::get_id();
@@ -293,6 +309,12 @@ void Liverpool::Process(std::stop_token stoken) {
         } else if (rasterizer) {
             // Going idle: the guest may be waiting on a deferred fence signal.
             rasterizer->FlushFenceSignals();
+        }
+        // Deferred fence signals still to run would write labels after the guest hears the
+        // GPU is idle, by when it may have reused that memory (Bloodborne wrote one over a
+        // command buffer that way).
+        if (rasterizer) {
+            rasterizer->WaitForFenceSignals();
         }
 
         Platform::IrqC::Instance()->Signal(Platform::InterruptId::GpuIdle);

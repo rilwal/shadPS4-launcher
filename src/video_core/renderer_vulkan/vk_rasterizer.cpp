@@ -687,7 +687,9 @@ bool Rasterizer::DeferFenceSignal(Common::UniqueFunction<void>&& signal, bool th
     }
     scheduler.DeferPriorityOperation([this, signal = std::move(signal), throttle]() mutable {
         signal();
-        deferred_signals_in_flight.fetch_sub(1, std::memory_order_release);
+        if (deferred_signals_in_flight.fetch_sub(1, std::memory_order_release) == 1) {
+            deferred_signals_in_flight.notify_all();
+        }
         if (throttle) {
             throttled_fences_in_flight.fetch_sub(1, std::memory_order_release);
             throttled_fences_in_flight.notify_all();
@@ -725,6 +727,18 @@ bool Rasterizer::DeferFenceSignal(Common::UniqueFunction<void>&& signal, bool th
     }
     buffer_cache.RecordFence(true, throttle_ns);
     return true;
+}
+
+void Rasterizer::WaitForFenceSignals() {
+    u32 in_flight = deferred_signals_in_flight.load(std::memory_order_acquire);
+    while (in_flight != 0) {
+        deferred_signals_in_flight.wait(in_flight, std::memory_order_acquire);
+        in_flight = deferred_signals_in_flight.load(std::memory_order_acquire);
+    }
+}
+
+bool Rasterizer::FenceSignalsPending() const {
+    return deferred_signals_in_flight.load(std::memory_order_acquire) != 0;
 }
 
 void Rasterizer::FlushFenceSignals() {
