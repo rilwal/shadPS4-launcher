@@ -5,7 +5,7 @@
 
 #include <utility>
 
-#include "common/adaptive_mutex.h"
+#include "common/spin_park_mutex.h"
 #include "common/types.h"
 #include "core/emulator_settings.h"
 #include "video_core/buffer_cache/region_definitions.h"
@@ -13,11 +13,7 @@
 
 namespace VideoCore {
 
-#ifdef PTHREAD_ADAPTIVE_MUTEX_INITIALIZER_NP
-using LockType = Common::AdaptiveMutex;
-#else
-using LockType = std::mutex;
-#endif
+using LockType = Common::SpinParkMutex;
 
 /**
  * Allows tracking CPU and GPU modification of pages in a contigious virtual address region.

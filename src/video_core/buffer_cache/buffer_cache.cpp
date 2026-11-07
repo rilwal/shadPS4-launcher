@@ -600,34 +600,40 @@ void BufferCache::FlushReadbackStats() {
                         .count();
     auto& stats = readback_stats;
     const double seconds = double(now - stats.last_log_ns) / 1e9;
-    if (seconds > 0.5 &&
-        (stats.sync_downloads != 0 || stats.landings != 0 || stats.deferred_fences != 0)) {
+    // The fault lines below are logged without readbacks too (Disabled mode), to compare.
+    const bool any_readbacks =
+        stats.sync_downloads != 0 || stats.landings != 0 || stats.deferred_fences != 0;
+    if (seconds > 0.5) {
         // While an A/B switch flips, the variant is the one before the switch.
         const bool switched = stats.ab_switches != Common::AbSwitch::Switches();
         const char* variant = Common::AbSwitch::Label();
         if (variant && switched) {
             variant = Common::AbSwitch::LabelOf(!Common::AbSwitch::IsB());
         }
-        // Milliseconds of each second the GPU thread spent waiting.
-        LOG_INFO(Render,
-                 "Readbacks per second [{}] over {:.1f} s: {:.1f} stalling downloads ({:.1f} KB, "
-                 "{:.2f} ms stalled), {:.1f} fence landings ({:.1f} KB), fences {:.1f} deferred / "
-                 "{:.1f} immediate, {:.2f} ms throttled",
-                 variant ? variant : "-", seconds, stats.sync_downloads / seconds,
-                 stats.sync_download_bytes / 1024.0 / seconds, stats.stall_ns / 1e6 / seconds,
-                 stats.landings / seconds, stats.landing_bytes / 1024.0 / seconds,
-                 stats.deferred_fences / seconds, stats.immediate_fences / seconds,
-                 stats.throttle_ns / 1e6 / seconds);
         const auto& n = stats.sync_by_reason;
         const auto& ns = stats.stall_ns_by_reason;
-        LOG_INFO(Render,
-                 "Stalling downloads per second [{}]: first reads {:.1f} ({:.2f} ms), repeat reads "
-                 "{:.1f} ({:.2f} ms), writes {:.1f} ({:.2f} ms), other {:.1f} ({:.2f} ms); "
-                 "landings skipped {:.1f} as too soon, {:.1f} for a full ring",
-                 variant ? variant : "-", n[0] / seconds, ns[0] / 1e6 / seconds, n[1] / seconds,
-                 ns[1] / 1e6 / seconds, n[2] / seconds, ns[2] / 1e6 / seconds, n[3] / seconds,
-                 ns[3] / 1e6 / seconds, stats.skipped_landings / seconds,
-                 stats.full_ring_landings / seconds);
+        if (any_readbacks) {
+            // Milliseconds of each second the GPU thread spent waiting.
+            LOG_INFO(
+                Render,
+                "Readbacks per second [{}] over {:.1f} s: {:.1f} stalling downloads ({:.1f} KB, "
+                "{:.2f} ms stalled), {:.1f} fence landings ({:.1f} KB), fences {:.1f} deferred / "
+                "{:.1f} immediate, {:.2f} ms throttled",
+                variant ? variant : "-", seconds, stats.sync_downloads / seconds,
+                stats.sync_download_bytes / 1024.0 / seconds, stats.stall_ns / 1e6 / seconds,
+                stats.landings / seconds, stats.landing_bytes / 1024.0 / seconds,
+                stats.deferred_fences / seconds, stats.immediate_fences / seconds,
+                stats.throttle_ns / 1e6 / seconds);
+            LOG_INFO(
+                Render,
+                "Stalling downloads per second [{}]: first reads {:.1f} ({:.2f} ms), repeat reads "
+                "{:.1f} ({:.2f} ms), writes {:.1f} ({:.2f} ms), other {:.1f} ({:.2f} ms); "
+                "landings skipped {:.1f} as too soon, {:.1f} for a full ring",
+                variant ? variant : "-", n[0] / seconds, ns[0] / 1e6 / seconds, n[1] / seconds,
+                ns[1] / 1e6 / seconds, n[2] / seconds, ns[2] / 1e6 / seconds, n[3] / seconds,
+                ns[3] / 1e6 / seconds, stats.skipped_landings / seconds,
+                stats.full_ring_landings / seconds);
+        }
         if (stats.served_loads != 0 || stats.gpu_byte_loads != 0 || stats.over_budget_loads != 0 ||
             !unsupported_loads.empty()) {
             std::vector<std::pair<u16, u32>> loads(unsupported_loads.begin(),

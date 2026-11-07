@@ -842,6 +842,7 @@ set(COMMON src/common/logging/classes.cpp
            src/common/slot_vector.h
            src/common/spin_lock.cpp
            src/common/spin_lock.h
+           src/common/spin_park_mutex.h
            src/common/stb.cpp
            src/common/stb.h
            src/common/string_literal.h
