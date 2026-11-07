@@ -213,8 +213,20 @@ private:
     Task ProcessCompute(std::span<const u32> acb, u32 vqid);
 
     /// Label writes of a fence signal, as dword address and value pairs.
-    using LabelWrites = boost::container::small_vector<std::pair<VAddr, u32>, 2>;
+    struct LabelWrite {
+        VAddr address;
+        u32 value;
+        /// What the label should hold when a deferred signal writes it; anything else means
+        /// it was written since, and the signal leaves it.
+        u32 expected{};
+    };
+    using LabelWrites = boost::container::small_vector<LabelWrite, 2>;
     static void RecordLabelWrite(LabelWrites& writes, void* address, u64 data, u32 num_bytes);
+    /// Writes a fence signal's label. Run deferred, it skips dwords that no longer hold the
+    /// value expected when the signal was recorded.
+    static void WriteFenceLabel(void* address, u64 data, u32 num_bytes);
+    /// The label writes of the deferred signal running on this thread, with expected values.
+    static thread_local const LabelWrites* running_label_writes;
     /// Logs a packet of an unknown type, the backing writes over it and its tracking state.
     void LogBadPacket(const u32* packet, size_t remaining_dwords);
 

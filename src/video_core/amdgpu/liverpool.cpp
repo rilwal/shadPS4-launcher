@@ -1,6 +1,7 @@
 // SPDX-FileCopyrightText: Copyright 2024-2026 shadPS4 Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+#include <algorithm>
 #include <chrono>
 #include <cstdlib>
 #include <cstring>
@@ -331,9 +332,42 @@ void Liverpool::RecordLabelWrite(LabelWrites& writes, void* address, u64 data, u
     const auto addr = std::bit_cast<VAddr>(address);
     Core::MemoryManager::NoteWatchedWrite(addr, num_bytes, &data,
                                           "a fence signal (recorded; written when it runs)");
-    writes.emplace_back(addr, static_cast<u32>(data));
+    writes.push_back({.address = addr, .value = static_cast<u32>(data)});
     if (num_bytes == sizeof(u64)) {
-        writes.emplace_back(addr + sizeof(u32), static_cast<u32>(data >> 32));
+        writes.push_back({.address = addr + sizeof(u32), .value = static_cast<u32>(data >> 32)});
+    }
+}
+
+thread_local const Liverpool::LabelWrites* Liverpool::running_label_writes = nullptr;
+
+namespace {
+std::atomic<u64> skipped_label_writes{};
+} // namespace
+
+void Liverpool::WriteFenceLabel(void* address, u64 data, u32 num_bytes) {
+    auto* memory = Core::Memory::Instance();
+    const auto addr = std::bit_cast<VAddr>(address);
+    if (!running_label_writes || addr % sizeof(u32) != 0 || num_bytes % sizeof(u32) != 0) {
+        ASSERT(memory->TryWriteBacking(address, &data, num_bytes));
+        return;
+    }
+    for (u32 offset = 0; offset < num_bytes; offset += sizeof(u32)) {
+        const VAddr dword = addr + offset;
+        const u32 value = static_cast<u32>(data >> (offset * 8));
+        const auto it = std::ranges::find(*running_label_writes, dword, &LabelWrite::address);
+        if (it == running_label_writes->end()) {
+            ASSERT(memory->TryWriteBacking(std::bit_cast<void*>(dword), &value, sizeof(value)));
+            continue;
+        }
+        // A label that no longer holds what it held when the signal was recorded was written
+        // since. The guest may have seen the work done some other way and reused the memory
+        // (Bloodborne puts command buffers there), and on hardware the label would have been
+        // written before that. So leave the newer value.
+        const auto result = memory->CompareWriteBacking(dword, it->expected, value);
+        ASSERT(result != Core::MemoryManager::BackingCas::NoBacking);
+        if (result == Core::MemoryManager::BackingCas::Changed) {
+            skipped_label_writes.fetch_add(1, std::memory_order_relaxed);
+        }
     }
 }
 
@@ -342,10 +376,28 @@ bool Liverpool::DeferFenceSignal(Common::UniqueFunction<void>&& signal, bool thr
     if (!rasterizer) {
         return false;
     }
+    // What each label should hold when the signal runs: the value of the last deferred signal
+    // still to write it, or what memory holds now.
+    LabelWrites expected_writes = writes;
+    const u64 landed_now = landed_label_seq.load(std::memory_order_acquire);
+    for (auto& write : expected_writes) {
+        const auto it = deferred_labels.find(write.address);
+        if (it != deferred_labels.end() && it->second.seq > landed_now) {
+            write.expected = it->second.value;
+        } else {
+            auto* memory = Core::Memory::Instance();
+            if (!memory->ReadBackingPages(write.address, &write.expected, sizeof(u32)) &&
+                !memory->TryReadBacking(write.address, &write.expected, sizeof(u32))) {
+                write.expected = 0;
+            }
+        }
+    }
     const u64 seq = ++deferred_label_seq;
     const bool deferred = rasterizer->DeferFenceSignal(
-        [this, seq, signal = std::move(signal)] {
+        [this, seq, signal = std::move(signal), writes = std::move(expected_writes)] {
+            running_label_writes = &writes;
             signal();
+            running_label_writes = nullptr;
             // Deferred signals run in order, so this one landing means all before it have.
             landed_label_seq.store(seq, std::memory_order_release);
             landed_label_seq.notify_all();
@@ -356,14 +408,14 @@ bool Liverpool::DeferFenceSignal(Common::UniqueFunction<void>&& signal, bool thr
     }
     // The signal writes guest memory directly, after the GPU work before it. A later readback
     // of GPU data recorded for these bytes would put an older value back over it.
-    for (const auto& [address, value] : writes) {
-        rasterizer->ForgetGpuWrites(address, sizeof(u32));
+    for (const auto& write : writes) {
+        rasterizer->ForgetGpuWrites(write.address, sizeof(u32));
     }
     if (landed_label_seq.load(std::memory_order_acquire) >= seq) {
         return true;
     }
-    for (const auto& [address, value] : writes) {
-        deferred_labels.insert_or_assign(address, DeferredLabel{value, seq});
+    for (const auto& write : writes) {
+        deferred_labels.insert_or_assign(write.address, DeferredLabel{write.value, seq});
     }
     // Labels at many addresses (rings of them) grow the map: drop the landed ones now and then.
     // Not on every signal once it's past the limit, or each would walk the whole map.
@@ -443,11 +495,13 @@ bool Liverpool::TestWait(const PM4CmdWaitRegMem* wait) {
                 ++wait_stats.deferred_label_hits;
                 if (wait->TestValue(it->second.value)) {
                     // Past this wait, hardware would have the label in memory already.
-                    // SHADPS4_ORDER_AFTER_WAITS=0 turns that half of OrderCpWrite off, to
-                    // measure what it fixes and costs (Bloodborne: ~200 waits/s, 3 ms/frame).
+                    // Waiting for it before the command processor's next memory write costs
+                    // Bloodborne ~200 waits/s, 3 ms a frame. What it guarded against (a late
+                    // label over memory the guest reused) WriteFenceLabel now prevents, so
+                    // it's off unless SHADPS4_ORDER_AFTER_WAITS=1.
                     static const bool order_after_waits = [] {
                         const char* env = std::getenv("SHADPS4_ORDER_AFTER_WAITS");
-                        return !env || std::strcmp(env, "0") != 0;
+                        return env && std::strcmp(env, "1") == 0;
                     }();
                     if (order_after_waits) {
                         cp_order_seq = std::max(cp_order_seq, it->second.seq);
@@ -483,18 +537,20 @@ void Liverpool::LogWaitStats() {
         return;
     }
     const double seconds = double(now - wait_stats.last_log_ns) / 1e9;
+    const u64 skipped = skipped_label_writes.exchange(0, std::memory_order_relaxed);
     if (seconds > 0.5 && (wait_stats.failed_polls != 0 || wait_stats.deferred_label_hits != 0 ||
-                          wait_stats.order_waits != 0)) {
+                          wait_stats.order_waits != 0 || skipped != 0)) {
         const char* variant = Common::AbSwitch::Label();
         if (variant && switched) {
             variant = Common::AbSwitch::LabelOf(!Common::AbSwitch::IsB());
         }
         LOG_INFO(Render,
                  "Queue waits per second [{}] over {:.1f} s: {:.0f} polls failed, {:.0f} read a "
-                 "deferred label, {:.0f} writes waited for one ({:.2f} ms)",
+                 "deferred label, {:.0f} writes waited for one ({:.2f} ms); {} late label writes "
+                 "skipped (memory rewritten since)",
                  variant ? variant : "-", seconds, wait_stats.failed_polls / seconds,
                  wait_stats.deferred_label_hits / seconds, wait_stats.order_waits / seconds,
-                 wait_stats.order_wait_ns / 1e6 / seconds);
+                 wait_stats.order_wait_ns / 1e6 / seconds, skipped);
     }
     wait_stats = WaitStats{.last_log_ns = now, .ab_switches = switches};
 }
@@ -1242,12 +1298,7 @@ Liverpool::Task Liverpool::ProcessGraphics(std::span<const u32> dcb) {
             }
             case PM4ItOpcode::EventWriteEos: {
                 const auto* event_eos = reinterpret_cast<const PM4CmdEventWriteEos*>(header);
-                auto signal = [eos = *event_eos] {
-                    eos.SignalFence([](void* address, u64 data, u32 num_bytes) {
-                        auto* memory = Core::Memory::Instance();
-                        ASSERT(memory->TryWriteBacking(address, &data, num_bytes));
-                    });
-                };
+                auto signal = [eos = *event_eos] { eos.SignalFence(WriteFenceLabel); };
                 LabelWrites writes;
                 event_eos->SignalFence([&writes](void* address, u64 data, u32 num_bytes) {
                     RecordLabelWrite(writes, address, data, num_bytes);
@@ -1276,12 +1327,9 @@ Liverpool::Task Liverpool::ProcessGraphics(std::span<const u32> dcb) {
             case PM4ItOpcode::EventWriteEop: {
                 const auto* event_eop = reinterpret_cast<const PM4CmdEventWriteEop*>(header);
                 auto signal = [eop = *event_eop] {
-                    eop.SignalFence(
-                        [](void* address, u64 data, u32 num_bytes) {
-                            auto* memory = Core::Memory::Instance();
-                            ASSERT(memory->TryWriteBacking(address, &data, num_bytes));
-                        },
-                        [] { Platform::IrqC::Instance()->Signal(Platform::InterruptId::GfxEop); });
+                    eop.SignalFence(WriteFenceLabel, [] {
+                        Platform::IrqC::Instance()->Signal(Platform::InterruptId::GfxEop);
+                    });
                 };
                 // Throttle on the end-of-frame style fences that raise an interrupt.
                 const bool throttle = event_eop->int_sel != InterruptSelect::None;
@@ -1798,20 +1846,16 @@ Liverpool::Task Liverpool::ProcessCompute(std::span<const u32> acb, u32 vqid) {
                     [] {}, [](VAddr, u16, u16) {});
             }
             const bool deferred =
-                deferrable &&
-                DeferFenceSignal(
-                    [rel = *release_mem, signal_irq] {
-                        // Unlike the immediate path's memcpy, this skips write tracking: on the
-                        // priority thread a write fault would wait on the GPU thread. So the
-                        // buffer cache doesn't see the label change, as for EOP labels.
-                        rel.SignalFence(
-                            [](void* address, u64 data, u32 num_bytes) {
-                                auto* memory = Core::Memory::Instance();
-                                ASSERT(memory->TryWriteBacking(address, &data, num_bytes));
-                            },
-                            signal_irq, [](VAddr, u16, u16) { UNREACHABLE(); });
-                    },
-                    false, writes);
+                deferrable && DeferFenceSignal(
+                                  [rel = *release_mem, signal_irq] {
+                                      // Unlike the immediate path's memcpy, this skips write
+                                      // tracking: on the priority thread a write fault would wait
+                                      // on the GPU thread. So the buffer cache doesn't see the
+                                      // label change, as for EOP labels.
+                                      rel.SignalFence(WriteFenceLabel, signal_irq,
+                                                      [](VAddr, u16, u16) { UNREACHABLE(); });
+                                  },
+                                  false, writes);
             if (!deferred) {
                 if (rasterizer) {
                     rasterizer->OnFence();

@@ -271,6 +271,11 @@ public:
     /// Reads guest memory through its backing, which page protection doesn't cover.
     bool TryReadBacking(VAddr address, void* data, u64 size);
 
+    enum class BackingCas { Written, Changed, NoBacking };
+    /// Atomically writes `value` to the aligned dword at `address` through its backing if it
+    /// still holds `expected`.
+    BackingCas CompareWriteBacking(VAddr address, u32 expected, u32 value);
+
     /// TryReadBacking and TryWriteBacking through the backing page table, without the memory
     /// lock (as CopySparseMemory), for the page fault handler. False, having copied nothing, if
     /// any page of the range has no backing.

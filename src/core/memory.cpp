@@ -323,6 +323,37 @@ bool MemoryManager::TryWriteBacking(void* address, const void* data, u64 size) {
                           });
 }
 
+MemoryManager::BackingCas MemoryManager::CompareWriteBacking(VAddr address, u32 expected,
+                                                             u32 value) {
+    ASSERT(address % sizeof(u32) == 0);
+    BackingCas result = BackingCas::NoBacking;
+    u32 found = expected;
+    const auto cas = [&](u8* backing, u64, u64) {
+        result = __atomic_compare_exchange_n(reinterpret_cast<u32*>(backing), &found, value, false,
+                                             __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE)
+                     ? BackingCas::Written
+                     : BackingCas::Changed;
+    };
+    if (!ForEachBackingPage(impl, address, sizeof(u32), cas)) {
+        ForEachBacking(address, sizeof(u32), cas);
+    }
+    if (result == BackingCas::Written) {
+        const u64 index = backing_write_count.fetch_add(1, std::memory_order_acq_rel);
+        auto& entry = backing_write_log[index % BackingWriteLogSize];
+        entry.address = address;
+        entry.size = sizeof(u32);
+        entry.caller = reinterpret_cast<u64>(__builtin_return_address(0));
+        entry.ns = NowNs();
+        entry.first_dword = value;
+        entry.thread = ThreadTag();
+        NoteWatchedWrite(address, sizeof(u32), &value, "a deferred fence label");
+    } else if (result == BackingCas::Changed) {
+        NoteWatchedWrite(address, sizeof(u32), &found,
+                         "(skipped a late fence label: memory was rewritten to this)");
+    }
+    return result;
+}
+
 bool MemoryManager::TryReadBacking(VAddr address, void* data, u64 size) {
     return ForEachBacking(address, size, [data](u8* backing, u64 offset, u64 length) {
         memcpy(static_cast<u8*>(data) + offset, backing, length);
