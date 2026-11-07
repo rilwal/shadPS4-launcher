@@ -172,7 +172,18 @@ boost::container::static_vector<VAddr, AmdGpu::NUM_COLOR_BUFFERS + 2> Rasterizer
 
 void Rasterizer::NoteDrawTargets(const GraphicsPipeline* pipeline) {
     const u64 frame = VideoCore::PerfStats::frames.total.load(std::memory_order_relaxed) + 1;
+    if (noted_frame != frame) {
+        noted_frame = frame;
+        noted_targets.clear();
+    }
     for (const VAddr address : DrawTargets(pipeline)) {
+        // Most draws use the targets of the draw before; those are already noted this frame.
+        if (std::ranges::find(noted_targets, address) != noted_targets.end()) {
+            continue;
+        }
+        if (noted_targets.size() < noted_targets.capacity()) {
+            noted_targets.push_back(address);
+        }
         auto& frames = target_frames[address];
         if (frames.last != frame) {
             frames.previous = frames.last;
@@ -1107,11 +1118,13 @@ void Rasterizer::BindBuffers(const Shader::Info& stage, Shader::Backend::Binding
                     // their loads read them at run time.
                     auto& heap_stage = heap_stages.back();
                     heap_stage.strides[binding.buffer] = static_cast<u16>(vsharp.GetStride());
-                    if (Shader::UsesRuntimeBufferFormat(runtime_formats, desc, vsharp)) {
-                        heap_stage.formats[binding.buffer] =
-                            *Shader::DescribeRuntimeBufferFormat(vsharp);
-                        heap_stage.num_formats =
-                            std::max(heap_stage.num_formats, binding.buffer + 1);
+                    // The same test as UsesRuntimeBufferFormat, describing the format once.
+                    if (runtime_formats && desc.is_formatted && !desc.is_written) {
+                        if (const auto format = Shader::DescribeRuntimeBufferFormat(vsharp)) {
+                            heap_stage.formats[binding.buffer] = *format;
+                            heap_stage.num_formats =
+                                std::max(heap_stage.num_formats, binding.buffer + 1);
+                        }
                     }
                 }
                 AddBufferInfo(buffer, offset_aligned, size + adjust);
@@ -1895,8 +1908,7 @@ void Rasterizer::UpdateColorBlendingState(const GraphicsPipeline* pipeline) cons
 }
 
 void Rasterizer::ScopeMarkerBegin(const std::string_view& str, bool from_guest) {
-    if ((from_guest && !EmulatorSettings.IsVkGuestMarkersEnabled()) ||
-        (!from_guest && !EmulatorSettings.IsVkHostMarkersEnabled())) {
+    if (!(from_guest ? guest_markers_enabled : host_markers_enabled)) {
         return;
     }
     const auto cmdbuf = scheduler.CommandBuffer();
@@ -1906,8 +1918,7 @@ void Rasterizer::ScopeMarkerBegin(const std::string_view& str, bool from_guest) 
 }
 
 void Rasterizer::ScopeMarkerEnd(bool from_guest) {
-    if ((from_guest && !EmulatorSettings.IsVkGuestMarkersEnabled()) ||
-        (!from_guest && !EmulatorSettings.IsVkHostMarkersEnabled())) {
+    if (!(from_guest ? guest_markers_enabled : host_markers_enabled)) {
         return;
     }
     const auto cmdbuf = scheduler.CommandBuffer();
@@ -1915,8 +1926,7 @@ void Rasterizer::ScopeMarkerEnd(bool from_guest) {
 }
 
 void Rasterizer::ScopedMarkerInsert(const std::string_view& str, bool from_guest) {
-    if ((from_guest && !EmulatorSettings.IsVkGuestMarkersEnabled()) ||
-        (!from_guest && !EmulatorSettings.IsVkHostMarkersEnabled())) {
+    if (!(from_guest ? guest_markers_enabled : host_markers_enabled)) {
         return;
     }
     const auto cmdbuf = scheduler.CommandBuffer();
@@ -1927,8 +1937,7 @@ void Rasterizer::ScopedMarkerInsert(const std::string_view& str, bool from_guest
 
 void Rasterizer::ScopedMarkerInsertColor(const std::string_view& str, const u32 color,
                                          bool from_guest) {
-    if ((from_guest && !EmulatorSettings.IsVkGuestMarkersEnabled()) ||
-        (!from_guest && !EmulatorSettings.IsVkHostMarkersEnabled())) {
+    if (!(from_guest ? guest_markers_enabled : host_markers_enabled)) {
         return;
     }
     const auto cmdbuf = scheduler.CommandBuffer();

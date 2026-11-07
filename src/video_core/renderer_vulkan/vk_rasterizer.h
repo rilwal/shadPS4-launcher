@@ -173,6 +173,9 @@ private:
         u64 previous{};
     };
     tsl::robin_map<VAddr, TargetFrames> target_frames;
+    /// Targets already noted in target_frames this frame, so repeats skip the map.
+    boost::container::static_vector<VAddr, 16> noted_targets;
+    u64 noted_frame{};
 
     const Instance& instance;
     Scheduler& scheduler;
