@@ -2,7 +2,6 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 #include <algorithm>
-#include <bit>
 #include <cstdlib>
 #include <limits>
 #include <string_view>
@@ -36,19 +35,6 @@ static bool DetilesFromDevice() {
     }();
     return from_device;
 }
-
-/// Whether an image upload is skipped when its guest memory matches the image's last upload.
-/// SHADPS4_SKIP_SAME_UPLOADS=0 uploads every time, as upstream does.
-static bool SkipsSameUploads() {
-    static const bool skips = [] {
-        const char* env = std::getenv("SHADPS4_SKIP_SAME_UPLOADS");
-        return !env || env[0] != '0';
-    }();
-    return skips;
-}
-
-/// Hashing stops for an image after this many changed uploads in a row: its data really changes.
-static constexpr u8 MaxChangedUploads = 4;
 
 static constexpr u32 MAX_IMAGES = std::numeric_limits<u16>::max();
 static constexpr u32 MAX_IMAGE_VIEWS = std::numeric_limits<u16>::max();
@@ -896,49 +882,6 @@ void TextureCache::RefreshImage(Image& image) {
         }
         image.cpu_hash = hash;
     }
-
-    // Pages that fault every frame often hold the same bytes again. From an image's second
-    // upload on, its guest memory is hashed, and an unchanged image keeps what it has. Only when
-    // the GPU hasn't written the image or its memory since, and not for images whose data keeps
-    // changing; first uploads (streaming) are never hashed.
-    const bool hashes =
-        SkipsSameUploads() && image.upload_count != 0 &&
-        image.changed_uploads < MaxChangedUploads &&
-        False(image.flags & (ImageFlagBits::GpuModified | ImageFlagBits::GpuDirty)) &&
-        !buffer_cache.IsRegionGpuModified(image.info.guest_address, image.info.guest_size);
-    if (hashes) {
-        const u64 hash = HashBackingMemory(image.info.guest_address, image.info.guest_size);
-        if (image.upload_hash != 0 && hash == image.upload_hash) {
-            image.changed_uploads = 0;
-            image.flags &= ~ImageFlagBits::Dirty;
-            VideoCore::PerfStats::frames.AddGpuCount(VideoCore::PerfStats::Cost::ImageSameBytes,
-                                                     image.info.guest_size);
-            return;
-        }
-        if (image.upload_hash != 0) {
-            ++image.changed_uploads;
-        }
-        image.upload_hash = hash;
-    } else {
-        image.upload_hash = 0;
-        // Why a repeat upload wasn't checked, for a few uploads per image (1st, 2nd, 4th, ...).
-        if (SkipsSameUploads() && std::has_single_bit(image.upload_count)) {
-            const char* reason = image.changed_uploads >= MaxChangedUploads ? "its data changes"
-                                 : True(image.flags & ImageFlagBits::GpuModified)
-                                     ? "the GPU wrote the image"
-                                 : True(image.flags & ImageFlagBits::GpuDirty)
-                                     ? "the GPU wrote its memory"
-                                     : "its memory is GPU-modified in the buffer cache";
-            LOG_INFO(Render_Vulkan,
-                     "Upload {} of image {:#x} ({}x{} {} {}, {} KB, flags {:#x}) not checked for "
-                     "changes: {}",
-                     image.upload_count + 1, image.info.guest_address, image.info.size.width,
-                     image.info.size.height, vk::to_string(image.info.pixel_format),
-                     image.info.props.is_tiled ? "tiled" : "linear", image.info.guest_size / 1024,
-                     static_cast<u32>(image.flags), reason);
-        }
-    }
-    ++image.upload_count;
 
     image.gpu_hash = 0;
 

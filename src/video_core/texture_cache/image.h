@@ -172,11 +172,6 @@ public:
     u64 lru_id{};
     u64 tick_accessed_last{};
     u64 cpu_hash{};
-    /// Hash of the guest memory at the last upload, from the second upload on (0 when not hashed).
-    u64 upload_hash{};
-    u32 upload_count{};
-    /// Uploads in a row whose hash differed from the one before; hashing stops after a few.
-    u8 changed_uploads{};
     u64 gpu_hash{};
     u64 head_hash{};
     u64 tail_hash{};

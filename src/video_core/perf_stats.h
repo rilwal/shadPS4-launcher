@@ -50,10 +50,8 @@ enum class Cost : u32 {
     BufferBytes,  ///< Guest memory copied into GPU buffers by the GPU thread (bytes).
     ImageUploads, ///< Images uploaded from guest memory by the GPU thread (a count).
     ImageBytes,   ///< Their guest size (bytes).
-    /// Bytes of image uploads skipped because the guest memory matched the image's last upload.
-    ImageSameBytes,
-    Draws,      ///< Draws recorded (a count).
-    Dispatches, ///< Dispatches recorded (a count).
+    Draws,        ///< Draws recorded (a count).
+    Dispatches,   ///< Dispatches recorded (a count).
     // Command translation for draws and dispatches, split only with SHADPS4_DRAW_COSTS=1; the
     // named costs above (shaders, textures, buffers) stay out of these.
     DrawChecks,  ///< Pending GPU operations, draw filters, render state set-up.
@@ -233,7 +231,7 @@ struct Frames {
                               ms(Cost::Targets), ms(Cost::Descriptors), ms(Cost::Recording));
         return fmt::format(
             "{} draws and {} dispatches; "
-            "busy {:.1f} ms (shaders {:.1f}, textures {:.1f} for {} images of {:.1f} MB{}, "
+            "busy {:.1f} ms (shaders {:.1f}, textures {:.1f} for {} images of {:.1f} MB, "
             "buffers {:.1f} for {:.1f} MB, GPU "
             "waits {:.1f}, submits {:.1f}, present waits {:.1f}, flips {:.1f}, DMA {:.1f}{}, "
             "other {:.1f}), "
@@ -241,13 +239,9 @@ struct Frames {
             "unprotected ahead",
             c[size_t(Cost::Draws)], c[size_t(Cost::Dispatches)], busy / 1e6, ms(Cost::Shaders),
             ms(Cost::Textures), c[size_t(Cost::ImageUploads)],
-            c[size_t(Cost::ImageBytes)] / 1048576.0,
-            c[size_t(Cost::ImageSameBytes)] != 0
-                ? fmt::format(", {:.1f} MB unchanged and skipped",
-                              c[size_t(Cost::ImageSameBytes)] / 1048576.0)
-                : std::string{},
-            ms(Cost::Buffers), c[size_t(Cost::BufferBytes)] / 1048576.0, ms(Cost::GpuWaits),
-            ms(Cost::Submits), ms(Cost::Presents), ms(Cost::Flips), ms(Cost::Dma), steps,
+            c[size_t(Cost::ImageBytes)] / 1048576.0, ms(Cost::Buffers),
+            c[size_t(Cost::BufferBytes)] / 1048576.0, ms(Cost::GpuWaits), ms(Cost::Submits),
+            ms(Cost::Presents), ms(Cost::Flips), ms(Cost::Dma), steps,
             busy > named ? (busy - named) / 1e6 : 0.0, ms(Cost::GuestWaits),
             c[size_t(Cost::NumFaults)], ms(Cost::Faults), c[size_t(Cost::PagesAhead)]);
     }
