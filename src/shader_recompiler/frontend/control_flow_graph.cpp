@@ -157,6 +157,15 @@ void CFG::EmitLabels() {
 
     // Sort labels to make sure block insertion is correct.
     std::ranges::sort(labels);
+
+    // A branch into the middle of an instruction or past the end of the program can't come from
+    // a real shader, only from bytes that aren't one (the shader scanner's guesses), and makes
+    // blocks that overlap or run off the instruction list.
+    for (const Label label : labels) {
+        ASSERT_MSG(std::ranges::binary_search(index_to_pc, label),
+                   "Branch target {:#x} isn't the start of an instruction (program ends at {:#x})",
+                   label, pc);
+    }
 }
 
 void CFG::SplitDivergenceScopes() {
@@ -212,6 +221,13 @@ void CFG::SplitDivergenceScopes() {
                     }
 
                     // Create a new block for the divergence scope.
+                    // The scope's blocks must sort between the parent and the next block.
+                    ASSERT_MSG(curr_begin <= curr_end &&
+                                   curr_end <= static_cast<s32>(blk->end_index) &&
+                                   index_to_pc[curr_begin] > blk->begin &&
+                                   (next_blk == blocks.end() || blk->end <= next_blk->begin),
+                               "Divergence scope {}-{} doesn't fit block {:#x}", curr_begin,
+                               curr_end, blk->begin);
                     Block* block = block_pool.Create();
                     block->begin = index_to_pc[curr_begin];
                     block->end = index_to_pc[curr_end];
