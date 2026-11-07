@@ -15,6 +15,11 @@
 
 #include <fmt/format.h>
 
+#if defined(__x86_64__) && (defined(__GNUC__) || defined(__clang__))
+#include <cpuid.h>
+#include <x86intrin.h>
+#endif
+
 #include "common/logging/log.h"
 #include "common/types.h"
 
@@ -23,10 +28,64 @@ namespace VideoCore {
 /// Cheap counters for profiling, gathered by one thread each and logged in windows.
 namespace PerfStats {
 
-[[nodiscard]] inline u64 NowNs() {
+[[nodiscard]] inline u64 SteadyNs() {
     return std::chrono::duration_cast<std::chrono::nanoseconds>(
                std::chrono::steady_clock::now().time_since_epoch())
         .count();
+}
+
+#if defined(__x86_64__) && (defined(__GNUC__) || defined(__clang__))
+#define SHADPS4_PERF_TSC 1
+namespace Detail {
+/// The time stamp counter scaled to steady_clock nanoseconds. The cost scopes read the clock
+/// twice per buffer and image lookup, thousands of times a frame, and clock_gettime cost 7% of
+/// the GPU thread in Bloodborne; rdtsc is a few times cheaper.
+struct TscClock {
+    bool usable{};
+    u64 tsc0{};
+    u64 ns0{};
+    double ns_per_tick{};
+
+    static TscClock Calibrate() {
+        TscClock clock;
+        u32 eax{}, ebx{}, ecx{}, edx{};
+        // Only an invariant TSC ticks at one rate on every core, in every power state.
+        if (!__get_cpuid(0x80000007, &eax, &ebx, &ecx, &edx) || (edx & (1u << 8)) == 0) {
+            return clock;
+        }
+        const u64 ns_start = SteadyNs();
+        const u64 tsc_start = __rdtsc();
+        u64 ns_end = ns_start;
+        while (ns_end - ns_start < 20'000'000) {
+            ns_end = SteadyNs();
+        }
+        const u64 tsc_end = __rdtsc();
+        if (tsc_end <= tsc_start) {
+            return clock;
+        }
+        clock.usable = true;
+        clock.tsc0 = tsc_end;
+        clock.ns0 = ns_end;
+        clock.ns_per_tick = double(ns_end - ns_start) / double(tsc_end - tsc_start);
+        return clock;
+    }
+};
+
+inline const TscClock& Tsc() {
+    static const TscClock clock = TscClock::Calibrate();
+    return clock;
+}
+} // namespace Detail
+#endif
+
+[[nodiscard]] inline u64 NowNs() {
+#ifdef SHADPS4_PERF_TSC
+    const auto& tsc = Detail::Tsc();
+    if (tsc.usable) {
+        return tsc.ns0 + u64(double(__rdtsc() - tsc.tsc0) * tsc.ns_per_tick);
+    }
+#endif
+    return SteadyNs();
 }
 
 /// Where the GPU thread's time goes, split so a stutter's log line can say what held it up.
