@@ -1,6 +1,7 @@
 // SPDX-FileCopyrightText: Copyright 2024 shadPS4 Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+#include <algorithm>
 #include "shader_recompiler/info.h"
 #include "video_core/renderer_vulkan/vk_rasterizer.h"
 #include "video_core/renderer_vulkan/vk_runtime.h"
@@ -42,6 +43,15 @@ static bool ExecuteCopyShaderHLE(const Shader::Info& info, const AmdGpu::Compute
         const u32 local_dst_offset = dst_idx * buf_stride;
         const u32 local_src_offset = src_idx * buf_stride;
         const u32 local_size = (end + 1) * buf_stride;
+        // Entries often continue the previous one in both buffers: one region copies both.
+        if (!copies.empty()) {
+            auto& last = copies.back();
+            if (last.srcOffset + last.size == local_src_offset &&
+                last.dstOffset + last.size == local_dst_offset) {
+                last.size += local_size;
+                continue;
+            }
+        }
         copies.emplace_back(local_src_offset, local_dst_offset, local_size);
     }
 
@@ -100,11 +110,26 @@ static bool ExecuteCopyShaderHLE(const Shader::Info& info, const AmdGpu::Compute
         batch_start = batch_end;
     }
 
+    // Marked as GPU-written in runs of touching or overlapping destinations, not per entry:
+    // each mark takes the tracker's lock and may change page protection.
+    VAddr run_start = 0;
+    VAddr run_end = 0;
     for (u32 i = 0; i < cs_program.dim_x; i++) {
         const auto& [dst_idx, src_idx, end] = ctl_buf[i];
         const VAddr dst_addr = dst_buf_sharp.base_address + (dst_idx * buf_stride);
-        const u32 size = (end + 1) * buf_stride;
-        buffer_cache.MarkRegionAsGpuModified(dst_addr, size);
+        const VAddr dst_end = dst_addr + (end + 1) * buf_stride;
+        if (run_end != 0 && dst_addr >= run_start && dst_addr <= run_end) {
+            run_end = std::max(run_end, dst_end);
+            continue;
+        }
+        if (run_end != 0) {
+            buffer_cache.MarkRegionAsGpuModified(run_start, run_end - run_start);
+        }
+        run_start = dst_addr;
+        run_end = dst_end;
+    }
+    if (run_end != 0) {
+        buffer_cache.MarkRegionAsGpuModified(run_start, run_end - run_start);
     }
 
     return true;
