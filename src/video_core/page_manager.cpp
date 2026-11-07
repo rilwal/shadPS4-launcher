@@ -4,6 +4,7 @@
 #include <algorithm>
 #include <array>
 #include <cstdlib>
+#include <map>
 #include <mutex>
 #include <utility>
 #include "common/adaptive_mutex.h"
@@ -106,11 +107,21 @@ bool FaultLoadsEnabled() {
     return enabled;
 }
 
+std::mutex slow_write_mutex;
+std::map<std::pair<u64, bool>, u32> slow_write_sites;
+
 /// Handles a write fault on tracked memory, then unprotects ahead of it if the guest is
 /// writing in order. Not on the GPU thread, which may hold the trackers' locks.
-bool HandleWriteFault(Vulkan::Rasterizer* rasterizer, VAddr addr, u64 size, bool is_gpu_thread) {
+bool HandleWriteFault(Vulkan::Rasterizer* rasterizer, VAddr addr, u64 size, bool is_gpu_thread,
+                      void* context) {
     const u64 start = PerfStats::NowNs();
     const bool handled = rasterizer->InvalidateMemory(addr, size, is_gpu_thread);
+    // A plain write fault takes a few microseconds; one that read the page back took far more.
+    constexpr u64 SlowNs = 50'000;
+    if (handled && PerfStats::NowNs() - start > SlowNs) {
+        std::scoped_lock lock{slow_write_mutex};
+        ++slow_write_sites[{Core::FaultInstructionAddress(context), is_gpu_thread}];
+    }
     if (handled && !is_gpu_thread) {
         if (const auto [ahead, ahead_size] = fault_ahead.Next(addr); ahead_size != 0) {
             rasterizer->InvalidateMemoryAhead(ahead, ahead_size);
@@ -125,6 +136,17 @@ bool HandleWriteFault(Vulkan::Rasterizer* rasterizer, VAddr addr, u64 size, bool
 }
 
 } // namespace
+
+std::vector<SlowWriteFaultSite> TakeSlowWriteFaultSites() {
+    std::scoped_lock lock{slow_write_mutex};
+    std::vector<SlowWriteFaultSite> sites;
+    sites.reserve(slow_write_sites.size());
+    for (const auto& [key, count] : slow_write_sites) {
+        sites.push_back({key.first, key.second, count});
+    }
+    slow_write_sites.clear();
+    return sites;
+}
 
 struct PageManager::Impl {
     struct PageState {
@@ -486,7 +508,7 @@ public:
             const VAddr addr = msg.arg.pagefault.address;
             const auto ptid = msg.arg.pagefault.feat.ptid;
             HandleWriteFault(rasterizer, addr, 1,
-                             ptid == rasterizer->GetGpuCommandProcessorThreadId());
+                             ptid == rasterizer->GetGpuCommandProcessorThreadId(), nullptr);
 
             // Some calls to InvalidateMemory never reach the UFFDIO_WRITEPROTECT ioctl in
             // ::Protect, therefore we use MODE_DONTWAKE and wake the thread with UFFDIO_WAKE here
@@ -526,7 +548,7 @@ struct SignalImpl : public PageManager::Impl {
         const auto is_gpu_thread =
             std::this_thread::get_id() == rasterizer->GetGpuCommandProcessorThread();
         if (Common::IsWriteError(context)) {
-            return HandleWriteFault(rasterizer, addr, size, is_gpu_thread);
+            return HandleWriteFault(rasterizer, addr, size, is_gpu_thread, context);
         }
         const u64 start = VideoCore::PerfStats::NowNs();
         bool handled;

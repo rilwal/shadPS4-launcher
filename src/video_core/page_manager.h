@@ -5,6 +5,7 @@
 
 #include <cstddef>
 #include <memory>
+#include <vector>
 #include "common/alignment.h"
 #include "common/types.h"
 #include "video_core/buffer_cache/region_definitions.h"
@@ -23,6 +24,16 @@ enum class PageOp : s8 {
     Track = 1,
     Untrack = -1,
 };
+
+/// A write fault that took long enough to have read memory back first, by faulting instruction.
+struct SlowWriteFaultSite {
+    u64 instruction;
+    bool gpu_thread;
+    u32 count;
+};
+
+/// The slow write fault sites since the last call, cleared. For the readback stats log.
+std::vector<SlowWriteFaultSite> TakeSlowWriteFaultSites();
 
 class PageManager {
     static constexpr size_t PM_PAGE_BITS = 12;

@@ -69,7 +69,7 @@ bool DecodeFaultLoad(void* context, FaultLoad& load);
 /// has done) as it would have run, and steps the context past it.
 bool CompleteFaultLoad(void* context, const FaultLoad& load, const u8* data);
 
-/// The faulting instruction's address, or 0 where it isn't known.
+/// The faulting instruction's address, or 0 where it isn't known (or `context` is null).
 u64 FaultInstructionAddress(void* context);
 
 } // namespace Core

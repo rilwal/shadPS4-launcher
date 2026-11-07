@@ -400,6 +400,9 @@ bool CompleteFaultLoad(void* context, const FaultLoad& load, const u8* data) {
 }
 
 u64 FaultInstructionAddress(void* context) {
+    if (context == nullptr) {
+        return 0;
+    }
     return static_cast<u64>(static_cast<ucontext_t*>(context)->uc_mcontext.gregs[REG_RIP]);
 }
 

@@ -23,6 +23,7 @@
 #include "video_core/buffer_cache/buffer_cache.h"
 #include "video_core/buffer_cache/memory_tracker.h"
 #include "video_core/buffer_cache/region_definitions.h"
+#include "video_core/page_manager.h"
 #include "video_core/perf_stats.h"
 #include "video_core/renderer_vulkan/vk_graphics_pipeline.h"
 #include "video_core/renderer_vulkan/vk_instance.h"
@@ -653,6 +654,19 @@ void BufferCache::FlushReadbackStats() {
                                    counts.second / seconds);
             }
             LOG_INFO(Render, "GPU-thread read faults per second [{}] by instruction: {}",
+                     variant ? variant : "-", top);
+        }
+        if (auto sites = TakeSlowWriteFaultSites(); !sites.empty()) {
+            const size_t shown = std::min<size_t>(sites.size(), 6);
+            std::partial_sort(sites.begin(), sites.begin() + shown, sites.end(),
+                              [](const auto& a, const auto& b) { return a.count > b.count; });
+            std::string top;
+            for (size_t i = 0; i < shown; ++i) {
+                top += fmt::format(
+                    "{}{}{} {:.1f}", i ? ", " : "", DescribeCodeAddress(sites[i].instruction),
+                    sites[i].gpu_thread ? " [GPU thread]" : "", sites[i].count / seconds);
+            }
+            LOG_INFO(Render, "Slow write faults per second [{}] by instruction: {}",
                      variant ? variant : "-", top);
         }
     }
