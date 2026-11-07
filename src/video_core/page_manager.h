@@ -8,6 +8,7 @@
 #include <chrono>
 #include <cstddef>
 #include <memory>
+#include <utility>
 #include <vector>
 #include "common/alignment.h"
 #include "common/types.h"
@@ -127,6 +128,9 @@ struct SlowWriteFaultSite {
     u64 total_ns;
     WriteFaultPhases phases;
 };
+
+/// All handled write faults since the last call and their total time, cleared.
+std::pair<u64, u64> TakeWriteFaultTotals();
 
 /// The slow write fault sites since the last call, cleared. For the readback stats log.
 std::vector<SlowWriteFaultSite> TakeSlowWriteFaultSites();

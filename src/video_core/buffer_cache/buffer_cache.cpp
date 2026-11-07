@@ -716,6 +716,11 @@ void BufferCache::FlushReadbackStats() {
                      variant ? variant : "-", faults / seconds, onto_gpu_bytes / seconds,
                      pages.size(), top);
         }
+        if (const auto [count, ns] = TakeWriteFaultTotals(); count != 0) {
+            LOG_INFO(Render, "Write faults per second [{}]: {:.1f}, {:.2f} ms ({:.1f} us each)",
+                     variant ? variant : "-", count / seconds, ns / 1e6 / seconds,
+                     ns / 1e3 / count);
+        }
         if (auto sites = TakeSlowWriteFaultSites(); !sites.empty()) {
             const size_t shown = std::min<size_t>(sites.size(), 6);
             std::partial_sort(sites.begin(), sites.begin() + shown, sites.end(),

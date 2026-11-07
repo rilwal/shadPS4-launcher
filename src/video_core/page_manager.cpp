@@ -3,6 +3,7 @@
 
 #include <algorithm>
 #include <array>
+#include <atomic>
 #include <cstdlib>
 #include <map>
 #include <mutex>
@@ -104,6 +105,8 @@ bool FaultLoadsEnabled() {
     return enabled;
 }
 
+std::atomic<u64> write_fault_count{};
+std::atomic<u64> write_fault_ns{};
 std::mutex slow_write_mutex;
 struct SlowWriteTotals {
     u32 count;
@@ -141,7 +144,10 @@ bool HandleWriteFault(Vulkan::Rasterizer* rasterizer, VAddr addr, u64 size, bool
         }
     }
     if (handled) {
-        PerfStats::frames.AddFault(PerfStats::NowNs() - start);
+        const u64 elapsed = PerfStats::NowNs() - start;
+        PerfStats::frames.AddFault(elapsed);
+        write_fault_count.fetch_add(1, std::memory_order_relaxed);
+        write_fault_ns.fetch_add(elapsed, std::memory_order_relaxed);
     }
     return handled;
 }
@@ -154,6 +160,10 @@ bool RegionLockProfiling() {
         return env != nullptr && env[0] == '1';
     }();
     return enabled;
+}
+
+std::pair<u64, u64> TakeWriteFaultTotals() {
+    return {write_fault_count.exchange(0), write_fault_ns.exchange(0)};
 }
 
 std::vector<SlowWriteFaultSite> TakeSlowWriteFaultSites() {
