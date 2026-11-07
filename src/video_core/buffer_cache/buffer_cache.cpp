@@ -157,6 +157,9 @@ void BufferCache::ReadMemory(VAddr device_addr, u64 size, bool is_write, bool as
             read_reason = cpu_read_ranges.Intersects(page_start, page_size) ? ReadReason::RepeatRead
                                                                             : ReadReason::FirstRead;
             cpu_read_ranges.Add(page_start, page_size);
+            if (read_reason == ReadReason::RepeatRead) {
+                NoteRepeatRead(device_addr, size);
+            }
         }
         const u32 first_block = device_addr >> block_shift;
         const u32 last_block = (device_addr + size - 1) >> block_shift;
@@ -181,6 +184,31 @@ void BufferCache::ReadMemory(VAddr device_addr, u64 size, bool is_write, bool as
     } else {
         liverpool->SendCommand<true>(std::move(flush_request));
     }
+}
+
+void BufferCache::NoteRepeatRead(VAddr address, u64 size) {
+    const VAddr page = Common::AlignDown(address, BYTES_PER_PAGE);
+    const auto in_flight = [&](VAddr start, u64 length) {
+        return std::ranges::any_of(landings, [&](const auto& landing) {
+            return landing->ranges.Intersects(start, length);
+        });
+    };
+    if (gpu_modified_ranges.Intersects(address, size) || in_flight(address, size)) {
+        ++readback_stats.repeat_reads_of_gpu_bytes;
+    }
+    if (in_flight(page, BYTES_PER_PAGE)) {
+        ++readback_stats.repeat_reads_in_flight;
+    }
+    u64 gpu_bytes = 0;
+    gpu_modified_ranges.ForEachInRange(page, BYTES_PER_PAGE,
+                                       [&](VAddr start, VAddr end) { gpu_bytes += end - start; });
+    for (const auto& landing : landings) {
+        landing->ranges.ForEachInRange(page, BYTES_PER_PAGE,
+                                       [&](VAddr start, VAddr end) { gpu_bytes += end - start; });
+    }
+    auto& entry = fault_pages[page];
+    ++entry.faults;
+    entry.gpu_bytes = std::max<u32>(entry.gpu_bytes, std::min<u64>(gpu_bytes, BYTES_PER_PAGE));
 }
 
 void BufferCache::DownloadMemory(const Buffer* arena, VAddr device_addr, u64 size, bool async) {
@@ -452,7 +480,25 @@ void BufferCache::FlushReadbackStats() {
                  ns[1] / 1e6 / seconds, n[2] / seconds, ns[2] / 1e6 / seconds, n[3] / seconds,
                  ns[3] / 1e6 / seconds, stats.skipped_landings / seconds,
                  stats.full_ring_landings / seconds);
+        if (n[1] != 0) {
+            std::vector<std::pair<VAddr, FaultPage>> pages(fault_pages.begin(), fault_pages.end());
+            const size_t shown = std::min<size_t>(pages.size(), 6);
+            std::partial_sort(
+                pages.begin(), pages.begin() + shown, pages.end(),
+                [](const auto& a, const auto& b) { return a.second.faults > b.second.faults; });
+            std::string top;
+            for (size_t i = 0; i < shown; ++i) {
+                top += fmt::format("{}{:#x} {} ({} B GPU-written)", i ? ", " : "", pages[i].first,
+                                   pages[i].second.faults, pages[i].second.gpu_bytes);
+            }
+            LOG_INFO(Render,
+                     "Repeat read faults per second [{}]: {:.1f} read bytes the GPU wrote, {:.1f} "
+                     "hit a page a landing was filling; {} pages, most faulted: {}",
+                     variant ? variant : "-", stats.repeat_reads_of_gpu_bytes / seconds,
+                     stats.repeat_reads_in_flight / seconds, pages.size(), top);
+        }
     }
+    fault_pages.clear();
     stats = ReadbackStats{.last_log_ns = now, .ab_switches = Common::AbSwitch::Switches()};
 }
 

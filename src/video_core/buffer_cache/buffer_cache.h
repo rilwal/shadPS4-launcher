@@ -7,6 +7,7 @@
 #include <atomic>
 #include <deque>
 #include <memory>
+#include <unordered_map>
 #include <boost/container/small_vector.hpp>
 
 #include "common/enum.h"
@@ -236,6 +237,16 @@ private:
         Other,
     };
     ReadReason read_reason{ReadReason::Other};
+    /// Pages with repeat read faults in this stats window: faults, and the most bytes of the
+    /// page the GPU had written at a fault.
+    struct FaultPage {
+        u32 faults{};
+        u32 gpu_bytes{};
+    };
+    std::unordered_map<VAddr, FaultPage> fault_pages;
+
+    /// Readback profiling of a repeat read fault at the address.
+    void NoteRepeatRead(VAddr address, u64 size);
 
     /// Precise or Fenced: GPU-written pages are protected until their data is in guest memory.
     bool tracks_gpu_pages{};
@@ -255,6 +266,10 @@ private:
         /// Stalling downloads and their stalls by why they were needed (ReadReason).
         std::array<u64, 4> sync_by_reason{};
         std::array<u64, 4> stall_ns_by_reason{};
+        /// Repeat reads whose faulting bytes the GPU wrote (rather than other bytes of the
+        /// page), and repeat reads of a page a landing in flight is filling.
+        u64 repeat_reads_of_gpu_bytes{};
+        u64 repeat_reads_in_flight{};
         u64 last_log_ns{};
         u64 ab_switches{};
     } readback_stats;
