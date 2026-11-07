@@ -265,6 +265,11 @@ std::string DescribeCodeAddress(u64 address) {
 } // namespace
 
 bool BufferCache::GpuBytesPending(VAddr address, u64 size) const {
+    // Pending bytes keep their pages marked GPU-modified until they land or are read back, so
+    // an unmarked page (most shader code) answers with a bit test instead of range lookups.
+    if (!memory_tracker->IsRegionGpuModified(address, size)) {
+        return false;
+    }
     return gpu_modified_ranges.Intersects(address, size) ||
            async_downloads.Intersects(address, size) ||
            std::ranges::any_of(landings, [&](const auto& landing) {
