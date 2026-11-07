@@ -135,7 +135,10 @@ inline void CpuRelax() {
 }
 
 /// How the GPU thread waits while every queue is empty or blocked on the guest. Upstream spins
-/// at full speed; with the backoff it pauses, then yields its core, and optionally sleeps.
+/// at full speed; with the backoff it pauses, and after 1 ms idle sleeps in short steps
+/// (SHADPS4_GPU_IDLE_SLEEP_US, default 50; 0 only pauses).
+/// Yielding instead doesn't free the core when others are spare (TLG measured 97% of a core
+/// either way, 11% with 50 us sleeps, with the same frame times).
 struct IdleBackoff {
     bool enabled;
     u64 sleep_ns;
@@ -145,7 +148,7 @@ struct IdleBackoff {
         const char* sleep = std::getenv("SHADPS4_GPU_IDLE_SLEEP_US");
         return {
             .enabled = backoff == nullptr || backoff[0] != '0',
-            .sleep_ns = sleep ? std::strtoull(sleep, nullptr, 10) * 1000 : 0,
+            .sleep_ns = (sleep ? std::strtoull(sleep, nullptr, 10) : 50) * 1000,
         };
     }
 };
@@ -214,9 +217,8 @@ void Liverpool::Process(std::stop_token stoken) {
                     idle_passes = 0;
                     return;
                 }
-                // Spin briefly for a wait that ends soon, then give the core away.
+                // Spin for a wait that ends soon, then give the core away in short sleeps.
                 constexpr u32 SpinPasses = 64;
-                constexpr u64 YieldAfterNs = 100'000;
                 constexpr u64 SleepAfterNs = 1'000'000;
                 if (++idle_passes < SpinPasses) {
                     CpuRelax();
@@ -226,11 +228,8 @@ void Liverpool::Process(std::stop_token stoken) {
                 if (idle_passes == SpinPasses) {
                     idle_since = idle_now;
                 }
-                const u64 idle_ns = idle_now - idle_since;
-                if (idle_backoff.sleep_ns != 0 && idle_ns >= SleepAfterNs) {
+                if (idle_backoff.sleep_ns != 0 && idle_now - idle_since >= SleepAfterNs) {
                     std::this_thread::sleep_for(std::chrono::nanoseconds{idle_backoff.sleep_ns});
-                } else if (idle_ns >= YieldAfterNs) {
-                    std::this_thread::yield();
                 } else {
                     CpuRelax();
                 }
