@@ -3,7 +3,11 @@
 
 #include <algorithm>
 #include <chrono>
+#include <cstring>
 #include <optional>
+#ifndef _WIN32
+#include <dlfcn.h>
+#endif
 #include <Zydis/Zydis.h>
 #include <magic_enum/magic_enum.hpp>
 #include <xxhash.h>
@@ -158,13 +162,13 @@ void BufferCache::ReadMemory(VAddr device_addr, u64 size, bool is_write, bool as
 }
 
 bool BufferCache::ReadMemoryForLoad(VAddr device_addr, u64 size, VAddr load_addr, u32 load_size,
-                                    u16 mnemonic, u8* data) {
+                                    u16 mnemonic, u8* data, bool assume_locks) {
     bool served = false;
-    liverpool->SendCommand<true>([&] {
+    const auto read = [&] {
         if (load_size == 0) {
             ++unsupported_loads[mnemonic];
         } else if (!GpuBytesPending(load_addr, load_size) &&
-                   memory->TryReadBacking(load_addr, data, load_size)) {
+                   memory->ReadBackingPages(load_addr, data, load_size)) {
             // Only bytes the CPU has the current data of: guest memory has them already.
             ++readback_stats.served_loads;
             served = true;
@@ -173,18 +177,24 @@ bool BufferCache::ReadMemoryForLoad(VAddr device_addr, u64 size, VAddr load_addr
             ++readback_stats.gpu_byte_loads;
         }
         ReadMemoryNow(device_addr, size, false, false);
-    });
+    };
+    if (assume_locks) {
+        read();
+    } else {
+        liverpool->SendCommand<true>(read);
+    }
     return served;
 }
 
 bool BufferCache::CopyMemoryForLoad(VAddr device_addr, u64 size, VAddr src, VAddr dst, u64 bytes,
-                                    const std::function<bool(const u8*)>& write_dst) {
+                                    const std::function<bool(const u8*)>& write_dst,
+                                    bool assume_locks) {
     bool served = false;
-    liverpool->SendCommand<true>([&] {
+    const auto copy = [&] {
         // A pending landing into the destination would overwrite the copy later.
         if (!GpuBytesPending(src, bytes) && !GpuBytesPending(dst, bytes)) {
             copy_scratch.resize(bytes);
-            if (memory->TryReadBacking(src, copy_scratch.data(), bytes) &&
+            if (memory->ReadBackingPages(src, copy_scratch.data(), bytes) &&
                 write_dst(copy_scratch.data())) {
                 ++readback_stats.served_loads;
                 ++readback_stats.served_copies;
@@ -196,9 +206,41 @@ bool BufferCache::CopyMemoryForLoad(VAddr device_addr, u64 size, VAddr src, VAdd
             ++readback_stats.gpu_byte_loads;
         }
         ReadMemoryNow(device_addr, size, false, false);
-    });
+    };
+    if (assume_locks) {
+        copy();
+    } else {
+        liverpool->SendCommand<true>(copy);
+    }
     return served;
 }
+
+void BufferCache::NoteGpuThreadReadFault(u64 instruction, bool served) {
+    auto& [count, served_count] = gpu_thread_fault_sites[instruction];
+    ++count;
+    served_count += served ? 1 : 0;
+}
+
+namespace {
+/// "symbol+offset (module+offset)" for a code address, for logs.
+std::string DescribeCodeAddress(u64 address) {
+#ifndef _WIN32
+    Dl_info info{};
+    if (dladdr(reinterpret_cast<void*>(address), &info) != 0 && info.dli_fbase != nullptr) {
+        const u64 module_offset = address - reinterpret_cast<u64>(info.dli_fbase);
+        const char* module = info.dli_fname ? std::strrchr(info.dli_fname, '/') : nullptr;
+        module = module ? module + 1 : (info.dli_fname ? info.dli_fname : "?");
+        if (info.dli_sname != nullptr) {
+            return fmt::format("{}+{:#x} ({}+{:#x})", info.dli_sname,
+                               address - reinterpret_cast<u64>(info.dli_saddr), module,
+                               module_offset);
+        }
+        return fmt::format("{}+{:#x}", module, module_offset);
+    }
+#endif
+    return fmt::format("{:#x}", address);
+}
+} // namespace
 
 bool BufferCache::GpuBytesPending(VAddr address, u64 size) const {
     return gpu_modified_ranges.Intersects(address, size) ||
@@ -572,7 +614,25 @@ void BufferCache::FlushReadbackStats() {
                      variant ? variant : "-", stats.repeat_reads_of_gpu_bytes / seconds,
                      stats.repeat_reads_in_flight / seconds, pages.size(), top);
         }
+        if (!gpu_thread_fault_sites.empty()) {
+            std::vector<std::pair<u64, std::pair<u32, u32>>> sites(gpu_thread_fault_sites.begin(),
+                                                                   gpu_thread_fault_sites.end());
+            const size_t shown = std::min<size_t>(sites.size(), 6);
+            std::partial_sort(
+                sites.begin(), sites.begin() + shown, sites.end(),
+                [](const auto& a, const auto& b) { return a.second.first > b.second.first; });
+            std::string top;
+            for (size_t i = 0; i < shown; ++i) {
+                const auto [instruction, counts] = sites[i];
+                top += fmt::format("{}{} {:.1f} ({:.1f} served)", i ? ", " : "",
+                                   DescribeCodeAddress(instruction), counts.first / seconds,
+                                   counts.second / seconds);
+            }
+            LOG_INFO(Render, "GPU-thread read faults per second [{}] by instruction: {}",
+                     variant ? variant : "-", top);
+        }
     }
+    gpu_thread_fault_sites.clear();
     fault_pages.clear();
     unsupported_loads.clear();
     stats = ReadbackStats{.last_log_ns = now, .ab_switches = Common::AbSwitch::Switches()};

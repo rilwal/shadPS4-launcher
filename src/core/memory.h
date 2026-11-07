@@ -263,6 +263,12 @@ public:
     /// Reads guest memory through its backing, which page protection doesn't cover.
     bool TryReadBacking(VAddr address, void* data, u64 size);
 
+    /// TryReadBacking and TryWriteBacking through the backing page table, without the memory
+    /// lock (as CopySparseMemory), for the page fault handler. False, having copied nothing, if
+    /// any page of the range has no backing.
+    bool ReadBackingPages(VAddr address, void* data, u64 size);
+    bool WriteBackingPages(VAddr address, const void* data, u64 size);
+
     void SetupMemoryRegions(u64 flexible_size, bool use_extended_mem1, bool use_extended_mem2);
 
     PAddr PoolExpand(PAddr search_start, PAddr search_end, u64 size, u64 alignment);

@@ -163,6 +163,40 @@ void MemoryManager::CopySparseMemory(VAddr virtual_addr, u8* dest, u64 size) {
     }
 }
 
+namespace {
+template <typename Func>
+bool ForEachBackingPage(const AddressSpace& impl, VAddr address, u64 size, Func&& func) {
+    const auto& backing_pages = impl.BackingPages();
+    for (VAddr page = address >> GUEST_PAGE_BITS; page <= (address + size - 1) >> GUEST_PAGE_BITS;
+         ++page) {
+        if (const auto* entry = backing_pages.find(page); !entry || !*entry) {
+            return false;
+        }
+    }
+    u64 offset = 0;
+    while (offset < size) {
+        const VAddr addr = address + offset;
+        const u64 offset_in_page = addr % GUEST_PAGE_SIZE;
+        const u64 length = std::min<u64>(GUEST_PAGE_SIZE - offset_in_page, size - offset);
+        func(*backing_pages.find(addr >> GUEST_PAGE_BITS) + offset_in_page, offset, length);
+        offset += length;
+    }
+    return true;
+}
+} // namespace
+
+bool MemoryManager::ReadBackingPages(VAddr address, void* data, u64 size) {
+    return ForEachBackingPage(impl, address, size, [data](u8* backing, u64 offset, u64 length) {
+        std::memcpy(static_cast<u8*>(data) + offset, backing, length);
+    });
+}
+
+bool MemoryManager::WriteBackingPages(VAddr address, const void* data, u64 size) {
+    return ForEachBackingPage(impl, address, size, [data](u8* backing, u64 offset, u64 length) {
+        std::memcpy(backing, static_cast<const u8*>(data) + offset, length);
+    });
+}
+
 bool MemoryManager::TryWriteBacking(void* address, const void* data, u64 size) {
     return ForEachBacking(std::bit_cast<VAddr>(address), size,
                           [data](u8* backing, u64 offset, u64 length) {

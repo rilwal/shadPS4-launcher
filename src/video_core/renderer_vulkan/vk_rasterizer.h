@@ -91,9 +91,14 @@ public:
     /// ReadMemory for a read fault whose load the handler decoded (BufferCache::ReadMemoryForLoad).
     /// `served` says the load's bytes were copied to `data` instead of read back.
     bool ReadMemoryForLoad(VAddr addr, u64 size, VAddr load_addr, u32 load_size, u16 mnemonic,
-                           u8* data, bool& served);
+                           u8* data, bool& served, bool assume_locks);
     /// The same for a movs copying `bytes` from `src` to `dst` (BufferCache::CopyMemoryForLoad).
-    bool CopyMemoryForLoad(VAddr addr, u64 size, VAddr src, VAddr dst, u64 bytes, bool& served);
+    bool CopyMemoryForLoad(VAddr addr, u64 size, VAddr src, VAddr dst, u64 bytes, bool& served,
+                           bool assume_locks);
+    /// BufferCache::NoteGpuThreadReadFault.
+    void NoteGpuThreadReadFault(u64 instruction, bool served) {
+        buffer_cache.NoteGpuThreadReadFault(instruction, served);
+    }
     bool IsMapped(VAddr addr, u64 size);
     /// Whether any byte of the range is mapped.
     bool IsAnyMapped(VAddr addr, u64 size);

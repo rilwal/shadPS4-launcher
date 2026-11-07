@@ -399,6 +399,10 @@ bool CompleteFaultLoad(void* context, const FaultLoad& load, const u8* data) {
     return true;
 }
 
+u64 FaultInstructionAddress(void* context) {
+    return static_cast<u64>(static_cast<ucontext_t*>(context)->uc_mcontext.gregs[REG_RIP]);
+}
+
 #else
 
 bool DecodeFaultLoad(void*, FaultLoad&) {
@@ -407,6 +411,10 @@ bool DecodeFaultLoad(void*, FaultLoad&) {
 
 bool CompleteFaultLoad(void*, const FaultLoad&, const u8*) {
     return false;
+}
+
+u64 FaultInstructionAddress(void*) {
+    return 0;
 }
 
 #endif

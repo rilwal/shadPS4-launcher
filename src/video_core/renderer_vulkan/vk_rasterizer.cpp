@@ -1742,17 +1742,18 @@ bool Rasterizer::ReadMemory(VAddr addr, u64 size, bool assume_locks) {
 }
 
 bool Rasterizer::ReadMemoryForLoad(VAddr addr, u64 size, VAddr load_addr, u32 load_size,
-                                   u16 mnemonic, u8* data, bool& served) {
+                                   u16 mnemonic, u8* data, bool& served, bool assume_locks) {
     served = false;
     if (!IsMapped(addr, size)) {
         return false;
     }
-    served = buffer_cache.ReadMemoryForLoad(addr, size, load_addr, load_size, mnemonic, data);
+    served = buffer_cache.ReadMemoryForLoad(addr, size, load_addr, load_size, mnemonic, data,
+                                            assume_locks);
     return true;
 }
 
 bool Rasterizer::CopyMemoryForLoad(VAddr addr, u64 size, VAddr src, VAddr dst, u64 bytes,
-                                   bool& served) {
+                                   bool& served, bool assume_locks) {
     served = false;
     if (!IsMapped(addr, size)) {
         return false;
@@ -1762,7 +1763,7 @@ bool Rasterizer::CopyMemoryForLoad(VAddr addr, u64 size, VAddr src, VAddr dst, u
             // Tracked memory: invalidated as a write fault would, then written past its
             // protection.
             InvalidateMemory(dst, bytes, true);
-            return memory->TryWriteBacking(std::bit_cast<void*>(dst), data, bytes);
+            return memory->WriteBackingPages(dst, data, bytes);
         }
         if (IsAnyMapped(dst, bytes)) {
             return false;
@@ -1771,7 +1772,7 @@ bool Rasterizer::CopyMemoryForLoad(VAddr addr, u64 size, VAddr src, VAddr dst, u
         std::memcpy(std::bit_cast<void*>(dst), data, bytes);
         return true;
     };
-    served = buffer_cache.CopyMemoryForLoad(addr, size, src, dst, bytes, write_dst);
+    served = buffer_cache.CopyMemoryForLoad(addr, size, src, dst, bytes, write_dst, assume_locks);
     return true;
 }
 

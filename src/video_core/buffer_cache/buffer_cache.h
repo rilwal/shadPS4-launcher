@@ -115,14 +115,19 @@ public:
     /// copies its bytes from guest memory into `data` and returns true: the handler finishes the
     /// load. Otherwise reads back as ReadMemory does and returns false. Not on the GPU thread.
     bool ReadMemoryForLoad(VAddr device_addr, u64 size, VAddr load_addr, u32 load_size,
-                           u16 mnemonic, u8* data);
+                           u16 mnemonic, u8* data, bool assume_locks);
 
+    /// With `assume_locks` (on the GPU thread) runs here instead of on the GPU thread.
     /// ReadMemoryForLoad for a movs that faulted reading `src`: if neither `src` nor `dst` has
     /// GPU bytes pending, copies `bytes` from `src` to `dst` through guest memory's backing,
     /// with `write_dst` (run on the GPU thread, false if it can't) doing the write, and returns
     /// true. Otherwise reads back as ReadMemory does and returns false. Not on the GPU thread.
     bool CopyMemoryForLoad(VAddr device_addr, u64 size, VAddr src, VAddr dst, u64 bytes,
-                           const std::function<bool(const u8*)>& write_dst);
+                           const std::function<bool(const u8*)>& write_dst, bool assume_locks);
+
+    /// Counts a read fault the GPU thread itself took, by the faulting instruction's address,
+    /// and whether it was served from guest memory. On the GPU thread.
+    void NoteGpuThreadReadFault(u64 instruction, bool served);
 
     /// Fenced readbacks: records copies of every GPU-modified buffer range into staging memory.
     /// They are written to guest memory on the scheduler's priority thread once the GPU reaches
@@ -269,6 +274,9 @@ private:
 
     /// Read faults whose load the handler couldn't decode, by mnemonic, this stats window.
     std::unordered_map<u16, u32> unsupported_loads;
+
+    /// GPU-thread read faults this stats window by instruction address: count, served count.
+    std::unordered_map<u64, std::pair<u32, u32>> gpu_thread_fault_sites;
 
     /// CopyMemoryForLoad's staging, used on the GPU thread.
     std::vector<u8> copy_scratch;
