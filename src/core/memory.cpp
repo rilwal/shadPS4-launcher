@@ -7,6 +7,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <thread>
+#include <vector>
 #ifndef _WIN32
 #include <dlfcn.h>
 #endif
@@ -225,12 +226,23 @@ constexpr size_t BackingWriteLogSize = 4096;
 std::array<BackingWrite, BackingWriteLogSize> backing_write_log{};
 std::atomic<u64> backing_write_count{};
 
-VAddr WatchedAddress() {
-    static const VAddr address = [] {
+/// SHADPS4_WATCH_ADDR: hex addresses, comma-separated.
+const std::vector<VAddr>& WatchedAddresses() {
+    static const std::vector<VAddr> addresses = [] {
+        std::vector<VAddr> list;
         const char* env = std::getenv("SHADPS4_WATCH_ADDR");
-        return env != nullptr ? VAddr{std::strtoull(env, nullptr, 16)} : VAddr{0};
+        while (env != nullptr && *env != '\0') {
+            char* end = nullptr;
+            const VAddr address = std::strtoull(env, &end, 16);
+            if (end == env) {
+                break;
+            }
+            list.push_back(address);
+            env = *end == ',' ? end + 1 : nullptr;
+        }
+        return list;
     }();
-    return address;
+    return addresses;
 }
 
 u64 NowNs() {
@@ -256,16 +268,17 @@ std::string DescribeCaller(u64 address) {
 } // namespace
 
 void MemoryManager::NoteWatchedWrite(VAddr address, u64 size, const void* data, const char* what) {
-    const VAddr watched = WatchedAddress();
-    if (watched == 0 || watched < address || watched >= address + size) {
-        return;
+    for (const VAddr watched : WatchedAddresses()) {
+        if (watched < address || watched >= address + size) {
+            continue;
+        }
+        u32 dword = 0;
+        const u64 offset = Common::AlignDown(watched - address, 4);
+        std::memcpy(&dword, static_cast<const u8*>(data) + offset,
+                    std::min<u64>(sizeof(dword), size - offset));
+        LOG_INFO(Core, "Watched {:#x}: {} wrote {:#x} ({} bytes at {:#x}) on thread {:#x}", watched,
+                 what, dword, size, address, ThreadTag());
     }
-    u32 dword = 0;
-    const u64 offset = Common::AlignDown(watched - address, 4);
-    std::memcpy(&dword, static_cast<const u8*>(data) + offset,
-                std::min<u64>(sizeof(dword), size - offset));
-    LOG_INFO(Core, "Watched {:#x}: {} wrote {:#x} ({} bytes at {:#x}) on thread {:#x}", watched,
-             what, dword, size, address, ThreadTag());
 }
 
 std::string MemoryManager::DescribeRecentBackingWrites(VAddr address, u64 size) {
