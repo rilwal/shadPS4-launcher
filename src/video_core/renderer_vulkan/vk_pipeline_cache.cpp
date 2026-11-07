@@ -771,6 +771,25 @@ Shader::ShaderParams PipelineCache::ProgramParams(const Program& pgm) const {
     return AmdGpu::GetParams(pgm);
 }
 
+std::span<const u32> PipelineCache::BackingCode(std::span<const u32> code) {
+    // Translation reads the whole program. On the GPU thread, a page of it that also holds GPU
+    // data waiting to land faults, and the fault waits for that landing in the middle of
+    // recording a draw: Bloodborne hung there. The backing has the same bytes wherever no GPU
+    // data is pending. (gpu_bytes_pending says pending off the GPU thread, which may fault.)
+    const VAddr address = std::bit_cast<VAddr>(code.data());
+    if (!gpu_bytes_pending || code.empty() || gpu_bytes_pending(address, code.size_bytes())) {
+        return code;
+    }
+    // Per thread: compile workers come here too. Used until this thread's next call.
+    thread_local std::vector<u32> backing_code;
+    backing_code.resize(code.size());
+    if (!Core::Memory::Instance()->ReadBackingPages(address, backing_code.data(),
+                                                    code.size_bytes())) {
+        return code;
+    }
+    return backing_code;
+}
+
 bool PipelineCache::RefreshGraphicsStages() {
     const auto& regs = liverpool->regs;
     auto& key = graphics_key;
@@ -905,11 +924,12 @@ bool PipelineCache::RefreshComputeKey() {
 
 std::pair<vk::ShaderModule, u64> PipelineCache::CompileModule(Shader::Info& info,
                                                               Shader::RuntimeInfo& runtime_info,
-                                                              const std::span<const u32>& code,
+                                                              std::span<const u32> guest_code,
                                                               size_t perm_idx,
                                                               Shader::Backend::Bindings& binding) {
     LOG_INFO(Render_Vulkan, "Compiling {} shader {:#x} {}", info.hw_stage, info.pgm_hash,
              perm_idx != 0 ? "(permutation)" : "");
+    const auto code = BackingCode(guest_code);
     DumpShader(code, info.pgm_hash, info.hw_stage, perm_idx, "bin");
     const u64 start = VideoCore::PerfStats::NowNs();
     SCOPE_EXIT {

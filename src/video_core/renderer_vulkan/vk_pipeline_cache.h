@@ -157,9 +157,11 @@ private:
     /// Translates and creates a shader module; returns it with the variant's content hash.
     std::pair<vk::ShaderModule, u64> CompileModule(Shader::Info& info,
                                                    Shader::RuntimeInfo& runtime_info,
-                                                   const std::span<const u32>& code,
-                                                   size_t perm_idx,
+                                                   std::span<const u32> guest_code, size_t perm_idx,
                                                    Shader::Backend::Bindings& binding);
+    /// Shader code to translate: a copy read through the backing where that's safe on the GPU
+    /// thread, else the guest code itself.
+    std::span<const u32> BackingCode(std::span<const u32> code);
     const Shader::RuntimeInfo& BuildRuntimeInfo(Shader::HwStage stage, Shader::SwStage l_stage);
 
     [[nodiscard]] bool IsPipelineCacheDirty() const {
