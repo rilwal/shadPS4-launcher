@@ -92,7 +92,11 @@ public:
     /// `served` says the load's bytes were copied to `data` instead of read back.
     bool ReadMemoryForLoad(VAddr addr, u64 size, VAddr load_addr, u32 load_size, u16 mnemonic,
                            u8* data, bool& served);
+    /// The same for a movs copying `bytes` from `src` to `dst` (BufferCache::CopyMemoryForLoad).
+    bool CopyMemoryForLoad(VAddr addr, u64 size, VAddr src, VAddr dst, u64 bytes, bool& served);
     bool IsMapped(VAddr addr, u64 size);
+    /// Whether any byte of the range is mapped.
+    bool IsAnyMapped(VAddr addr, u64 size);
     void MapMemory(VAddr addr, u64 size);
     void RegisterMemory(VAddr addr, u64 size);
     void UnmapMemory(VAddr addr, u64 size);

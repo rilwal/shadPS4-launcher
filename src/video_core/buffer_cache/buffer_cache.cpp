@@ -177,6 +177,29 @@ bool BufferCache::ReadMemoryForLoad(VAddr device_addr, u64 size, VAddr load_addr
     return served;
 }
 
+bool BufferCache::CopyMemoryForLoad(VAddr device_addr, u64 size, VAddr src, VAddr dst, u64 bytes,
+                                    const std::function<bool(const u8*)>& write_dst) {
+    bool served = false;
+    liverpool->SendCommand<true>([&] {
+        // A pending landing into the destination would overwrite the copy later.
+        if (!GpuBytesPending(src, bytes) && !GpuBytesPending(dst, bytes)) {
+            copy_scratch.resize(bytes);
+            if (memory->TryReadBacking(src, copy_scratch.data(), bytes) &&
+                write_dst(copy_scratch.data())) {
+                ++readback_stats.served_loads;
+                ++readback_stats.served_copies;
+                readback_stats.served_copy_bytes += bytes;
+                served = true;
+                return;
+            }
+        } else {
+            ++readback_stats.gpu_byte_loads;
+        }
+        ReadMemoryNow(device_addr, size, false, false);
+    });
+    return served;
+}
+
 bool BufferCache::GpuBytesPending(VAddr address, u64 size) const {
     return gpu_modified_ranges.Intersects(address, size) ||
            async_downloads.Intersects(address, size) ||
@@ -526,9 +549,10 @@ void BufferCache::FlushReadbackStats() {
                                    loads[i].second / seconds);
             }
             LOG_INFO(Render,
-                     "Read faults per second [{}]: {:.1f} served from guest memory (no GPU bytes), "
-                     "{:.1f} read GPU bytes; not decoded: {}",
+                     "Read faults per second [{}]: {:.1f} served from guest memory (no GPU bytes; "
+                     "{:.1f} movs copies, {:.1f} KB), {:.1f} read GPU bytes; not decoded: {}",
                      variant ? variant : "-", stats.served_loads / seconds,
+                     stats.served_copies / seconds, stats.served_copy_bytes / 1024.0 / seconds,
                      stats.gpu_byte_loads / seconds, top.empty() ? "none" : top);
         }
         if (n[1] != 0) {

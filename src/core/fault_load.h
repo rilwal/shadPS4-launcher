@@ -9,9 +9,19 @@ namespace Core {
 
 /// A plain load that faulted on a protected page, decoded so it can be finished without the
 /// page: the fault handler reads the bytes itself and writes them to the destination register.
-/// Only moves into a general-purpose or vector register are decoded, as those are all a load
-/// that only reads memory can be.
+/// Moves into a general-purpose or vector register, cmp and test with a memory operand, and
+/// movs (with or without rep) are decoded.
 struct FaultLoad {
+    enum class Op : u8 {
+        /// A move into a register.
+        Load,
+        /// cmp or test with a memory operand: only sets flags.
+        Compare,
+        Test,
+        /// movs, with or without rep: copies `size` bytes from `address` to `store_address`. The
+        /// GPU thread does the copy, as the destination may be tracked memory too.
+        Copy,
+    };
     enum class Dest : u8 {
         Gpr,
         Xmm,
@@ -24,9 +34,19 @@ struct FaultLoad {
         Sign,
     };
 
+    Op op{};
     /// Address and size of the bytes the instruction reads.
     VAddr address{};
     u32 size{};
+    /// Copy: where the bytes go, and the element size it steps rsi, rdi and rcx by.
+    VAddr store_address{};
+    u8 element{};
+    bool rep{};
+    /// Compare and Test: the other operand, a register (`reg`, `reg_size`) or an immediate,
+    /// and whether memory is the first operand (cmp mem, x) or the second (cmp reg, mem).
+    bool other_is_reg{};
+    bool memory_first{};
+    u64 imm{};
     u32 length{};
     Dest dest{};
     Extend extend{};
@@ -45,8 +65,8 @@ struct FaultLoad {
 /// than x86-64 Linux, and where the context lacks the state it would need.
 bool DecodeFaultLoad(void* context, FaultLoad& load);
 
-/// Writes `data` (load.size bytes) to the load's destination register as the instruction would
-/// have and steps the context past it.
+/// Finishes the instruction from `data` (load.size bytes; unused for a Copy, which the caller
+/// has done) as it would have run, and steps the context past it.
 bool CompleteFaultLoad(void* context, const FaultLoad& load, const u8* data);
 
 } // namespace Core

@@ -3,6 +3,8 @@
 
 #pragma once
 
+#include <functional>
+
 #include <array>
 #include <atomic>
 #include <deque>
@@ -114,6 +116,13 @@ public:
     /// load. Otherwise reads back as ReadMemory does and returns false. Not on the GPU thread.
     bool ReadMemoryForLoad(VAddr device_addr, u64 size, VAddr load_addr, u32 load_size,
                            u16 mnemonic, u8* data);
+
+    /// ReadMemoryForLoad for a movs that faulted reading `src`: if neither `src` nor `dst` has
+    /// GPU bytes pending, copies `bytes` from `src` to `dst` through guest memory's backing,
+    /// with `write_dst` (run on the GPU thread, false if it can't) doing the write, and returns
+    /// true. Otherwise reads back as ReadMemory does and returns false. Not on the GPU thread.
+    bool CopyMemoryForLoad(VAddr device_addr, u64 size, VAddr src, VAddr dst, u64 bytes,
+                           const std::function<bool(const u8*)>& write_dst);
 
     /// Fenced readbacks: records copies of every GPU-modified buffer range into staging memory.
     /// They are written to guest memory on the scheduler's priority thread once the GPU reaches
@@ -261,6 +270,9 @@ private:
     /// Read faults whose load the handler couldn't decode, by mnemonic, this stats window.
     std::unordered_map<u16, u32> unsupported_loads;
 
+    /// CopyMemoryForLoad's staging, used on the GPU thread.
+    std::vector<u8> copy_scratch;
+
     /// Readback profiling of a repeat read fault at the address.
     void NoteRepeatRead(VAddr address, u64 size);
 
@@ -289,6 +301,9 @@ private:
         /// Read faults finished from guest memory, and ones that read GPU bytes.
         u64 served_loads{};
         u64 gpu_byte_loads{};
+        /// The movs copies among them, and the bytes they copied.
+        u64 served_copies{};
+        u64 served_copy_bytes{};
         u64 last_log_ns{};
         u64 ab_switches{};
     } readback_stats;

@@ -1751,6 +1751,36 @@ bool Rasterizer::ReadMemoryForLoad(VAddr addr, u64 size, VAddr load_addr, u32 lo
     return true;
 }
 
+bool Rasterizer::CopyMemoryForLoad(VAddr addr, u64 size, VAddr src, VAddr dst, u64 bytes,
+                                   bool& served) {
+    served = false;
+    if (!IsMapped(addr, size)) {
+        return false;
+    }
+    const auto write_dst = [&](const u8* data) {
+        if (IsMapped(dst, bytes)) {
+            // Tracked memory: invalidated as a write fault would, then written past its
+            // protection.
+            InvalidateMemory(dst, bytes, true);
+            return memory->TryWriteBacking(std::bit_cast<void*>(dst), data, bytes);
+        }
+        if (IsAnyMapped(dst, bytes)) {
+            return false;
+        }
+        // Memory the GPU doesn't see is never protected: written as the guest would.
+        std::memcpy(std::bit_cast<void*>(dst), data, bytes);
+        return true;
+    };
+    served = buffer_cache.CopyMemoryForLoad(addr, size, src, dst, bytes, write_dst);
+    return true;
+}
+
+bool Rasterizer::IsAnyMapped(VAddr addr, u64 size) {
+    const auto range = decltype(mapped_ranges)::interval_type::right_open(addr, addr + size);
+    Common::RecursiveSharedLock lock{mapped_ranges_mutex};
+    return boost::icl::intersects(mapped_ranges, range);
+}
+
 bool Rasterizer::IsMapped(VAddr addr, u64 size) {
     if (size == 0) {
         // There is no memory, so not mapped.

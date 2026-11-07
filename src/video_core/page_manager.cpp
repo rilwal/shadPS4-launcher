@@ -538,9 +538,17 @@ struct SignalImpl : public PageManager::Impl {
                                  addr < load.address + load.size;
             std::array<u8, 32> data;
             bool served = false;
-            handled = rasterizer->ReadMemoryForLoad(addr, size, decoded ? load.address : 0,
-                                                    decoded ? load.size : 0, load.mnemonic,
-                                                    data.data(), served);
+            const bool overlapping = load.address < load.store_address + load.size &&
+                                     load.store_address < load.address + load.size;
+            if (decoded && load.op == Core::FaultLoad::Op::Copy && !overlapping) {
+                handled = rasterizer->CopyMemoryForLoad(addr, size, load.address,
+                                                        load.store_address, load.size, served);
+            } else {
+                const bool supported = decoded && load.op != Core::FaultLoad::Op::Copy;
+                handled = rasterizer->ReadMemoryForLoad(addr, size, supported ? load.address : 0,
+                                                        supported ? load.size : 0, load.mnemonic,
+                                                        data.data(), served);
+            }
             if (served && !Core::CompleteFaultLoad(context, load, data.data())) {
                 // Can't happen after a successful decode; retrying faults again and reads back.
                 handled = rasterizer->ReadMemory(addr, size, false);
