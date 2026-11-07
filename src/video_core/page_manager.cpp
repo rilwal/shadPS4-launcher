@@ -104,6 +104,16 @@ bool FaultLoadsEnabled() {
     return enabled;
 }
 
+/// The same for the GPU thread's own faults only (the SRT walkers and other emulator reads of
+/// guest tables), with SHADPS4_GPU_THREAD_FAULT_LOADS=1, to measure.
+bool GpuThreadFaultLoadsEnabled() {
+    static const bool enabled = [] {
+        const char* env = std::getenv("SHADPS4_GPU_THREAD_FAULT_LOADS");
+        return env != nullptr && env[0] == '1';
+    }();
+    return enabled;
+}
+
 std::mutex slow_write_mutex;
 std::map<std::pair<u64, bool>, u32> slow_write_sites;
 
@@ -550,7 +560,7 @@ struct SignalImpl : public PageManager::Impl {
         const u64 start = VideoCore::PerfStats::NowNs();
         bool handled;
         bool served = false;
-        if (FaultLoadsEnabled()) {
+        if (FaultLoadsEnabled() || (is_gpu_thread && GpuThreadFaultLoadsEnabled())) {
             // A load that reads no GPU-written bytes is finished here from guest memory, which
             // has the current data of everything else, instead of reading back the page. On the
             // GPU thread too: the emulator's own reads of guest memory fault as well.
