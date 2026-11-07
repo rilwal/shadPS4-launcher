@@ -119,6 +119,11 @@ public:
     /// right away instead. Returns false (without signaling) when readbacks aren't Fenced.
     bool DeferFenceSignal(Common::UniqueFunction<void>&& signal, bool throttle);
 
+    /// Buffer cache tracking of a range, for logs. GPU thread.
+    std::string DescribeMemoryState(VAddr address, u64 size) {
+        return buffer_cache.DescribeMemoryState(address, size);
+    }
+
     /// Bytes a deferred signal will write: GPU data recorded for them is no longer current.
     void ForgetGpuWrites(VAddr address, u64 size) {
         buffer_cache.ForgetGpuWrites(address, size);

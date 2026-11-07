@@ -121,6 +121,9 @@ public:
     /// Whether any byte of the range has GPU data not yet in guest memory. On the GPU thread.
     [[nodiscard]] bool GpuBytesPending(VAddr address, u64 size) const;
 
+    /// Tracking of a range, for logs: page bits, pending GPU ranges, landings. GPU thread.
+    [[nodiscard]] std::string DescribeMemoryState(VAddr address, u64 size) const;
+
     /// The guest's memory will have newer data for the range than the GPU's copy (a deferred
     /// fence signal writes it), so readbacks leave it out. Tracking stays per page. GPU thread.
     void ForgetGpuWrites(VAddr address, u64 size) {

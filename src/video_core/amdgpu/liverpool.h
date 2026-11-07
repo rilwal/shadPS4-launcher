@@ -215,6 +215,8 @@ private:
     /// Label writes of a fence signal, as dword address and value pairs.
     using LabelWrites = boost::container::small_vector<std::pair<VAddr, u32>, 2>;
     static void RecordLabelWrite(LabelWrites& writes, void* address, u64 data, u32 num_bytes);
+    /// Logs a packet of an unknown type, the backing writes over it and its tracking state.
+    void LogBadPacket(const u32* packet, size_t remaining_dwords);
 
     /// Hands a fence signal to the rasterizer to run later (fenced readbacks). Returns false
     /// if it must run now. `writes` are the label values the signal will write.

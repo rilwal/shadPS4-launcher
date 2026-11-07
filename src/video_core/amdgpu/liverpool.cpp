@@ -299,8 +299,26 @@ void Liverpool::Process(std::stop_token stoken) {
     }
 }
 
+void Liverpool::LogBadPacket(const u32* packet, size_t remaining_dwords) {
+    const auto address = std::bit_cast<VAddr>(packet);
+    std::string words;
+    for (size_t i = 0; i < std::min<size_t>(remaining_dwords, 16); ++i) {
+        words += fmt::format("{}{:08x}", i ? " " : "", packet[i]);
+    }
+    LOG_CRITICAL(Render, "Bad PM4 packet at {:#x} ({} dwords left): {}", address, remaining_dwords,
+                 words);
+    LOG_CRITICAL(Render, "Recent backing writes over it: {}",
+                 Core::Memory::Instance()->DescribeRecentBackingWrites(address, 64));
+    if (rasterizer) {
+        LOG_CRITICAL(Render, "Its buffer cache state: {}",
+                     rasterizer->DescribeMemoryState(address, 64));
+    }
+}
+
 void Liverpool::RecordLabelWrite(LabelWrites& writes, void* address, u64 data, u32 num_bytes) {
     const auto addr = std::bit_cast<VAddr>(address);
+    Core::MemoryManager::NoteWatchedWrite(addr, num_bytes, &data,
+                                          "a fence signal (recorded; written when it runs)");
     writes.emplace_back(addr, static_cast<u32>(data));
     if (num_bytes == sizeof(u64)) {
         writes.emplace_back(addr + sizeof(u32), static_cast<u32>(data >> 32));
@@ -713,6 +731,9 @@ Liverpool::Task Liverpool::ProcessGraphics(std::span<const u32> dcb) {
         const auto* header = reinterpret_cast<const PM4Header*>(dcb.data());
         const u32 type = header->type;
 
+        if (type != 2 && type != 3) {
+            LogBadPacket(dcb.data(), dcb.size());
+        }
         switch (type) {
         default:
             UNREACHABLE_MSG("Wrong PM4 type {}", type);
@@ -1481,6 +1502,7 @@ Liverpool::Task Liverpool::ProcessCompute(std::span<const u32> acb, u32 vqid) {
 
         if (header->type != 3) {
             // No other types of packets were spotted so far
+            LogBadPacket(acb.data(), acb.size());
             UNREACHABLE_MSG("Invalid PM4 type {}", header->type.Value());
         }
 
@@ -1717,6 +1739,9 @@ Liverpool::Task Liverpool::ProcessCompute(std::span<const u32> acb, u32 vqid) {
                 }
                 release_mem->SignalFence(
                     [](void* address, u64 data, u32 num_bytes) {
+                        Core::MemoryManager::NoteWatchedWrite(std::bit_cast<VAddr>(address),
+                                                              num_bytes, &data,
+                                                              "an immediate RELEASE_MEM");
                         std::memcpy(address, &data, num_bytes);
                     },
                     signal_irq,
