@@ -161,6 +161,9 @@ void CFG::EmitLabels() {
     // A branch into the middle of an instruction or past the end of the program can't come from
     // a real shader, only from bytes that aren't one (the shader scanner's guesses), and makes
     // blocks that overlap or run off the instruction list.
+    for (u32 i = 0; i < inst_list.size(); ++i) {
+        ASSERT_MSG(inst_list[i].length != 0, "Instruction {} has no length", i);
+    }
     for (const Label label : labels) {
         ASSERT_MSG(std::ranges::binary_search(index_to_pc, label),
                    "Branch target {:#x} isn't the start of an instruction (program ends at {:#x})",
@@ -388,7 +391,14 @@ void CFG::LinkBlocks() {
 }
 
 void CFG::RemoveUnreachableBlocks() {
+    // Each step visits or erases a block, so more steps than blocks means the set is corrupt
+    // (seen with a scanned guess in The Last Guardian, which spun here forever).
+    if (blocks.empty()) {
+        return;
+    }
+    size_t steps_left = blocks.size();
     for (auto it = std::next(blocks.begin()); it != blocks.end();) {
+        ASSERT_MSG(steps_left-- != 0, "Block list of {} blocks doesn't end", blocks.size());
         if (it->num_predecessors == 0) {
             LOG_WARNING(Render_Recompiler, "Removing unreachable block begin={:#x}", it->begin);
             it = blocks.erase(it);
