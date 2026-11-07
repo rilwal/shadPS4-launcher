@@ -90,6 +90,9 @@ BufferCache::BufferCache(const Vulkan::Instance& instance_, Vulkan::Scheduler& s
     const u32 readbacks_mode = EmulatorSettings.GetReadbacksMode();
     tracks_gpu_pages =
         readbacks_mode == GpuReadbacksMode::Precise || readbacks_mode == GpuReadbacksMode::Fenced;
+    if (const char* env = std::getenv("SHADPS4_LAND_WRITTEN_PAGES"); env && env[0] == '0') {
+        land_written_pages = false;
+    }
     const vk::BufferCreateInfo probe_ci = {
         .flags =
             vk::BufferCreateFlagBits::eSparseBinding | vk::BufferCreateFlagBits::eSparseResidency,
@@ -274,16 +277,24 @@ bool BufferCache::GpuBytesPending(VAddr address, u64 size) const {
 
 void BufferCache::ReadMemoryNow(VAddr device_addr, u64 size, bool is_write, bool async) {
     read_reason = is_write ? ReadReason::Write : ReadReason::Other;
+    const VAddr page_start = Common::AlignDown(device_addr, BYTES_PER_PAGE);
+    const u64 page_size = Common::AlignUp(device_addr + size, BYTES_PER_PAGE) - page_start;
     if (tracks_gpu_pages && !is_write && !async) {
         // A CPU read fault: remembered so fenced readbacks land this memory early from now
-        // on. Write faults, unmaps and GC evictions also come here, but don't count.
-        const VAddr page_start = Common::AlignDown(device_addr, BYTES_PER_PAGE);
-        const u64 page_size = Common::AlignUp(device_addr + size, BYTES_PER_PAGE) - page_start;
-        read_reason = cpu_read_ranges.Intersects(page_start, page_size) ? ReadReason::RepeatRead
-                                                                        : ReadReason::FirstRead;
-        cpu_read_ranges.Add(page_start, page_size);
+        // on. Unmaps and GC evictions also come here, but don't count.
+        read_reason = land_early_ranges.Intersects(page_start, page_size) ? ReadReason::RepeatRead
+                                                                          : ReadReason::FirstRead;
+        land_early_ranges.Add(page_start, page_size);
         if (read_reason == ReadReason::RepeatRead) {
             NoteRepeatRead(device_addr, size);
+        }
+    } else if (tracks_gpu_pages && is_write && !async) {
+        // The CPU writing a page that holds GPU data has to wait for that data first, so the
+        // page lands early from now on too: a CPU filling a ring the GPU also writes would
+        // otherwise stall on every page.
+        NoteWriteFault(device_addr, size);
+        if (land_written_pages) {
+            land_early_ranges.Add(page_start, page_size);
         }
     }
     const u32 first_block = device_addr >> block_shift;
@@ -302,6 +313,29 @@ void BufferCache::ReadMemoryNow(VAddr device_addr, u64 size, bool is_write, bool
     read_reason = ReadReason::Other;
     if (is_write) {
         memory_tracker->MarkRegionAsCpuModified(device_addr, size);
+    }
+}
+
+void BufferCache::NoteWriteFault(VAddr address, u64 size) {
+    const VAddr page = Common::AlignDown(address, BYTES_PER_PAGE);
+    const auto pending = [&](VAddr start, u64 length) {
+        return gpu_modified_ranges.Intersects(start, length) ||
+               std::ranges::any_of(landings, [&](const auto& landing) {
+                   return landing->ranges.Intersects(start, length);
+               });
+    };
+    u64 gpu_bytes = 0;
+    gpu_modified_ranges.ForEachInRange(page, BYTES_PER_PAGE,
+                                       [&](VAddr start, VAddr end) { gpu_bytes += end - start; });
+    for (const auto& landing : landings) {
+        landing->ranges.ForEachInRange(page, BYTES_PER_PAGE,
+                                       [&](VAddr start, VAddr end) { gpu_bytes += end - start; });
+    }
+    auto& entry = write_fault_pages[page];
+    ++entry.faults;
+    entry.gpu_bytes = std::max<u32>(entry.gpu_bytes, std::min<u64>(gpu_bytes, BYTES_PER_PAGE));
+    if (pending(address, size)) {
+        ++entry.onto_gpu_bytes;
     }
 }
 
@@ -458,9 +492,9 @@ bool BufferCache::LandGpuModifiedMemory() {
             start = chunk_end;
         }
     };
-    // Only memory the CPU has read before lands early: most of what the GPU writes is never
+    // Only memory the CPU has faulted on before lands early: most of what the GPU writes is never
     // read back, and copying it all costs more than the occasional fault on the rest.
-    cpu_read_ranges.ForEach([&](VAddr start, VAddr end) {
+    land_early_ranges.ForEach([&](VAddr start, VAddr end) {
         gpu_modified_ranges.ForEachInRange(start, end - start, add_range);
     });
     if (total_size_bytes == 0) {
@@ -656,6 +690,31 @@ void BufferCache::FlushReadbackStats() {
             LOG_INFO(Render, "GPU-thread read faults per second [{}] by instruction: {}",
                      variant ? variant : "-", top);
         }
+        if (!write_fault_pages.empty()) {
+            u64 faults = 0;
+            u64 onto_gpu_bytes = 0;
+            for (const auto& [page, entry] : write_fault_pages) {
+                faults += entry.faults;
+                onto_gpu_bytes += entry.onto_gpu_bytes;
+            }
+            std::vector<std::pair<VAddr, WriteFaultPage>> pages(write_fault_pages.begin(),
+                                                                write_fault_pages.end());
+            const size_t shown = std::min<size_t>(pages.size(), 6);
+            std::partial_sort(
+                pages.begin(), pages.begin() + shown, pages.end(),
+                [](const auto& a, const auto& b) { return a.second.faults > b.second.faults; });
+            std::string top;
+            for (size_t i = 0; i < shown; ++i) {
+                top += fmt::format("{}{:#x} {} ({} B GPU-written, {} onto them)", i ? ", " : "",
+                                   pages[i].first, pages[i].second.faults,
+                                   pages[i].second.gpu_bytes, pages[i].second.onto_gpu_bytes);
+            }
+            LOG_INFO(Render,
+                     "Write faults on GPU data per second [{}]: {:.1f} ({:.1f} wrote bytes the GPU "
+                     "wrote); written pages land early: {}; {} pages, most faulted: {}",
+                     variant ? variant : "-", faults / seconds, onto_gpu_bytes / seconds,
+                     land_written_pages ? "yes" : "no", pages.size(), top);
+        }
         if (auto sites = TakeSlowWriteFaultSites(); !sites.empty()) {
             const size_t shown = std::min<size_t>(sites.size(), 6);
             std::partial_sort(sites.begin(), sites.begin() + shown, sites.end(),
@@ -672,6 +731,7 @@ void BufferCache::FlushReadbackStats() {
     }
     gpu_thread_fault_sites.clear();
     fault_pages.clear();
+    write_fault_pages.clear();
     fault_load_budgets.clear();
     unsupported_loads.clear();
     stats = ReadbackStats{.last_log_ns = now, .ab_switches = Common::AbSwitch::Switches()};

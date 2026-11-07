@@ -237,8 +237,12 @@ private:
     Buffer gds_buffer;
     std::unique_ptr<Buffer> null_index_buffer;
     RangeSet gpu_modified_ranges;
-    /// Pages the CPU has faulted on to read GPU data. Fenced readbacks land only these early.
-    RangeSet cpu_read_ranges;
+    /// Pages the CPU has faulted on to read GPU data, or to write a page holding GPU data. Fenced
+    /// readbacks land only these early.
+    RangeSet land_early_ranges;
+    /// Whether write faults add their pages to land_early_ranges (SHADPS4_LAND_WRITTEN_PAGES=0
+    /// turns it off, to compare).
+    bool land_written_pages{true};
     /// Ranges taken by async downloads whose data isn't in guest memory yet (GPU thread only).
     RangeSet async_downloads;
     u32 num_async_downloads{};
@@ -268,6 +272,17 @@ private:
         u32 gpu_bytes{};
     };
     std::unordered_map<VAddr, FaultPage> fault_pages;
+    /// Pages with write faults that read GPU data back in this stats window: faults, the most
+    /// bytes of the page the GPU had written, and faults whose own bytes the GPU had written.
+    struct WriteFaultPage {
+        u32 faults{};
+        u32 gpu_bytes{};
+        u32 onto_gpu_bytes{};
+    };
+    std::unordered_map<VAddr, WriteFaultPage> write_fault_pages;
+
+    /// Readback profiling of a write fault on a page holding GPU data.
+    void NoteWriteFault(VAddr address, u64 size);
 
     /// ReadMemory's work, on the GPU thread.
     void ReadMemoryNow(VAddr device_addr, u64 size, bool is_write, bool async);
