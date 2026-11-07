@@ -320,8 +320,16 @@ bool Liverpool::DeferFenceSignal(Common::UniqueFunction<void>&& signal, bool thr
             landed_label_seq.store(seq, std::memory_order_release);
         },
         throttle);
-    if (!deferred || landed_label_seq.load(std::memory_order_acquire) >= seq) {
-        return deferred;
+    if (!deferred) {
+        return false;
+    }
+    // The signal writes guest memory directly, after the GPU work before it. A later readback
+    // of GPU data recorded for these bytes would put an older value back over it.
+    for (const auto& [address, value] : writes) {
+        rasterizer->ForgetGpuWrites(address, sizeof(u32));
+    }
+    if (landed_label_seq.load(std::memory_order_acquire) >= seq) {
+        return true;
     }
     for (const auto& [address, value] : writes) {
         deferred_labels.insert_or_assign(address, DeferredLabel{value, seq});

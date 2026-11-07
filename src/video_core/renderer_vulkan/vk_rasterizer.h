@@ -119,6 +119,11 @@ public:
     /// right away instead. Returns false (without signaling) when readbacks aren't Fenced.
     bool DeferFenceSignal(Common::UniqueFunction<void>&& signal, bool throttle);
 
+    /// Bytes a deferred signal will write: GPU data recorded for them is no longer current.
+    void ForgetGpuWrites(VAddr address, u64 size) {
+        buffer_cache.ForgetGpuWrites(address, size);
+    }
+
     /// Submits pending work when a deferred fence signal is waiting on it. The command
     /// processor calls this before it waits, as what it waits for may be that signal.
     void FlushFenceSignals();
