@@ -92,6 +92,11 @@ public:
         return num_submits == 0;
     }
 
+    /// Whether a SubmitDone hasn't been handled by the command processor yet.
+    bool IsSubmitDonePending() const {
+        return submit_done;
+    }
+
     void SetVoPort(Libraries::VideoOut::VideoOutPort* port) {
         vo_port = port;
     }

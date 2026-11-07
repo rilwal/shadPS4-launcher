@@ -275,7 +275,9 @@ void Liverpool::Process(std::stop_token stoken) {
             }
         }
 
-        if (submit_done) {
+        // Cleared before the flush: a SubmitDone during it then gets a pass, and a GPU-idle
+        // interrupt, of its own instead of being cleared with this one.
+        if (submit_done.exchange(false)) {
             const u64 flush_start = costs ? VideoCore::PerfStats::NowNs() : 0;
             SCOPE_EXIT {
                 if (costs) {
@@ -291,7 +293,6 @@ void Liverpool::Process(std::stop_token stoken) {
                 rasterizer->Flush();
             }
             LogWaitStats();
-            submit_done = false;
         } else if (rasterizer) {
             // Going idle: the guest may be waiting on a deferred fence signal.
             rasterizer->FlushFenceSignals();
