@@ -304,7 +304,7 @@ void Runtime::UploadImage(VideoCore::Image* dst, const VideoCore::Buffer* src,
 
 void Runtime::DownloadImage(VideoCore::Image* src, const VideoCore::Buffer* dst,
                             std::span<const vk::BufferImageCopy> download_copies) {
-    const Scheduler::ScopedGpuSection gpu_section{scheduler, Scheduler::GpuSection::ImageCopies};
+    const Scheduler::ScopedGpuSection gpu_section{scheduler, Scheduler::GpuSection::ImageDownloads};
     SetBackingSamples(src, src->info.num_samples);
     scheduler.EndRendering();
 
@@ -638,7 +638,7 @@ void Runtime::CopyDepthStencil(VideoCore::Image* src, VideoCore::Image* dst,
 void Runtime::ResolveImage(VideoCore::Image* src, VideoCore::Image* dst,
                            const VideoCore::SubresourceRange& src_range,
                            const VideoCore::SubresourceRange& dst_range) {
-    const Scheduler::ScopedGpuSection gpu_section{scheduler, Scheduler::GpuSection::ImageCopies};
+    const Scheduler::ScopedGpuSection gpu_section{scheduler, Scheduler::GpuSection::ImageResolves};
     SetBackingSamples(dst, 1, false);
     scheduler.EndRendering();
 
@@ -704,7 +704,7 @@ void Runtime::ResolveImage(VideoCore::Image* src, VideoCore::Image* dst,
 
 void Runtime::ClearImage(VideoCore::Image* dst, const VideoCore::SubresourceRange& range,
                          const vk::ClearValue& clear_value) {
-    const Scheduler::ScopedGpuSection gpu_section{scheduler, Scheduler::GpuSection::ImageCopies};
+    const Scheduler::ScopedGpuSection gpu_section{scheduler, Scheduler::GpuSection::ImageClears};
     scheduler.EndRendering();
 
     const bool needs_flush =

@@ -475,7 +475,12 @@ public:
         Dispatches,
         Detiling,
         ImageUploads,
+        /// Copies between images: the texture cache's copies on overlaps and format
+        /// reinterpretations, mips, color/depth conversions.
         ImageCopies,
+        ImageClears,
+        ImageResolves,
+        ImageDownloads,
         /// Copies and fills between device memory buffers.
         BufferCopies,
         /// Copies from host memory into device memory.
@@ -485,8 +490,9 @@ public:
         Count,
     };
     static constexpr std::array<const char*, size_t(GpuSection::Count)> GpuSectionNames = {
-        "other",        "draws",         "dispatches",     "detiling",         "image uploads",
-        "image copies", "buffer copies", "buffer uploads", "buffer downloads",
+        "other",           "draws",         "dispatches",     "detiling",
+        "image uploads",   "image copies",  "image clears",   "image resolves",
+        "image downloads", "buffer copies", "buffer uploads", "buffer downloads",
     };
 
     struct GpuTime {
