@@ -282,6 +282,7 @@ private:
         u64 seq;
     };
     std::unordered_map<VAddr, DeferredLabel> deferred_labels;
+    size_t deferred_labels_cleanup_at{256};
     u64 deferred_label_seq{};
     std::atomic<u64> landed_label_seq{};
     struct WaitStats {

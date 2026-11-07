@@ -352,11 +352,13 @@ bool Liverpool::DeferFenceSignal(Common::UniqueFunction<void>&& signal, bool thr
     for (const auto& [address, value] : writes) {
         deferred_labels.insert_or_assign(address, DeferredLabel{value, seq});
     }
-    // A label normally lives at a fixed address, so this rarely grows. Drop landed ones if not.
-    if (deferred_labels.size() > 256) {
+    // Labels at many addresses (rings of them) grow the map: drop the landed ones now and then.
+    // Not on every signal once it's past the limit, or each would walk the whole map.
+    if (deferred_labels.size() > deferred_labels_cleanup_at) {
         const u64 landed = landed_label_seq.load(std::memory_order_acquire);
         std::erase_if(deferred_labels,
                       [landed](const auto& entry) { return entry.second.seq <= landed; });
+        deferred_labels_cleanup_at = std::max<size_t>(256, deferred_labels.size() * 2);
     }
     return true;
 }
