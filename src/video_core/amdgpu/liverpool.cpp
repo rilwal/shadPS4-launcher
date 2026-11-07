@@ -3,6 +3,7 @@
 
 #include <chrono>
 #include <cstdlib>
+#include <cstring>
 #include <thread>
 #if defined(__x86_64__) || defined(_M_X64)
 #include <immintrin.h>
@@ -442,7 +443,15 @@ bool Liverpool::TestWait(const PM4CmdWaitRegMem* wait) {
                 ++wait_stats.deferred_label_hits;
                 if (wait->TestValue(it->second.value)) {
                     // Past this wait, hardware would have the label in memory already.
-                    cp_order_seq = std::max(cp_order_seq, it->second.seq);
+                    // SHADPS4_ORDER_AFTER_WAITS=0 turns that half of OrderCpWrite off, to
+                    // measure what it fixes and costs (Bloodborne: ~200 waits/s, 3 ms/frame).
+                    static const bool order_after_waits = [] {
+                        const char* env = std::getenv("SHADPS4_ORDER_AFTER_WAITS");
+                        return !env || std::strcmp(env, "0") != 0;
+                    }();
+                    if (order_after_waits) {
+                        cp_order_seq = std::max(cp_order_seq, it->second.seq);
+                    }
                     return true;
                 }
                 ++wait_stats.failed_polls;
