@@ -158,6 +158,14 @@ bool HandleWriteFault(Vulkan::Rasterizer* rasterizer, VAddr addr, u64 size, bool
 
 } // namespace
 
+bool RegionLockProfiling() {
+    static const bool enabled = [] {
+        const char* env = std::getenv("SHADPS4_LOCK_PROFILE");
+        return env != nullptr && env[0] == '1';
+    }();
+    return enabled;
+}
+
 std::vector<SlowWriteFaultSite> TakeSlowWriteFaultSites() {
     std::scoped_lock lock{slow_write_mutex};
     std::vector<SlowWriteFaultSite> sites;
@@ -560,10 +568,15 @@ struct SignalImpl : public PageManager::Impl {
         auto& impl = memory->GetAddressSpace();
         ASSERT_MSG(perms != Core::MemoryPermission::Write,
                    "Attempted to protect region as write-only which is not a valid permission");
-        const u64 start = write_fault_phases.active ? WriteFaultClockNs() : 0;
+        const bool timed = write_fault_phases.active || RegionLockProfiling();
+        const u64 start = timed ? WriteFaultClockNs() : 0;
         impl.Protect(address, size, perms);
-        if (write_fault_phases.active) {
-            write_fault_phases.protect_ns += WriteFaultClockNs() - start;
+        if (timed) {
+            const u64 elapsed = WriteFaultClockNs() - start;
+            thread_protect_ns += elapsed;
+            if (write_fault_phases.active) {
+                write_fault_phases.protect_ns += elapsed;
+            }
         }
     }
 

@@ -734,6 +734,29 @@ void BufferCache::FlushReadbackStats() {
             LOG_INFO(Render, "Slow write faults per second [{}] by instruction: {}",
                      variant ? variant : "-", top);
         }
+        if (VideoCore::RegionLockProfiling()) {
+            static constexpr std::array<const char*, size_t(VideoCore::RegionLockOp::Count)> names{
+                "CPU set",           "CPU clear",         "GPU set",       "GPU clear",
+                "CPU set+GPU clear", "CPU clear+GPU set", "upload ranges", "upload ranges written",
+                "download ranges",   "explicit (faults)", "other"};
+            std::string holds;
+            for (size_t i = 0; i < names.size(); ++i) {
+                auto& entry = VideoCore::region_lock_holds[i];
+                const u64 count = entry.count.exchange(0);
+                const u64 hold_ns = entry.hold_ns.exchange(0);
+                const u64 protect_ns = entry.protect_ns.exchange(0);
+                const u64 max_ns = entry.max_ns.exchange(0);
+                if (count != 0) {
+                    holds +=
+                        fmt::format("{}{} {:.1f} (avg {:.0f} us, mprotect {:.0f} us, max "
+                                    "{:.0f} us)",
+                                    holds.empty() ? "" : ", ", names[i], count / seconds,
+                                    hold_ns / 1e3 / count, protect_ns / 1e3 / count, max_ns / 1e3);
+                }
+            }
+            LOG_INFO(Render, "Region tracker locks held over 20 us per second [{}]: {}",
+                     variant ? variant : "-", holds.empty() ? "none" : holds);
+        }
     }
     gpu_thread_fault_sites.clear();
     fault_pages.clear();

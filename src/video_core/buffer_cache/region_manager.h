@@ -93,6 +93,7 @@ public:
         if constexpr (locked) {
             LockTimingWriteFault(mutex, write_fault_phases.region_lock_ns);
         }
+        RegionLockHoldTimer hold_timer;
         IterateWords(bounds, [&](u64 index, u64 mask) {
             update_watchers |= UpdateProtection<cpu_op, gpu_op>(write_prot, read_prot,
                                                                 watcher_bounds, index, mask);
@@ -107,6 +108,7 @@ public:
         IterateWords(bounds,
                      [&](u64 index, u64 mask) { UpdateState<cpu_op, gpu_op>(index, mask); });
         if constexpr (locked) {
+            hold_timer.Finish(LockOp<Type::None, cpu_op, gpu_op>());
             mutex.unlock();
         }
     }
@@ -127,6 +129,7 @@ public:
         if constexpr (locked) {
             LockTimingWriteFault(mutex, write_fault_phases.region_lock_ns);
         }
+        RegionLockHoldTimer hold_timer;
         IterateWords(bounds, [&](u64 index, u64 mask) {
             const u64 base_page = index * PAGES_PER_WORD;
             const u64 word = state[index] & mask;
@@ -158,6 +161,7 @@ public:
         IterateWords(bounds,
                      [&](u64 index, u64 mask) { UpdateState<cpu_op, gpu_op>(index, mask); });
         if constexpr (locked) {
+            hold_timer.Finish(LockOp<type, cpu_op, gpu_op>());
             mutex.unlock();
         }
     }
@@ -184,13 +188,42 @@ public:
 
     void Lock(const Bounds& bounds) noexcept {
         LockTimingWriteFault(mutex, write_fault_phases.region_lock_ns);
+        explicit_hold_timer = RegionLockHoldTimer{};
     }
 
     void Unlock(const Bounds& bounds) noexcept {
+        explicit_hold_timer.Finish(RegionLockOp::Explicit);
         mutex.unlock();
     }
 
 private:
+    template <Type type, StateOp cpu_op, StateOp gpu_op>
+    static constexpr RegionLockOp LockOp() {
+        if constexpr (type == Type::CPU) {
+            return gpu_op == StateOp::Set ? RegionLockOp::UploadRangesWritten
+                                          : RegionLockOp::UploadRanges;
+        } else if constexpr (type == Type::GPU) {
+            return RegionLockOp::DownloadRanges;
+        } else if constexpr (cpu_op == StateOp::Set && gpu_op == StateOp::None) {
+            return RegionLockOp::CpuSet;
+        } else if constexpr (cpu_op == StateOp::Clear && gpu_op == StateOp::None) {
+            return RegionLockOp::CpuClear;
+        } else if constexpr (cpu_op == StateOp::None && gpu_op == StateOp::Set) {
+            return RegionLockOp::GpuSet;
+        } else if constexpr (cpu_op == StateOp::None && gpu_op == StateOp::Clear) {
+            return RegionLockOp::GpuClear;
+        } else if constexpr (cpu_op == StateOp::Set && gpu_op == StateOp::Clear) {
+            return RegionLockOp::CpuSetGpuClear;
+        } else if constexpr (cpu_op == StateOp::Clear && gpu_op == StateOp::Set) {
+            return RegionLockOp::CpuClearGpuSet;
+        } else {
+            return RegionLockOp::Other;
+        }
+    }
+
+    /// Held by Lock() until Unlock(); only touched with the mutex held.
+    RegionLockHoldTimer explicit_hold_timer;
+
     template <StateOp op>
     constexpr static u64 Apply(u64 word, u64 mask) {
         if constexpr (op == StateOp::Clear) {
