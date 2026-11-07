@@ -16,11 +16,13 @@
 namespace Launcher::Trophies {
 
 struct Trophy {
-    // The trophy's id, prefixed with its set's service label past the first ("1:12")
+    // The trophy's id, prefixed with its set's service label unless that's 0 ("1:12")
     std::string id;
     std::string name;
     std::string description;
     std::string grade; // "bronze", "silver", "gold", "platinum"
+    // Its set's title, for a game with several (each game of a collection)
+    std::string set;
     bool hidden = false;
     bool dlc = false;
     std::optional<s64> unlocked_at; // Unix seconds

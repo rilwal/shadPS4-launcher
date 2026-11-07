@@ -794,6 +794,7 @@ set(COMMON src/common/logging/classes.cpp
            src/common/logging/log.h
            src/common/logging/log_file_sink.h
            src/common/aes.h
+           src/common/ab_switch.h
            src/common/alignment.h
            src/common/arch.h
            src/common/assert.cpp

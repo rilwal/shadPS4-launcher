@@ -17,6 +17,7 @@
 #include "common/multi_level_page_table.h"
 #include "common/slot_vector.h"
 #include "shader_recompiler/resource.h"
+#include "video_core/renderer_vulkan/vk_staging_buffer_pool.h"
 #include "video_core/texture_cache/blit_helper.h"
 #include "video_core/texture_cache/image.h"
 #include "video_core/texture_cache/image_view.h"
@@ -130,7 +131,9 @@ public:
     void UnmapMemory(VAddr cpu_addr, size_t size);
 
     /// Schedules a copy of pending images for download back to CPU memory.
-    void ProcessDownloadImages();
+    /// Waits for the copies by default; with `priority` they land on the priority thread.
+    /// Returns true when any image was pending.
+    bool ProcessDownloadImages(bool priority = false);
 
     /// Retrieves the image handle of the image with the provided attributes.
     [[nodiscard]] ImageId FindImage(ImageDesc& desc, bool exact_fmt = false);
@@ -424,6 +427,9 @@ private:
     Common::LRUCache<Sampler> sampler_lru_cache;
     const bool readback_linear_images;
     std::mutex download_images_mutex;
+    /// Staging buffers of priority downloads, freed back on the GPU thread.
+    std::mutex priority_frees_mutex;
+    std::vector<Vulkan::StagingBufferRef> priority_frees;
     absl::flat_hash_map<VAddr, MetaDataInfo> surface_metas;
 };
 DECLARE_ENUM_FLAG_OPERATORS(TextureCache::DownloadMemoryFlags)

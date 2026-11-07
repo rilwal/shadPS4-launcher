@@ -141,6 +141,9 @@ static Value achievement(const lc_achievement& a) {
 	}
 	obj.set("dlc", a.dlc);
 	obj.set("unlocked_at", a.unlocked ? Value(a.unlocked_at) : Value());
+	obj.set("current", a.current);
+	obj.set("total", a.total);
+	obj.set("set", str(a.set));
 	return obj;
 }
 

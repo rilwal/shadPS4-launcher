@@ -71,6 +71,7 @@
 #define HOTKEY_SCREENSHOT_WITH_OVERLAYS 0xf000000e
 #define HOTKEY_OPEN_EMULATOR_SETTINGS 0xf000000f
 #define HOTKEY_TOGGLE_FRIENDS 0xf0000010
+#define HOTKEY_AB_SWITCH 0xf0000011
 
 #define SDL_UNMAPPED UINT32_MAX - 1
 
@@ -166,6 +167,7 @@ const std::map<std::string, u32> string_to_hotkey_map = {
     {"hotkey_pause", HOTKEY_PAUSE},
     {"hotkey_fullscreen", HOTKEY_FULLSCREEN},
     {"hotkey_show_fps", HOTKEY_SIMPLE_FPS},
+    {"hotkey_ab_switch", HOTKEY_AB_SWITCH},
     {"hotkey_quit", HOTKEY_QUIT},
     {"hotkey_reload_inputs", HOTKEY_RELOAD_INPUTS},
     {"hotkey_toggle_mouse_to_joystick", HOTKEY_TOGGLE_MOUSE_TO_JOYSTICK},

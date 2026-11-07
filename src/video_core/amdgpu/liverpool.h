@@ -10,8 +10,11 @@
 #include <semaphore>
 #include <span>
 #include <thread>
+#include <unordered_map>
 #include <vector>
 #include <queue>
+
+#include <boost/container/small_vector.hpp>
 
 #include "common/assert.h"
 #include "common/slot_vector.h"
@@ -209,6 +212,24 @@ private:
     template <bool is_indirect = false>
     Task ProcessCompute(std::span<const u32> acb, u32 vqid);
 
+    /// Label writes of a fence signal, as dword address and value pairs.
+    using LabelWrites = boost::container::small_vector<std::pair<VAddr, u32>, 2>;
+    static void RecordLabelWrite(LabelWrites& writes, void* address, u64 data, u32 num_bytes);
+
+    /// Hands a fence signal to the rasterizer to run later (fenced readbacks). Returns false
+    /// if it must run now. `writes` are the label values the signal will write.
+    bool DeferFenceSignal(Common::UniqueFunction<void>&& signal, bool throttle,
+                          const LabelWrites& writes);
+
+    /// Drops deferred label values the command processor itself overwrites.
+    void ForgetDeferredLabels(VAddr address, u64 size);
+
+    /// Tests a WAIT_REG_MEM condition. A label whose signal is deferred reads as its new value.
+    bool TestWait(const PM4CmdWaitRegMem* wait);
+
+    /// Logs how often queue waits polled, every few seconds.
+    void LogWaitStats();
+
     void ProcessCommands();
     /// Runs the constant engine's task, if any; returns whether there was one.
     bool ProcessCeQueue();
@@ -249,6 +270,24 @@ private:
     std::vector<std::span<const u32>*> gfx_frames;
     bool looked_ahead{};
     bool in_lookahead{};
+
+    /// Labels whose fence signal is deferred until the data it guards is in guest memory.
+    /// Only the guest CPU needs that delay: the command processor records everything in
+    /// order on one Vulkan queue, so its own waits see the new value at once, as when signals
+    /// aren't deferred. GPU thread only, apart from landed_label_seq.
+    struct DeferredLabel {
+        u32 value;
+        u64 seq;
+    };
+    std::unordered_map<VAddr, DeferredLabel> deferred_labels;
+    u64 deferred_label_seq{};
+    std::atomic<u64> landed_label_seq{};
+    struct WaitStats {
+        u64 failed_polls{};
+        u64 deferred_label_hits{};
+        u64 last_log_ns{};
+        u64 ab_switches{};
+    } wait_stats;
 
     Vulkan::Rasterizer* rasterizer{};
     Libraries::VideoOut::VideoOutPort* vo_port{};

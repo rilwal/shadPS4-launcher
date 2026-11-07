@@ -186,6 +186,13 @@ typedef struct lc_achievement {
 	/* When it was unlocked (Unix seconds), if `unlocked`. */
 	bool    unlocked;
 	int64_t unlocked_at;
+	/* Progress towards it, when it counts something (a progressive trophy); `total` 0 when it
+	   doesn't, or when the emulator doesn't know, which keeps what the launcher has. */
+	uint32_t current;
+	uint32_t total;
+	/* The trophy set it belongs to, by name, for a game with several (each game of a collection);
+	   NULL or "" for the game's own. The launcher pages through sets in the order a list names them. */
+	const char *set;
 } lc_achievement;
 
 /* The game's full list, once per session, before unlocks. */
@@ -193,6 +200,7 @@ void lc_achievements(lc_session *session, const lc_achievement *list, size_t cou
 /* LC_UNLOCKED_NOW for `at` when the emulator doesn't know when; 0 means at an unknown time. */
 #define LC_UNLOCKED_NOW INT64_MIN
 void lc_unlocked(lc_session *session, const char *id, int64_t at);
+/* Progress towards a counting achievement, as it changes. */
 void lc_achievement_progress(lc_session *session, const char *id, uint32_t current,
                              uint32_t total);
 

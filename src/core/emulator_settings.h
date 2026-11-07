@@ -34,6 +34,9 @@ enum GpuReadbacksMode : int {
     Disabled,
     Relaxed,
     Precise,
+    /// Like Precise, but GPU writes are copied back at each fence and the fence's label and
+    /// interrupt are only delivered once the data has landed in guest memory.
+    Fenced,
 };
 
 enum class ConfigMode {
@@ -468,6 +471,8 @@ struct GPUSettings {
     /// draw, with the draw state guessed from each shader's own registers; 0 turns it off. Needs
     /// the descriptor heap. A draw whose state differs from the guess compiles as before.
     Setting<u32> shader_precompile_threads{0};
+    /// Seconds between automatic A/B switches (0 = only on the hotkey).
+    Setting<u32> ab_switch_seconds{0};
 
     std::vector<OverrideItem> GetOverrideableFields() const {
         return std::vector<OverrideItem>{
@@ -509,6 +514,7 @@ struct GPUSettings {
             make_override<GPUSettings>("shader_prescan", &GPUSettings::shader_prescan),
             make_override<GPUSettings>("fewer_shader_variants",
                                        &GPUSettings::fewer_shader_variants),
+            make_override<GPUSettings>("ab_switch_seconds", &GPUSettings::ab_switch_seconds),
         };
     }
 };
@@ -519,7 +525,8 @@ NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE(
     full_screen_mode, present_mode, hdr_allowed, fsr_enabled, rcas_enabled, rcas_attenuation,
     userfaultfd, inline_fetch_shader, fast_shader_math, async_pipelines, async_pipeline_wait_ms,
     async_pipelines_ab_seconds, pipeline_compile_probe, descriptor_heap, shader_objects,
-    compile_lookahead, shader_prescan, fewer_shader_variants, gpu_timing, shader_precompile_threads)
+    compile_lookahead, shader_prescan, fewer_shader_variants, gpu_timing, shader_precompile_threads,
+    ab_switch_seconds)
 
 // -------------------------------
 // Vulkan settings
@@ -821,6 +828,7 @@ public:
     SETTING_FORWARD_BOOL(m_gpu, RcasEnabled, rcas_enabled)
     SETTING_FORWARD(m_gpu, RcasAttenuation, rcas_attenuation)
     SETTING_FORWARD(m_gpu, ReadbacksMode, readbacks_mode)
+    SETTING_FORWARD(m_gpu, AbSwitchSeconds, ab_switch_seconds)
     SETTING_FORWARD_BOOL(m_gpu, ReadbackLinearImagesEnabled, readback_linear_images_enabled)
     SETTING_FORWARD_BOOL(m_gpu, DirectMemoryAccessEnabled, direct_memory_access_enabled)
     SETTING_FORWARD_BOOL_READONLY(m_gpu, PatchShaders, patch_shaders)

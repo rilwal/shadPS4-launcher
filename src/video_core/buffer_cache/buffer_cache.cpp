@@ -2,11 +2,15 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 #include <algorithm>
+#include <chrono>
+#include <optional>
 #include <magic_enum/magic_enum.hpp>
 #include <xxhash.h>
 
+#include "common/ab_switch.h"
 #include "common/alignment.h"
 #include "core/debug_state.h"
+#include "core/emulator_settings.h"
 #include "core/memory.h"
 #include "video_core/amdgpu/liverpool.h"
 #include "video_core/buffer_cache/buffer.h"
@@ -76,6 +80,9 @@ BufferCache::BufferCache(const Vulkan::Instance& instance_, Vulkan::Scheduler& s
       stream_buffer{instance, scheduler, MemoryType::Stream, STREAM_BUFFER_SIZE},
       gds_buffer{instance, 0, GDS_BUFFER_SIZE, MemoryType::Stream, "GDS Buffer"},
       memory_semaphore{instance} {
+    const u32 readbacks_mode = EmulatorSettings.GetReadbacksMode();
+    tracks_gpu_pages =
+        readbacks_mode == GpuReadbacksMode::Precise || readbacks_mode == GpuReadbacksMode::Fenced;
     const vk::BufferCreateInfo probe_ci = {
         .flags =
             vk::BufferCreateFlagBits::eSparseBinding | vk::BufferCreateFlagBits::eSparseResidency,
@@ -116,6 +123,8 @@ BufferCache::BufferCache(const Vulkan::Instance& instance_, Vulkan::Scheduler& s
 BufferCache::~BufferCache() = default;
 
 void BufferCache::TickFrame() {
+    ProcessLandings();
+    LogReadbackStats();
     if (std::exchange(fault_process_pending, false)) {
         fault_manager->ProcessFaultBuffer();
     }
@@ -139,6 +148,13 @@ void BufferCache::UnmarkRegionAsGpuModified(VAddr device_addr, u64 size, bool is
 void BufferCache::ReadMemory(VAddr device_addr, u64 size, bool is_write, bool async,
                              bool assume_locks) {
     const auto flush_request = [this, device_addr, size, is_write, async] {
+        if (tracks_gpu_pages && !is_write && !async) {
+            // A CPU read fault: remembered so fenced readbacks land this memory early from now
+            // on. Write faults, unmaps and GC evictions also come here, but don't count.
+            const VAddr page_start = Common::AlignDown(device_addr, BYTES_PER_PAGE);
+            cpu_read_ranges.Add(page_start,
+                                Common::AlignUp(device_addr + size, BYTES_PER_PAGE) - page_start);
+        }
         const u32 first_block = device_addr >> block_shift;
         const u32 last_block = (device_addr + size - 1) >> block_shift;
         const auto* arena = GetArena(first_block, last_block);
@@ -164,6 +180,12 @@ void BufferCache::ReadMemory(VAddr device_addr, u64 size, bool is_write, bool as
 }
 
 void BufferCache::DownloadMemory(const Buffer* arena, VAddr device_addr, u64 size, bool async) {
+    if (!landings.empty()) {
+        // Data already on its way back must land first, or it would overwrite what the CPU
+        // writes next. Then pages whose landing is done can simply be unprotected.
+        WaitForLandings(device_addr, size);
+        ProcessLandings();
+    }
     boost::container::small_vector<vk::BufferCopy, 1> copies;
     u64 total_size_bytes = 0;
     const VAddr arena_base = arena->cpu_addr;
@@ -185,6 +207,11 @@ void BufferCache::DownloadMemory(const Buffer* arena, VAddr device_addr, u64 siz
         gpu_modified_ranges.Subtract(address, size);
     });
     if (total_size_bytes == 0) {
+        if (tracks_gpu_pages && !async_downloads.Intersects(device_addr, size)) {
+            // Everything here has landed; nothing is left to protect. Unless an async download
+            // took it and hasn't written guest memory yet: then the fault retries until it has.
+            memory_tracker->UnmarkRegionAsGpuModified(device_addr, size, false);
+        }
         return;
     }
     const auto download =
@@ -193,6 +220,10 @@ void BufferCache::DownloadMemory(const Buffer* arena, VAddr device_addr, u64 siz
         copy.dstOffset += download.offset;
     }
     runtime.CopyBuffer(arena, download.buffer, copies);
+    if (!async) {
+        ++readback_stats.sync_downloads;
+        readback_stats.sync_download_bytes += total_size_bytes;
+    }
 
     const auto write_data = [this, arena_base, device_addr, size, download, async,
                              copies = std::move(copies)] {
@@ -206,14 +237,217 @@ void BufferCache::DownloadMemory(const Buffer* arena, VAddr device_addr, u64 siz
 
         if (async) {
             staging_pool.FreeDeferred(download);
+            if (--num_async_downloads == 0) {
+                async_downloads.Clear();
+            }
         }
     };
 
     if (async) {
+        // Pending operations run on this thread, at a submit.
+        async_downloads.Add(device_addr, size);
+        ++num_async_downloads;
         scheduler.DeferOperation(std::move(write_data));
     } else {
+        const auto stall_start = std::chrono::steady_clock::now();
         scheduler.Finish();
+        readback_stats.stall_ns += std::chrono::duration_cast<std::chrono::nanoseconds>(
+                                       std::chrono::steady_clock::now() - stall_start)
+                                       .count();
         write_data();
+    }
+}
+
+bool BufferCache::LandGpuModifiedMemory() {
+    ProcessLandings();
+
+    // Ranges above these sizes stay GPU-side and are read back by the fault path if the CPU
+    // ever touches them, so a big GPU-only buffer isn't copied at every fence.
+    constexpr u64 MaxRangeSize = 16_MB;
+    constexpr u64 MaxLandingSize = LandingRingSize / 4;
+    constexpr u64 CopyAlign = 64;
+
+    struct ArenaCopies {
+        const Buffer* arena;
+        boost::container::small_vector<vk::BufferCopy, 16> copies;
+    };
+    struct Write {
+        VAddr address;
+        u64 offset;
+        u64 size;
+    };
+    boost::container::small_vector<ArenaCopies, 2> arena_copies;
+    std::vector<Write> writes;
+    auto landing = std::make_shared<Landing>();
+    u64 total_size_bytes = 0;
+    const auto add_range = [&](VAddr start, VAddr end) {
+        while (start < end) {
+            const Buffer* arena = address_space[start >> ARENA_PAGE_BITS];
+            if (!arena) {
+                return;
+            }
+            const VAddr chunk_end = std::min<VAddr>(end, arena->cpu_addr + arena->size_bytes);
+            const u64 size = chunk_end - start;
+            if (size <= MaxRangeSize && total_size_bytes + size <= MaxLandingSize) {
+                if (arena_copies.empty() || arena_copies.back().arena != arena) {
+                    arena_copies.push_back({arena, {}});
+                }
+                arena_copies.back().copies.push_back(vk::BufferCopy{
+                    .srcOffset = start - arena->cpu_addr,
+                    .dstOffset = total_size_bytes,
+                    .size = size,
+                });
+                writes.push_back({start, total_size_bytes, size});
+                landing->ranges.Add(start, size);
+                total_size_bytes += Common::AlignUp(size, CopyAlign);
+            }
+            start = chunk_end;
+        }
+    };
+    // Only memory the CPU has read before lands early: most of what the GPU writes is never
+    // read back, and copying it all costs more than the occasional fault on the rest.
+    cpu_read_ranges.ForEach([&](VAddr start, VAddr end) {
+        gpu_modified_ranges.ForEachInRange(start, end - start, add_range);
+    });
+    if (total_size_bytes == 0) {
+        return false;
+    }
+
+    // Staging space comes from a ring of host memory owned by the landings. Landings finish in
+    // order, so the ring frees from its tail. When it's full, this fence skips landing: its
+    // ranges stay protected and are read back by the fault path if the CPU touches them.
+    if (!landing_ring) {
+        landing_ring = std::make_unique<Buffer>(instance, 0, LandingRingSize,
+                                                MemoryType::HostCached, "Readback Landing Ring");
+    }
+    u64 ring_start = landing_ring_head;
+    if (ring_start % LandingRingSize + total_size_bytes > LandingRingSize) {
+        ring_start = Common::AlignUp(ring_start, LandingRingSize); // wrap past the ring's end
+    }
+    const u64 ring_end = ring_start + total_size_bytes;
+    if (ring_end - landing_ring_tail.load(std::memory_order_acquire) > LandingRingSize) {
+        return false;
+    }
+    landing_ring_head = ring_end;
+    const u64 ring_offset = ring_start % LandingRingSize;
+
+    landing->ranges.ForEach(
+        [&](VAddr start, VAddr end) { gpu_modified_ranges.Subtract(start, end - start); });
+    scheduler.EndRendering();
+    for (auto& [arena, copies] : arena_copies) {
+        for (auto& copy : copies) {
+            copy.dstOffset += ring_offset;
+        }
+        runtime.CopyBuffer(arena, landing_ring.get(), copies);
+    }
+    ++readback_stats.landings;
+    readback_stats.landing_bytes += total_size_bytes;
+    landing->tick = scheduler.CurrentTick();
+    landings.push_back(landing);
+    scheduler.DeferPriorityOperation([this, ring_offset, total_size_bytes, ring_end,
+                                      landing = std::move(landing), writes = std::move(writes)] {
+        landing_ring->Invalidate(ring_offset, total_size_bytes);
+        const u8* mapped = landing_ring->mapped_data.data() + ring_offset;
+        for (const auto& write : writes) {
+            memory->TryWriteBacking(std::bit_cast<u8*>(write.address), mapped + write.offset,
+                                    write.size);
+        }
+        landing_ring_tail.store(ring_end, std::memory_order_release);
+        landing->done.store(true, std::memory_order_release);
+        landing->done.notify_all();
+    });
+    return true;
+}
+
+void BufferCache::ProcessLandings() {
+    while (!landings.empty() && landings.front()->done.load(std::memory_order_acquire)) {
+        const auto landing = std::move(landings.front());
+        landings.pop_front();
+        // Tracking is per page. A page is unprotected only if the GPU hasn't written it again
+        // since the copy was recorded and no later landing still has to fill it.
+        const auto is_current = [this](VAddr page) {
+            if (gpu_modified_ranges.Intersects(page, BYTES_PER_PAGE)) {
+                return false;
+            }
+            return std::ranges::none_of(landings, [page](const auto& pending) {
+                return pending->ranges.Intersects(page, BYTES_PER_PAGE);
+            });
+        };
+        landing->ranges.ForEach([&](VAddr start, VAddr end) {
+            const VAddr page_end = Common::AlignUp(end, BYTES_PER_PAGE);
+            std::optional<VAddr> run_start;
+            for (VAddr page = Common::AlignDown(start, BYTES_PER_PAGE); page < page_end;
+                 page += BYTES_PER_PAGE) {
+                const bool current = is_current(page);
+                if (current && !run_start) {
+                    run_start = page;
+                } else if (!current && run_start) {
+                    memory_tracker->UnmarkRegionAsGpuModified(*run_start, page - *run_start, false);
+                    run_start.reset();
+                }
+            }
+            if (run_start) {
+                memory_tracker->UnmarkRegionAsGpuModified(*run_start, page_end - *run_start, false);
+            }
+        });
+    }
+}
+
+void BufferCache::LogReadbackStats() {
+    constexpr u64 IntervalNs = 5'000'000'000ULL;
+    const u64 now = std::chrono::duration_cast<std::chrono::nanoseconds>(
+                        std::chrono::steady_clock::now().time_since_epoch())
+                        .count();
+    if (readback_stats.last_log_ns == 0) {
+        readback_stats =
+            ReadbackStats{.last_log_ns = now, .ab_switches = Common::AbSwitch::Switches()};
+        return;
+    }
+    // A window that spans an A/B switch would mix both variants: log what came before it.
+    if (now - readback_stats.last_log_ns >= IntervalNs ||
+        readback_stats.ab_switches != Common::AbSwitch::Switches()) {
+        FlushReadbackStats();
+    }
+}
+
+void BufferCache::FlushReadbackStats() {
+    const u64 now = std::chrono::duration_cast<std::chrono::nanoseconds>(
+                        std::chrono::steady_clock::now().time_since_epoch())
+                        .count();
+    auto& stats = readback_stats;
+    const double seconds = double(now - stats.last_log_ns) / 1e9;
+    if (seconds > 0.5 &&
+        (stats.sync_downloads != 0 || stats.landings != 0 || stats.deferred_fences != 0)) {
+        // While an A/B switch flips, the variant is the one before the switch.
+        const bool switched = stats.ab_switches != Common::AbSwitch::Switches();
+        const char* variant = Common::AbSwitch::Label();
+        if (variant && switched) {
+            variant = Common::AbSwitch::LabelOf(!Common::AbSwitch::IsB());
+        }
+        // Milliseconds of each second the GPU thread spent waiting.
+        LOG_INFO(Render,
+                 "Readbacks per second [{}] over {:.1f} s: {:.1f} stalling downloads ({:.1f} KB, "
+                 "{:.2f} ms stalled), {:.1f} fence landings ({:.1f} KB), fences {:.1f} deferred / "
+                 "{:.1f} immediate, {:.2f} ms throttled",
+                 variant ? variant : "-", seconds, stats.sync_downloads / seconds,
+                 stats.sync_download_bytes / 1024.0 / seconds, stats.stall_ns / 1e6 / seconds,
+                 stats.landings / seconds, stats.landing_bytes / 1024.0 / seconds,
+                 stats.deferred_fences / seconds, stats.immediate_fences / seconds,
+                 stats.throttle_ns / 1e6 / seconds);
+    }
+    stats = ReadbackStats{.last_log_ns = now, .ab_switches = Common::AbSwitch::Switches()};
+}
+
+void BufferCache::WaitForLandings(VAddr device_addr, u64 size) {
+    for (const auto& landing : landings) {
+        if (!landing->done.load(std::memory_order_acquire) &&
+            landing->ranges.Intersects(device_addr, size)) {
+            // Fenced signals submit lazily, so the copy may still be unsubmitted. The priority
+            // op only runs once the GPU is done with it, and this thread is the one that
+            // submits: Wait() flushes first if needed, or this would deadlock.
+            scheduler.Wait(landing->tick);
+            landing->done.wait(false, std::memory_order_acquire);
+        }
     }
 }
 

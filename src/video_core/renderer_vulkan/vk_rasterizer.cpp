@@ -1,6 +1,8 @@
 // SPDX-FileCopyrightText: Copyright 2024-2026 shadPS4 Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+#include <chrono>
+
 #include "common/debug.h"
 #include "core/debug_state.h"
 #include "core/emulator_settings.h"
@@ -43,6 +45,13 @@ Rasterizer::Rasterizer(const Instance& instance_, Scheduler& scheduler_, Runtime
       pipeline_cache{instance, scheduler, liverpool, buffer_cache.GetSparsePageShift()},
       host_markers_enabled{EmulatorSettings.IsVkHostMarkersEnabled()},
       guest_markers_enabled{EmulatorSettings.IsVkGuestMarkersEnabled()} {
+    const u32 readbacks_mode = EmulatorSettings.GetReadbacksMode();
+    fenced_readbacks = readbacks_mode == GpuReadbacksMode::Fenced;
+    if (fenced_readbacks || readbacks_mode == GpuReadbacksMode::Precise) {
+        // Both protect GPU-written pages the same way, so they can be switched live.
+        readbacks_ab =
+            Common::AbSwitch::Register("Precise readbacks", "Fenced readbacks", fenced_readbacks);
+    }
     if (!EmulatorSettings.IsNullGPU()) {
         liverpool->BindRasterizer(this);
     }
@@ -589,6 +598,18 @@ void Rasterizer::Finish() {
 
 void Rasterizer::OnSubmit() {
     pipeline_cache.TickCompileStats();
+    if (const u32 period_s = EmulatorSettings.GetAbSwitchSeconds();
+        period_s != 0 && Common::AbSwitch::IsRegistered()) {
+        const u64 now = std::chrono::duration_cast<std::chrono::nanoseconds>(
+                            std::chrono::steady_clock::now().time_since_epoch())
+                            .count();
+        if (last_ab_switch_ns == 0) {
+            last_ab_switch_ns = now;
+        } else if (now - last_ab_switch_ns >= u64{period_s} * 1'000'000'000ULL) {
+            last_ab_switch_ns = now;
+            Common::AbSwitch::Toggle();
+        }
+    }
     buffer_cache.TickFrame();
     texture_cache.ProcessDownloadImages();
     texture_cache.RunGarbageCollector();
@@ -597,6 +618,95 @@ void Rasterizer::OnSubmit() {
 
 void Rasterizer::OnFence() {
     texture_cache.ProcessDownloadImages();
+}
+
+bool Rasterizer::DeferFenceSignal(Common::UniqueFunction<void>&& signal, bool throttle) {
+    const bool fenced = IsFencedReadbacks();
+    const bool pending = deferred_signals_in_flight.load(std::memory_order_acquire) != 0;
+    if (!fenced && !pending) {
+        return false;
+    }
+    const auto now = std::chrono::steady_clock::now();
+
+    // Landing at every fence costs a copy and a submit each, and some games signal thousands of
+    // fences a second. Skipping one is always safe: what it would have landed stays protected,
+    // so a CPU read of it takes the fault path as with Precise. So buffers land only at the
+    // end-of-frame fences, and at most every MinLandingInterval at the others.
+    constexpr auto MinLandingInterval = std::chrono::milliseconds{1};
+    const bool land = fenced && (throttle || now - last_landing >= MinLandingInterval);
+
+    // Priority operations run in order once the GPU reaches their tick, so the image and
+    // buffer data queued here land in guest memory before the signal runs. Right after an
+    // A/B switch away from Fenced, signals still queue behind the pending ones to stay in order.
+    bool images = false;
+    bool buffers = false;
+    if (fenced) {
+        images = texture_cache.ProcessDownloadImages(true);
+        if (land) {
+            buffers = buffer_cache.LandGpuModifiedMemory();
+            last_landing = now;
+        }
+    } else {
+        OnFence();
+    }
+    if (!images && !buffers && !pending) {
+        // Nothing for the guest to wait for, and no earlier signal to stay behind:
+        // signal now, so the guest can run ahead as before.
+        signal();
+        buffer_cache.RecordFence(false, 0);
+        return true;
+    }
+    deferred_signals_in_flight.fetch_add(1, std::memory_order_relaxed);
+    if (throttle) {
+        throttled_fences_in_flight.fetch_add(1, std::memory_order_relaxed);
+    }
+    scheduler.DeferPriorityOperation([this, signal = std::move(signal), throttle]() mutable {
+        signal();
+        deferred_signals_in_flight.fetch_sub(1, std::memory_order_release);
+        if (throttle) {
+            throttled_fences_in_flight.fetch_sub(1, std::memory_order_release);
+            throttled_fences_in_flight.notify_all();
+        }
+    });
+
+    // The signal runs once its tick is submitted and done. Submitting at every fence is costly,
+    // so it waits for the next submit, unless this is a frame's end or it has waited too long.
+    // The command processor also submits when it is about to wait (FlushFenceSignals).
+    if (unsubmitted_signal_tick != scheduler.CurrentTick()) {
+        unsubmitted_signal_tick = scheduler.CurrentTick();
+        unsubmitted_signal_since = now;
+    }
+    constexpr auto MaxSignalLatency = std::chrono::milliseconds{1};
+    if (throttle || now - unsubmitted_signal_since >= MaxSignalLatency) {
+        Flush();
+    }
+
+    // The guest learns about GPU progress later than before, so it can queue more frames.
+    // Some games assert when they're 3+ frames behind; keep the command processor close.
+    constexpr u32 MaxThrottledFencesInFlight = 2;
+    u64 throttle_ns = 0;
+    if (throttle) {
+        u32 in_flight = throttled_fences_in_flight.load(std::memory_order_acquire);
+        if (in_flight > MaxThrottledFencesInFlight) {
+            const auto start = std::chrono::steady_clock::now();
+            while (in_flight > MaxThrottledFencesInFlight) {
+                throttled_fences_in_flight.wait(in_flight, std::memory_order_acquire);
+                in_flight = throttled_fences_in_flight.load(std::memory_order_acquire);
+            }
+            throttle_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(
+                              std::chrono::steady_clock::now() - start)
+                              .count();
+        }
+    }
+    buffer_cache.RecordFence(true, throttle_ns);
+    return true;
+}
+
+void Rasterizer::FlushFenceSignals() {
+    if (unsubmitted_signal_tick == scheduler.CurrentTick() &&
+        deferred_signals_in_flight.load(std::memory_order_acquire) != 0) {
+        Flush();
+    }
 }
 
 bool Rasterizer::BindResources(const Pipeline* pipeline) {
