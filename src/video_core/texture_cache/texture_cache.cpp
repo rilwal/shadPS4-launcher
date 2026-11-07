@@ -107,13 +107,19 @@ TextureCache::TextureCache(const Vulkan::Instance& instance_, Vulkan::Scheduler&
 TextureCache::~TextureCache() = default;
 
 bool TextureCache::ProcessDownloadImages(bool priority) {
-    {
+    // Called at every fence (tens of thousands a second in some games), so the usual case of
+    // nothing to do skips the locks.
+    if (any_priority_frees.load(std::memory_order_acquire)) {
         // The staging pool belongs to this thread, so priority downloads free their buffer here.
         std::scoped_lock lk{priority_frees_mutex};
         for (const auto& download : priority_frees) {
             runtime.GetStagingPool().FreeDeferred(download);
         }
         priority_frees.clear();
+        any_priority_frees.store(false, std::memory_order_relaxed);
+    }
+    if (!any_download_images.load(std::memory_order_acquire)) {
+        return false;
     }
     std::unique_lock lk{download_images_mutex};
     if (download_images.empty()) {
@@ -124,6 +130,7 @@ bool TextureCache::ProcessDownloadImages(bool priority) {
         DownloadImageMemory(image_id, flags);
     }
     download_images.clear();
+    any_download_images.store(false, std::memory_order_relaxed);
     return true;
 }
 
@@ -187,6 +194,7 @@ void TextureCache::DownloadImageMemory(ImageId image_id, DownloadMemoryFlags fla
             // This runs on the priority thread, which must not touch the staging pool.
             std::scoped_lock lk{priority_frees_mutex};
             priority_frees.push_back(download);
+            any_priority_frees.store(true, std::memory_order_release);
         } else if (!is_sync) {
             runtime.GetStagingPool().FreeDeferred(download);
         }
@@ -750,6 +758,7 @@ ImageView& TextureCache::FindTexture(ImageId image_id, const ImageDesc& desc) {
             image.info.guest_address != 0) {
             std::unique_lock lk{download_images_mutex};
             download_images.emplace(image_id);
+            any_download_images.store(true, std::memory_order_release);
         }
     }
     UpdateImage(image_id);
@@ -787,6 +796,7 @@ ImageView& TextureCache::FindRenderTarget(ImageId image_id, const ImageDesc& des
     if (readback_linear_images && (!image.info.props.is_tiled || image.info.size.width <= 8)) {
         std::unique_lock lk{download_images_mutex};
         download_images.emplace(image_id);
+        any_download_images.store(true, std::memory_order_release);
     }
     image.usage.render_target = 1u;
     UpdateImage(image_id);
@@ -1292,6 +1302,7 @@ void TextureCache::DeleteImage(ImageId image_id) {
         std::unique_lock lk{download_images_mutex};
         if (download_images.contains(image_id)) {
             download_images.erase(image_id);
+            any_download_images.store(!download_images.empty(), std::memory_order_release);
         }
     }
 

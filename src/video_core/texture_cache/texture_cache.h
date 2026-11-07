@@ -3,6 +3,8 @@
 
 #pragma once
 
+#include <atomic>
+
 #include <mutex>
 #include <optional>
 #include <thread>
@@ -427,6 +429,9 @@ private:
     Common::LRUCache<Sampler> sampler_lru_cache;
     const bool readback_linear_images;
     std::mutex download_images_mutex;
+    /// Whether download_images / priority_frees may be non-empty, read without their locks.
+    std::atomic<bool> any_download_images{};
+    std::atomic<bool> any_priority_frees{};
     /// Staging buffers of priority downloads, freed back on the GPU thread.
     std::mutex priority_frees_mutex;
     std::vector<Vulkan::StagingBufferRef> priority_frees;
