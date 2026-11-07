@@ -272,6 +272,11 @@ void MemoryManager::NoteWatchedWrite(VAddr address, u64 size, const void* data, 
         if (watched < address || watched >= address + size) {
             continue;
         }
+        if (!data) {
+            LOG_INFO(Core, "Watched {:#x}: {} wrote it ({} bytes at {:#x}) on thread {:#x}",
+                     watched, what, size, address, ThreadTag());
+            continue;
+        }
         u32 dword = 0;
         const u64 offset = Common::AlignDown(watched - address, 4);
         std::memcpy(&dword, static_cast<const u8*>(data) + offset,

@@ -83,10 +83,14 @@ public:
         submit_cv.notify_one();
     }
 
-    /// Idle means every submission processed and every fence signal it deferred written:
-    /// the guest may reuse that memory once the GPU is idle.
-    void WaitGpuIdle() noexcept;
-    bool IsGpuIdle() const;
+    void WaitGpuIdle() noexcept {
+        std::unique_lock lk{submit_mutex};
+        submit_cv.wait(lk, [this] { return num_submits == 0; });
+    }
+
+    bool IsGpuIdle() const {
+        return num_submits == 0;
+    }
 
     void SetVoPort(Libraries::VideoOut::VideoOutPort* port) {
         vo_port = port;
@@ -219,8 +223,15 @@ private:
     bool DeferFenceSignal(Common::UniqueFunction<void>&& signal, bool throttle,
                           const LabelWrites& writes);
 
-    /// Drops deferred label values the command processor itself overwrites.
-    void ForgetDeferredLabels(VAddr address, u64 size);
+    /// Call before the command processor writes guest memory itself (WRITE_DATA, DMA_DATA,
+    /// semaphores...). On hardware those writes happen in order after any wait that read a
+    /// label, so after that label's write. Here a deferred label may still be on its way, so
+    /// this waits for it if the write overlaps one, or follows a wait that read a deferred
+    /// value: otherwise the late label write lands over this one (TLG's compute stall), or
+    /// the guest learns of progress before the label it waited behind is written. Then drops
+    /// the deferred values this write replaces. `data` (may be null) and `what` are for the
+    /// SHADPS4_WATCH_ADDR log.
+    void OrderCpWrite(VAddr address, u64 size, const void* data, const char* what);
 
     /// Tests a WAIT_REG_MEM condition. A label whose signal is deferred reads as its new value.
     bool TestWait(const PM4CmdWaitRegMem* wait);
@@ -281,9 +292,14 @@ private:
     size_t deferred_labels_cleanup_at{256};
     u64 deferred_label_seq{};
     std::atomic<u64> landed_label_seq{};
+    /// The newest deferred signal a queue wait passed on: the command processor's own memory
+    /// writes after that wait must land after it.
+    u64 cp_order_seq{};
     struct WaitStats {
         u64 failed_polls{};
         u64 deferred_label_hits{};
+        u64 order_waits{};
+        u64 order_wait_ns{};
         u64 last_log_ns{};
         u64 ab_switches{};
     } wait_stats;

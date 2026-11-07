@@ -170,22 +170,6 @@ void Liverpool::ProcessCommands() {
     }
 }
 
-void Liverpool::WaitGpuIdle() noexcept {
-    {
-        std::unique_lock lk{submit_mutex};
-        submit_cv.wait(lk, [this] { return num_submits == 0; });
-    }
-    // The command processor submits deferred signals on going idle; a late one would land on
-    // memory the guest reuses once it thinks the GPU is done.
-    if (rasterizer) {
-        rasterizer->WaitForFenceSignals();
-    }
-}
-
-bool Liverpool::IsGpuIdle() const {
-    return num_submits == 0 && (!rasterizer || !rasterizer->FenceSignalsPending());
-}
-
 void Liverpool::Process(std::stop_token stoken) {
     Common::SetCurrentThreadName("shadPS4:GpuCommandProcessor");
     gpu_id = std::this_thread::get_id();
@@ -310,15 +294,20 @@ void Liverpool::Process(std::stop_token stoken) {
             // Going idle: the guest may be waiting on a deferred fence signal.
             rasterizer->FlushFenceSignals();
         }
-        // Deferred fence signals still to run would write labels after the guest hears the
-        // GPU is idle, by when it may have reused that memory (Bloodborne wrote one over a
-        // command buffer that way).
-        if (rasterizer) {
-            rasterizer->WaitForFenceSignals();
-        }
 
         Platform::IrqC::Instance()->Signal(Platform::InterruptId::GpuIdle);
     }
+}
+
+/// What a DMA_DATA writes to memory, for the SHADPS4_WATCH_ADDR log: its source when that is
+/// memory, null otherwise (a fill's value is in the packet, but only once).
+static const void* DmaDataForWatch(const PM4DmaData* dma_data) {
+    if (dma_data->src_sel == DmaDataSrc::Memory || dma_data->src_sel == DmaDataSrc::MemoryUsingL2) {
+        return dma_data->SrcAddress<const void*>();
+    }
+    return dma_data->src_sel == DmaDataSrc::Data && dma_data->NumBytes() <= sizeof(u32)
+               ? &dma_data->data
+               : nullptr;
 }
 
 void Liverpool::LogBadPacket(const u32* packet, size_t remaining_dwords) {
@@ -358,6 +347,7 @@ bool Liverpool::DeferFenceSignal(Common::UniqueFunction<void>&& signal, bool thr
             signal();
             // Deferred signals run in order, so this one landing means all before it have.
             landed_label_seq.store(seq, std::memory_order_release);
+            landed_label_seq.notify_all();
         },
         throttle);
     if (!deferred) {
@@ -385,21 +375,61 @@ bool Liverpool::DeferFenceSignal(Common::UniqueFunction<void>&& signal, bool thr
     return true;
 }
 
-void Liverpool::ForgetDeferredLabels(VAddr address, u64 size) {
-    if (deferred_labels.empty() || size == 0) {
+void Liverpool::OrderCpWrite(VAddr address, u64 size, const void* data, const char* what) {
+    Core::MemoryManager::NoteWatchedWrite(address, size, data, what);
+    if (size == 0) {
         return;
     }
-    // The command processor wrote here itself, after the deferred signals: its own waits must
-    // now read this value from memory, as they would without deferral.
+    const u64 landed = landed_label_seq.load(std::memory_order_acquire);
+    u64 need = cp_order_seq;
     const VAddr end = address + size;
-    if (size / sizeof(u32) <= deferred_labels.size()) {
-        for (VAddr dword = Common::AlignDown(address, sizeof(u32)); dword < end;
-             dword += sizeof(u32)) {
+    const VAddr first_dword = Common::AlignDown(address, sizeof(u32));
+    const bool walk_dwords = (end - first_dword) / sizeof(u32) <= deferred_labels.size();
+    const auto for_each_overlap = [&](auto&& func) {
+        if (walk_dwords) {
+            for (VAddr dword = first_dword; dword < end; dword += sizeof(u32)) {
+                if (const auto it = deferred_labels.find(dword); it != deferred_labels.end()) {
+                    func(it->second);
+                }
+            }
+        } else {
+            for (const auto& [label, deferred] : deferred_labels) {
+                if (label >= first_dword && label < end) {
+                    func(deferred);
+                }
+            }
+        }
+    };
+    if (!deferred_labels.empty()) {
+        for_each_overlap(
+            [&](const DeferredLabel& deferred) { need = std::max(need, deferred.seq); });
+    }
+    if (need > landed && rasterizer) {
+        // Only the GPU work queued before the signal is waited for, as hardware would have
+        // at the wait. The signal's tick may not be submitted yet.
+        const auto start = std::chrono::steady_clock::now();
+        rasterizer->FlushFenceSignals();
+        u64 now_landed = landed_label_seq.load(std::memory_order_acquire);
+        while (now_landed < need) {
+            landed_label_seq.wait(now_landed, std::memory_order_acquire);
+            now_landed = landed_label_seq.load(std::memory_order_acquire);
+        }
+        ++wait_stats.order_waits;
+        wait_stats.order_wait_ns += std::chrono::duration_cast<std::chrono::nanoseconds>(
+                                        std::chrono::steady_clock::now() - start)
+                                        .count();
+    }
+    if (deferred_labels.empty()) {
+        return;
+    }
+    // The command processor's own waits must now read this write from memory.
+    if (walk_dwords) {
+        for (VAddr dword = first_dword; dword < end; dword += sizeof(u32)) {
             deferred_labels.erase(dword);
         }
     } else {
-        std::erase_if(deferred_labels, [address, end](const auto& entry) {
-            return entry.first >= address && entry.first < end;
+        std::erase_if(deferred_labels, [first_dword, end](const auto& entry) {
+            return entry.first >= first_dword && entry.first < end;
         });
     }
 }
@@ -411,6 +441,8 @@ bool Liverpool::TestWait(const PM4CmdWaitRegMem* wait) {
             if (it->second.seq > landed_label_seq.load(std::memory_order_acquire)) {
                 ++wait_stats.deferred_label_hits;
                 if (wait->TestValue(it->second.value)) {
+                    // Past this wait, hardware would have the label in memory already.
+                    cp_order_seq = std::max(cp_order_seq, it->second.seq);
                     return true;
                 }
                 ++wait_stats.failed_polls;
@@ -442,16 +474,18 @@ void Liverpool::LogWaitStats() {
         return;
     }
     const double seconds = double(now - wait_stats.last_log_ns) / 1e9;
-    if (seconds > 0.5 && (wait_stats.failed_polls != 0 || wait_stats.deferred_label_hits != 0)) {
+    if (seconds > 0.5 && (wait_stats.failed_polls != 0 || wait_stats.deferred_label_hits != 0 ||
+                          wait_stats.order_waits != 0)) {
         const char* variant = Common::AbSwitch::Label();
         if (variant && switched) {
             variant = Common::AbSwitch::LabelOf(!Common::AbSwitch::IsB());
         }
         LOG_INFO(Render,
                  "Queue waits per second [{}] over {:.1f} s: {:.0f} polls failed, {:.0f} read a "
-                 "deferred label",
+                 "deferred label, {:.0f} writes waited for one ({:.2f} ms)",
                  variant ? variant : "-", seconds, wait_stats.failed_polls / seconds,
-                 wait_stats.deferred_label_hits / seconds);
+                 wait_stats.deferred_label_hits / seconds, wait_stats.order_waits / seconds,
+                 wait_stats.order_wait_ns / 1e6 / seconds);
     }
     wait_stats = WaitStats{.last_log_ns = now, .ab_switches = switches};
 }
@@ -1187,6 +1221,8 @@ Liverpool::Task Liverpool::ProcessGraphics(std::span<const u32> dcb) {
                         static constexpr u64 OcclusionCounterValidMask = 0x8000000000000000ULL;
                         static constexpr u64 OcclusionCounterStep = 0x2FFFFFFULL;
                         u64* results = event->Address<u64*>();
+                        OrderCpWrite(event->Address<VAddr>(), num_counter_pairs * 16, nullptr,
+                                     "a pixel counter dump");
                         for (s32 i = 0; i < num_counter_pairs; ++i, results += 2) {
                             *results = pixel_counter | OcclusionCounterValidMask;
                         }
@@ -1221,6 +1257,8 @@ Liverpool::Task Liverpool::ProcessGraphics(std::span<const u32> dcb) {
                     if (rasterizer) {
                         rasterizer->Finish();
                         const u32 value = rasterizer->ReadDataFromGds(event_eos->gds_index);
+                        OrderCpWrite(std::bit_cast<VAddr>(event_eos->Address()), sizeof(value),
+                                     &value, "an EOS GDS store");
                         *event_eos->Address() = value;
                     }
                 }
@@ -1260,7 +1298,8 @@ Liverpool::Task Liverpool::ProcessGraphics(std::span<const u32> dcb) {
                 ASSERT(dma_data->command.das == 0);
                 if (dma_data->dst_sel == DmaDataDst::Memory ||
                     dma_data->dst_sel == DmaDataDst::MemoryUsingL2) {
-                    ForgetDeferredLabels(dma_data->DstAddress<VAddr>(), dma_data->NumBytes());
+                    OrderCpWrite(dma_data->DstAddress<VAddr>(), dma_data->NumBytes(),
+                                 DmaDataForWatch(dma_data), "a DMA_DATA");
                 }
                 if (dma_data->src_sel == DmaDataSrc::Data && dma_data->dst_sel == DmaDataDst::Gds) {
                     rasterizer->FillBuffer(dma_data->dst_addr_lo, dma_data->NumBytes(),
@@ -1302,7 +1341,8 @@ Liverpool::Task Liverpool::ProcessGraphics(std::span<const u32> dcb) {
                     if (rasterizer) {
                         rasterizer->OnFence();
                     }
-                    ForgetDeferredLabels(std::bit_cast<VAddr>(address), data_size);
+                    OrderCpWrite(std::bit_cast<VAddr>(address), data_size, write_data->data,
+                                 "a WRITE_DATA");
                     std::memcpy(address, write_data->data, data_size);
                 } else {
                     UNREACHABLE();
@@ -1322,6 +1362,8 @@ Liverpool::Task Liverpool::ProcessGraphics(std::span<const u32> dcb) {
             case PM4ItOpcode::MemSemaphore: {
                 const auto* mem_semaphore = reinterpret_cast<const PM4CmdMemSemaphore*>(header);
                 if (mem_semaphore->IsSignaling()) {
+                    OrderCpWrite(mem_semaphore->Address<VAddr>(), sizeof(u64), nullptr,
+                                 "a semaphore signal");
                     mem_semaphore->Signal();
                 } else {
                     while (!mem_semaphore->Signaled()) {
@@ -1570,7 +1612,8 @@ Liverpool::Task Liverpool::ProcessCompute(std::span<const u32> acb, u32 vqid) {
             ASSERT(dma_data->command.das == 0);
             if (dma_data->dst_sel == DmaDataDst::Memory ||
                 dma_data->dst_sel == DmaDataDst::MemoryUsingL2) {
-                ForgetDeferredLabels(dma_data->DstAddress<VAddr>(), dma_data->NumBytes());
+                OrderCpWrite(dma_data->DstAddress<VAddr>(), dma_data->NumBytes(),
+                             DmaDataForWatch(dma_data), "a DMA_DATA");
             }
             if (dma_data->src_sel == DmaDataSrc::Data && dma_data->dst_sel == DmaDataDst::Gds) {
                 rasterizer->FillBuffer(dma_data->dst_addr_lo, dma_data->NumBytes(), dma_data->data,
@@ -1700,7 +1743,8 @@ Liverpool::Task Liverpool::ProcessCompute(std::span<const u32> acb, u32 vqid) {
                 if (rasterizer) {
                     rasterizer->OnFence();
                 }
-                ForgetDeferredLabels(write_data->Address<VAddr>(), data_size);
+                OrderCpWrite(write_data->Address<VAddr>(), data_size, write_data->data,
+                             "a WRITE_DATA");
                 std::memcpy(write_data->Address<void*>(), write_data->data, data_size);
             } else {
                 UNREACHABLE();
@@ -1710,6 +1754,8 @@ Liverpool::Task Liverpool::ProcessCompute(std::span<const u32> acb, u32 vqid) {
         case PM4ItOpcode::MemSemaphore: {
             const auto* mem_semaphore = reinterpret_cast<const PM4CmdMemSemaphore*>(header);
             if (mem_semaphore->IsSignaling()) {
+                OrderCpWrite(mem_semaphore->Address<VAddr>(), sizeof(u64), nullptr,
+                             "a semaphore signal");
                 mem_semaphore->Signal();
             } else {
                 while (!mem_semaphore->Signaled()) {
