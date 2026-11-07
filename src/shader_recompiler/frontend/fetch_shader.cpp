@@ -79,14 +79,20 @@ bool ParseFetchShader(const Shader::Info& info, FetchShaderData& out_fetch_data)
     std::array<VsharpLoad, 104> loads{};
 
     // Parsed from a copy where the reader can make one; past the copy's end, from the guest.
+    // Shorter copies are tried when a long one fails, since GPU data pending or an unmapped page
+    // a little past a short fetch shader shouldn't send the whole parse to the guest.
     const auto* code = GetFetchShaderCode(info, info.fetch_shader_sgpr_base);
     std::array<u32, 128> copy;
     const u32* begin = code;
     const u32* end = nullptr;
-    if (guest_code_reader &&
-        guest_code_reader(std::bit_cast<VAddr>(code), copy.data(), sizeof(copy))) {
-        begin = copy.data();
-        end = copy.data() + copy.size();
+    if (guest_code_reader) {
+        for (u64 dwords = copy.size(); dwords >= 16; dwords /= 2) {
+            if (guest_code_reader(std::bit_cast<VAddr>(code), copy.data(), dwords * 4)) {
+                begin = copy.data();
+                end = copy.data() + dwords;
+                break;
+            }
+        }
     }
     const u32* ptr = begin;
     while (true) {
