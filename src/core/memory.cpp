@@ -166,6 +166,12 @@ void MemoryManager::CopySparseMemory(VAddr virtual_addr, u8* dest, u64 size) {
 namespace {
 template <typename Func>
 bool ForEachBackingPage(const AddressSpace& impl, VAddr address, u64 size, Func&& func) {
+    // The table covers only the low ADDRESS_SPACE_BITS of the address space and indexes past its
+    // end above that (memory up there has no backing pages; see AddressSpace::Map).
+    constexpr u64 TableEnd = 1ULL << AddressSpace::Traits::ADDRESS_SPACE_BITS;
+    if (size == 0 || address >= TableEnd || size > TableEnd - address) {
+        return false;
+    }
     const auto& backing_pages = impl.BackingPages();
     for (VAddr page = address >> GUEST_PAGE_BITS; page <= (address + size - 1) >> GUEST_PAGE_BITS;
          ++page) {

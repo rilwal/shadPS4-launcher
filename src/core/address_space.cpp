@@ -844,11 +844,13 @@ AddressSpace::~AddressSpace() = default;
 
 void* AddressSpace::Map(VAddr virtual_addr, u64 size, PAddr phys_addr, bool is_exec) {
     const VAddr end_addr = virtual_addr + size - 1;
-    if (phys_addr != -1 && std::bit_width(end_addr) <= Traits::ADDRESS_SPACE_BITS) {
+    if (std::bit_width(end_addr) <= Traits::ADDRESS_SPACE_BITS) {
+        // Memory without a physical address has no backing: clear what an earlier mapping left,
+        // so nothing reads it through stale backing pages.
         const u64 base_page = virtual_addr >> Traits::PAGE_BITS;
         for (u64 offset = 0; offset < size; offset += 16_KB) {
             backing_pages[base_page + (offset >> Traits::PAGE_BITS)] =
-                backing_base + phys_addr + offset;
+                phys_addr != -1 ? backing_base + phys_addr + offset : nullptr;
         }
     }
 #if ARCH_X86_64
@@ -862,6 +864,12 @@ void* AddressSpace::Map(VAddr virtual_addr, u64 size, PAddr phys_addr, bool is_e
 }
 
 void* AddressSpace::MapFile(VAddr virtual_addr, u64 size, u64 offset, u32 prot, uintptr_t fd) {
+    if (std::bit_width(virtual_addr + size - 1) <= Traits::ADDRESS_SPACE_BITS) {
+        const u64 base_page = virtual_addr >> Traits::PAGE_BITS;
+        for (u64 page_offset = 0; page_offset < size; page_offset += 16_KB) {
+            backing_pages[base_page + (page_offset >> Traits::PAGE_BITS)] = nullptr;
+        }
+    }
 #ifdef _WIN32
     return impl->Map(virtual_addr, offset, size,
                      ToWindowsProt(std::bit_cast<Core::MemoryProt>(prot)), fd);
