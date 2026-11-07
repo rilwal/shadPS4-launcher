@@ -134,6 +134,11 @@ private:
         u64 page_index = cpu_address >> HIGHER_PAGE_BITS;
         u64 page_offset = cpu_address & HIGHER_PAGE_MASK;
         while (remaining_size > 0) {
+            // Nothing above the tracked address space is tracked (the guest has addresses
+            // there, e.g. shader code read through the backing).
+            if (page_index >= NUM_HIGH_PAGES) {
+                break;
+            }
             const u64 copy_amount = std::min(HIGHER_PAGE_SIZE - page_offset, remaining_size);
             if (auto* region = top_tier[page_index]; region) {
                 if constexpr (BOOL_BREAK) {
