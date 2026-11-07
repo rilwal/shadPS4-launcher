@@ -3,6 +3,7 @@
 
 #include <algorithm>
 #include <chrono>
+#include <cstdlib>
 #include <cstring>
 #include <optional>
 #ifndef _WIN32
@@ -167,13 +168,13 @@ bool BufferCache::ReadMemoryForLoad(VAddr device_addr, u64 size, VAddr load_addr
     const auto read = [&] {
         if (load_size == 0) {
             ++unsupported_loads[mnemonic];
-        } else if (!GpuBytesPending(load_addr, load_size) &&
+        } else if (!GpuBytesPending(load_addr, load_size) && TakeFaultLoadBudget(load_addr) &&
                    memory->ReadBackingPages(load_addr, data, load_size)) {
             // Only bytes the CPU has the current data of: guest memory has them already.
             ++readback_stats.served_loads;
             served = true;
             return;
-        } else {
+        } else if (GpuBytesPending(load_addr, load_size)) {
             ++readback_stats.gpu_byte_loads;
         }
         ReadMemoryNow(device_addr, size, false, false);
@@ -192,7 +193,8 @@ bool BufferCache::CopyMemoryForLoad(VAddr device_addr, u64 size, VAddr src, VAdd
     bool served = false;
     const auto copy = [&] {
         // A pending landing into the destination would overwrite the copy later.
-        if (!GpuBytesPending(src, bytes) && !GpuBytesPending(dst, bytes)) {
+        if (!GpuBytesPending(src, bytes) && !GpuBytesPending(dst, bytes) &&
+            TakeFaultLoadBudget(device_addr)) {
             copy_scratch.resize(bytes);
             if (memory->ReadBackingPages(src, copy_scratch.data(), bytes) &&
                 write_dst(copy_scratch.data())) {
@@ -202,7 +204,7 @@ bool BufferCache::CopyMemoryForLoad(VAddr device_addr, u64 size, VAddr src, VAdd
                 served = true;
                 return;
             }
-        } else {
+        } else if (GpuBytesPending(src, bytes) || GpuBytesPending(dst, bytes)) {
             ++readback_stats.gpu_byte_loads;
         }
         ReadMemoryNow(device_addr, size, false, false);
@@ -213,6 +215,25 @@ bool BufferCache::CopyMemoryForLoad(VAddr device_addr, u64 size, VAddr src, VAdd
         liverpool->SendCommand<true>(copy);
     }
     return served;
+}
+
+bool BufferCache::TakeFaultLoadBudget(VAddr address) {
+    static const u32 budget = [] {
+        const char* env = std::getenv("SHADPS4_FAULT_LOAD_BUDGET");
+        return env ? static_cast<u32>(std::strtoul(env, nullptr, 10)) : 64u;
+    }();
+    constexpr u64 WindowNs = 16'000'000;
+    const u64 now = VideoCore::PerfStats::NowNs();
+    auto& page = fault_load_budgets[address >> 12];
+    if (now - page.window_start_ns > WindowNs) {
+        page = {now, 0};
+    }
+    if (page.served >= budget) {
+        ++readback_stats.over_budget_loads;
+        return false;
+    }
+    ++page.served;
+    return true;
 }
 
 void BufferCache::NoteGpuThreadReadFault(u64 instruction, bool served) {
@@ -577,7 +598,8 @@ void BufferCache::FlushReadbackStats() {
                  ns[1] / 1e6 / seconds, n[2] / seconds, ns[2] / 1e6 / seconds, n[3] / seconds,
                  ns[3] / 1e6 / seconds, stats.skipped_landings / seconds,
                  stats.full_ring_landings / seconds);
-        if (stats.served_loads != 0 || stats.gpu_byte_loads != 0 || !unsupported_loads.empty()) {
+        if (stats.served_loads != 0 || stats.gpu_byte_loads != 0 || stats.over_budget_loads != 0 ||
+            !unsupported_loads.empty()) {
             std::vector<std::pair<u16, u32>> loads(unsupported_loads.begin(),
                                                    unsupported_loads.end());
             const size_t shown = std::min<size_t>(loads.size(), 5);
@@ -592,10 +614,12 @@ void BufferCache::FlushReadbackStats() {
             }
             LOG_INFO(Render,
                      "Read faults per second [{}]: {:.1f} served from guest memory (no GPU bytes; "
-                     "{:.1f} movs copies, {:.1f} KB), {:.1f} read GPU bytes; not decoded: {}",
+                     "{:.1f} movs copies, {:.1f} KB), {:.1f} read GPU bytes, {:.1f} read back "
+                     "over their page's budget; not decoded: {}",
                      variant ? variant : "-", stats.served_loads / seconds,
                      stats.served_copies / seconds, stats.served_copy_bytes / 1024.0 / seconds,
-                     stats.gpu_byte_loads / seconds, top.empty() ? "none" : top);
+                     stats.gpu_byte_loads / seconds, stats.over_budget_loads / seconds,
+                     top.empty() ? "none" : top);
         }
         if (n[1] != 0) {
             std::vector<std::pair<VAddr, FaultPage>> pages(fault_pages.begin(), fault_pages.end());
@@ -634,6 +658,7 @@ void BufferCache::FlushReadbackStats() {
     }
     gpu_thread_fault_sites.clear();
     fault_pages.clear();
+    fault_load_budgets.clear();
     unsupported_loads.clear();
     stats = ReadbackStats{.last_log_ns = now, .ab_switches = Common::AbSwitch::Switches()};
 }

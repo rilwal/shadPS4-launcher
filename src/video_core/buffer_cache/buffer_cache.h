@@ -275,6 +275,16 @@ private:
     /// Read faults whose load the handler couldn't decode, by mnemonic, this stats window.
     std::unordered_map<u16, u32> unsupported_loads;
 
+    /// Whether a page may have another load served from guest memory. Each served load leaves
+    /// its page protected, so a page read many times (a loop, or the GPU thread parsing
+    /// commands) would fault on every read: past a budget per 16 ms it's read back instead.
+    bool TakeFaultLoadBudget(VAddr address);
+    struct FaultLoadBudget {
+        u64 window_start_ns;
+        u32 served;
+    };
+    std::unordered_map<VAddr, FaultLoadBudget> fault_load_budgets;
+
     /// GPU-thread read faults this stats window by instruction address: count, served count.
     std::unordered_map<u64, std::pair<u32, u32>> gpu_thread_fault_sites;
 
@@ -312,6 +322,8 @@ private:
         /// The movs copies among them, and the bytes they copied.
         u64 served_copies{};
         u64 served_copy_bytes{};
+        /// Loads read back because their page had used its budget of served loads.
+        u64 over_budget_loads{};
         u64 last_log_ns{};
         u64 ab_switches{};
     } readback_stats;
