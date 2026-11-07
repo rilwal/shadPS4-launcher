@@ -3,6 +3,7 @@
 
 #pragma once
 
+#include <functional>
 #include "common/small_vector.h"
 #include "common/types.h"
 #include "shader_recompiler/info.h"
@@ -102,5 +103,11 @@ struct FetchShaderData {
 const u32* GetFetchShaderCode(const Info& info, u32 sgpr_base);
 
 bool ParseFetchShader(const Shader::Info& info, FetchShaderData& out_fetch_data);
+
+/// Copies guest code where that's possible without touching the guest's pages, or returns
+/// false. The renderer sets it: the GPU thread parses each draw's fetch shader, and a fetch
+/// shader on a page that also holds GPU-written bytes is read-protected under precise and
+/// fenced readbacks, so read directly it faults on every draw.
+void SetGuestCodeReader(std::function<bool(VAddr address, void* data, u64 size)> reader);
 
 } // namespace Shader::Gcn

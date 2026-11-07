@@ -1,6 +1,9 @@
 // SPDX-FileCopyrightText: Copyright 2024 shadPS4 Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+#include <array>
+#include <bit>
+#include <cstring>
 #include <utility>
 #include "common/assert.h"
 #include "shader_recompiler/frontend/decode.h"
@@ -40,6 +43,14 @@ const u32* GetFetchShaderCode(const Info& info, u32 sgpr_base) {
     return code;
 }
 
+namespace {
+std::function<bool(VAddr, void*, u64)> guest_code_reader;
+} // namespace
+
+void SetGuestCodeReader(std::function<bool(VAddr, void*, u64)> reader) {
+    guest_code_reader = std::move(reader);
+}
+
 bool ParseFetchShader(const Shader::Info& info, FetchShaderData& out_fetch_data) {
     if (!info.has_fetch_shader) {
         return false;
@@ -67,9 +78,24 @@ bool ParseFetchShader(const Shader::Info& info, FetchShaderData& out_fetch_data)
     };
     std::array<VsharpLoad, 104> loads{};
 
+    // Parsed from a copy where the reader can make one; past the copy's end, from the guest.
     const auto* code = GetFetchShaderCode(info, info.fetch_shader_sgpr_base);
-    const u32* ptr = code;
+    std::array<u32, 128> copy;
+    const u32* begin = code;
+    const u32* end = nullptr;
+    if (guest_code_reader &&
+        guest_code_reader(std::bit_cast<VAddr>(code), copy.data(), sizeof(copy))) {
+        begin = copy.data();
+        end = copy.data() + copy.size();
+    }
+    const u32* ptr = begin;
     while (true) {
+        if (end != nullptr && end - ptr < 2) {
+            out_fetch_data.attributes.clear();
+            begin = code;
+            end = nullptr;
+            ptr = code;
+        }
         const u32 word0 = *(ptr++);
         const auto encoding = GetInstructionEncoding(word0);
 
@@ -145,7 +171,7 @@ bool ParseFetchShader(const Shader::Info& info, FetchShaderData& out_fetch_data)
         }
     }
 
-    out_fetch_data.size = (ptr - code) * sizeof(u32);
+    out_fetch_data.size = (ptr - begin) * sizeof(u32);
     return true;
 }
 

@@ -7,6 +7,7 @@
 #include "core/debug_state.h"
 #include "core/emulator_settings.h"
 #include "core/memory.h"
+#include "shader_recompiler/frontend/fetch_shader.h"
 #include "shader_recompiler/resource.h"
 #include "shader_recompiler/runtime_info.h"
 #include "video_core/amdgpu/liverpool.h"
@@ -56,8 +57,18 @@ Rasterizer::Rasterizer(const Instance& instance_, Scheduler& scheduler_, Runtime
         liverpool->BindRasterizer(this);
     }
     memory->SetRasterizer(this);
-    pipeline_cache.SetGpuBytesPending(
-        [this](VAddr address, u64 size) { return buffer_cache.GpuBytesPending(address, size); });
+    // Off the GPU thread everything counts as pending, so the guest is read directly.
+    pipeline_cache.SetGpuBytesPending([this](VAddr address, u64 size) {
+        return std::this_thread::get_id() != liverpool->GetGpuCommandProcessorThread() ||
+               buffer_cache.GpuBytesPending(address, size);
+    });
+    // Only the GPU thread may look at the buffer cache's pending ranges; other threads that
+    // parse fetch shaders (compile workers) read the guest directly.
+    Shader::Gcn::SetGuestCodeReader([this](VAddr address, void* data, u64 size) {
+        return std::this_thread::get_id() == liverpool->GetGpuCommandProcessorThread() &&
+               !buffer_cache.GpuBytesPending(address, size) &&
+               memory->ReadBackingPages(address, data, size);
+    });
     if (instance.UsesDescriptorHeap()) {
         heaps =
             std::make_unique<ResourceHeaps>(instance, scheduler, buffer_cache.GetStreamBuffer());
