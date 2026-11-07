@@ -248,6 +248,20 @@ private:
     /// Readback profiling of a repeat read fault at the address.
     void NoteRepeatRead(VAddr address, u64 size);
 
+    /// Fenced readbacks with lending on: instead of reading back a page the CPU read before,
+    /// starts its data landing and lets the CPU read the page as it is meanwhile, as it could
+    /// on the console. Returns false if the fault has to read back as usual.
+    bool LendRepeatRead(VAddr address, u64 size);
+    /// SHADPS4_LEND_READS=1: LendRepeatRead is on.
+    bool lend_reads{};
+    /// Tick of the last landing started for a loan; it needs a submit to arrive.
+    u64 lend_tick{};
+
+public:
+    /// Whether a landing started for a loan is still waiting for a submit.
+    [[nodiscard]] bool NeedsLendSubmit() const;
+
+private:
     /// Precise or Fenced: GPU-written pages are protected until their data is in guest memory.
     bool tracks_gpu_pages{};
 
@@ -270,6 +284,7 @@ private:
         /// page), and repeat reads of a page a landing in flight is filling.
         u64 repeat_reads_of_gpu_bytes{};
         u64 repeat_reads_in_flight{};
+        u64 lent_reads{};
         u64 last_log_ns{};
         u64 ab_switches{};
     } readback_stats;
