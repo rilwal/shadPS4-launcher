@@ -212,6 +212,7 @@ void Liverpool::Process(std::stop_token stoken) {
                         waiting ? VideoCore::PerfStats::Cost::GuestWaits
                                 : VideoCore::PerfStats::Cost::Busy,
                         now - pass_start);
+                    VideoCore::PerfStats::frames.FlushLocalCosts();
                 }
                 if (!waiting || !idle_backoff.enabled) {
                     idle_passes = 0;
@@ -274,6 +275,7 @@ void Liverpool::Process(std::stop_token stoken) {
                     VideoCore::PerfStats::frames.AddCost(VideoCore::PerfStats::Cost::Busy,
                                                          VideoCore::PerfStats::NowNs() -
                                                              flush_start);
+                    VideoCore::PerfStats::frames.FlushLocalCosts();
                 }
             };
             VideoCore::EndCapture();

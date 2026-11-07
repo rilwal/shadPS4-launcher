@@ -188,6 +188,10 @@ struct Frames {
         costs[static_cast<size_t>(cost)].fetch_add(ns, std::memory_order_relaxed);
     }
 
+    /// Adds what this thread's scopes gathered since the last call. The GPU thread calls it at
+    /// the end of each pass, so the scopes themselves (thousands a frame) skip the atomics.
+    void FlushLocalCosts();
+
     void Record() {
         total.fetch_add(1, std::memory_order_relaxed);
         const u64 now = NowNs();
@@ -368,7 +372,7 @@ public:
         const u64 now = NowNs();
         parent = current;
         if (parent != nullptr) {
-            frames.AddCost(parent->cost, now - parent->start);
+            local_costs[static_cast<size_t>(parent->cost)] += now - parent->start;
         }
         current = this;
         start = now;
@@ -378,7 +382,7 @@ public:
             return;
         }
         const u64 now = NowNs();
-        frames.AddCost(cost, now - start);
+        local_costs[static_cast<size_t>(cost)] += now - start;
         current = parent;
         if (parent != nullptr) {
             parent->start = now;
@@ -394,7 +398,7 @@ public:
             return;
         }
         const u64 now = NowNs();
-        frames.AddCost(cost, now - start);
+        local_costs[static_cast<size_t>(cost)] += now - start;
         cost = next;
         start = now;
     }
@@ -407,6 +411,9 @@ public:
         current->start = std::min(current->start + ns, NowNs());
     }
 
+    /// Time gathered by this thread's scopes, added to `frames` by FlushLocalCosts.
+    static inline thread_local std::array<u64, Frames::CostCount> local_costs{};
+
 private:
     static inline thread_local ScopedCost* current = nullptr;
     Cost cost;
@@ -414,6 +421,16 @@ private:
     ScopedCost* parent = nullptr;
     u64 start = 0;
 };
+
+inline void Frames::FlushLocalCosts() {
+    auto& local = ScopedCost::local_costs;
+    for (size_t i = 0; i < CostCount; ++i) {
+        if (local[i] != 0) {
+            costs[i].fetch_add(local[i], std::memory_order_relaxed);
+            local[i] = 0;
+        }
+    }
+}
 
 inline void Frames::AddShaderTime(u64 ns) {
     if (is_gpu_thread) {
