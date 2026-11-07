@@ -3,6 +3,7 @@
 
 #pragma once
 
+#include <chrono>
 #include <cstddef>
 #include <memory>
 #include <vector>
@@ -25,11 +26,45 @@ enum class PageOp : s8 {
     Untrack = -1,
 };
 
-/// A write fault that took long enough to have read memory back first, by faulting instruction.
+/// Where a write fault's handling spent its time, on the faulting thread while it's handled.
+/// For the slow write fault log.
+struct WriteFaultPhases {
+    bool active{};
+    u64 region_lock_ns{};
+    u64 page_lock_ns{};
+    u64 protect_ns{};
+    u64 texture_ns{};
+};
+inline thread_local WriteFaultPhases write_fault_phases;
+
+inline u64 WriteFaultClockNs() {
+    return std::chrono::duration_cast<std::chrono::nanoseconds>(
+               std::chrono::steady_clock::now().time_since_epoch())
+        .count();
+}
+
+/// Locks the mutex, adding any wait to `wait_ns` while a write fault is handled on this thread.
+template <typename Mutex>
+void LockTimingWriteFault(Mutex& mutex, u64& wait_ns) {
+    if (!write_fault_phases.active || mutex.try_lock()) [[likely]] {
+        if (!write_fault_phases.active) {
+            mutex.lock();
+        }
+        return;
+    }
+    const u64 start = WriteFaultClockNs();
+    mutex.lock();
+    wait_ns += WriteFaultClockNs() - start;
+}
+
+/// A write fault that took long enough to have read memory back first, by faulting instruction:
+/// how many, and their total time and its parts.
 struct SlowWriteFaultSite {
     u64 instruction;
     bool gpu_thread;
     u32 count;
+    u64 total_ns;
+    WriteFaultPhases phases;
 };
 
 /// The slow write fault sites since the last call, cleared. For the readback stats log.

@@ -1733,7 +1733,11 @@ bool Rasterizer::InvalidateMemory(VAddr addr, u64 size, bool assume_locks) {
         return false;
     }
     buffer_cache.InvalidateMemory(addr, size, assume_locks);
+    const u64 start = VideoCore::write_fault_phases.active ? VideoCore::WriteFaultClockNs() : 0;
     texture_cache.InvalidateMemory(addr, size);
+    if (VideoCore::write_fault_phases.active) {
+        VideoCore::write_fault_phases.texture_ns += VideoCore::WriteFaultClockNs() - start;
+    }
     return true;
 }
 

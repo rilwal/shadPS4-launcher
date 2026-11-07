@@ -91,7 +91,7 @@ public:
         RegionBits read_prot;
         Bounds watcher_bounds = MIN_BOUNDS;
         if constexpr (locked) {
-            mutex.lock();
+            LockTimingWriteFault(mutex, write_fault_phases.region_lock_ns);
         }
         IterateWords(bounds, [&](u64 index, u64 mask) {
             update_watchers |= UpdateProtection<cpu_op, gpu_op>(write_prot, read_prot,
@@ -125,7 +125,7 @@ public:
         u64 end_page{};
         Bounds watcher_bounds = MIN_BOUNDS;
         if constexpr (locked) {
-            mutex.lock();
+            LockTimingWriteFault(mutex, write_fault_phases.region_lock_ns);
         }
         IterateWords(bounds, [&](u64 index, u64 mask) {
             const u64 base_page = index * PAGES_PER_WORD;
@@ -183,7 +183,7 @@ public:
     }
 
     void Lock(const Bounds& bounds) noexcept {
-        mutex.lock();
+        LockTimingWriteFault(mutex, write_fault_phases.region_lock_ns);
     }
 
     void Unlock(const Bounds& bounds) noexcept {

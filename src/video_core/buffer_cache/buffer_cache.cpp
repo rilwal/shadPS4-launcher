@@ -721,9 +721,15 @@ void BufferCache::FlushReadbackStats() {
                               [](const auto& a, const auto& b) { return a.count > b.count; });
             std::string top;
             for (size_t i = 0; i < shown; ++i) {
-                top += fmt::format(
-                    "{}{}{} {:.1f}", i ? ", " : "", DescribeCodeAddress(sites[i].instruction),
-                    sites[i].gpu_thread ? " [GPU thread]" : "", sites[i].count / seconds);
+                const auto& site = sites[i];
+                const auto us = [&](u64 ns) { return ns / 1e3 / site.count; };
+                top += fmt::format("{}{}{} {:.1f} ({:.0f} us: region lock {:.0f}, page locks "
+                                   "{:.0f}, mprotect {:.0f}, textures {:.0f})",
+                                   i ? ", " : "", DescribeCodeAddress(site.instruction),
+                                   site.gpu_thread ? " [GPU thread]" : "", site.count / seconds,
+                                   us(site.total_ns), us(site.phases.region_lock_ns),
+                                   us(site.phases.page_lock_ns), us(site.phases.protect_ns),
+                                   us(site.phases.texture_ns));
             }
             LOG_INFO(Render, "Slow write faults per second [{}] by instruction: {}",
                      variant ? variant : "-", top);

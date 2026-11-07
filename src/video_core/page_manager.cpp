@@ -115,19 +115,33 @@ bool GpuThreadFaultLoadsEnabled() {
 }
 
 std::mutex slow_write_mutex;
-std::map<std::pair<u64, bool>, u32> slow_write_sites;
+struct SlowWriteTotals {
+    u32 count;
+    u64 total_ns;
+    WriteFaultPhases phases;
+};
+std::map<std::pair<u64, bool>, SlowWriteTotals> slow_write_sites;
 
 /// Handles a write fault on tracked memory, then unprotects ahead of it if the guest is
 /// writing in order. Not on the GPU thread, which may hold the trackers' locks.
 bool HandleWriteFault(Vulkan::Rasterizer* rasterizer, VAddr addr, u64 size, bool is_gpu_thread,
                       void* context) {
     const u64 start = PerfStats::NowNs();
+    write_fault_phases = WriteFaultPhases{.active = true};
     const bool handled = rasterizer->InvalidateMemory(addr, size, is_gpu_thread);
+    const WriteFaultPhases phases = write_fault_phases;
+    write_fault_phases.active = false;
     // A plain write fault takes a few microseconds; one that read the page back took far more.
     constexpr u64 SlowNs = 50'000;
-    if (handled && PerfStats::NowNs() - start > SlowNs) {
+    if (const u64 elapsed = PerfStats::NowNs() - start; handled && elapsed > SlowNs) {
         std::scoped_lock lock{slow_write_mutex};
-        ++slow_write_sites[{Core::FaultInstructionAddress(context), is_gpu_thread}];
+        auto& site = slow_write_sites[{Core::FaultInstructionAddress(context), is_gpu_thread}];
+        ++site.count;
+        site.total_ns += elapsed;
+        site.phases.region_lock_ns += phases.region_lock_ns;
+        site.phases.page_lock_ns += phases.page_lock_ns;
+        site.phases.protect_ns += phases.protect_ns;
+        site.phases.texture_ns += phases.texture_ns;
     }
     if (handled && !is_gpu_thread) {
         if (const auto [ahead, ahead_size] = fault_ahead.Next(addr); ahead_size != 0) {
@@ -148,8 +162,8 @@ std::vector<SlowWriteFaultSite> TakeSlowWriteFaultSites() {
     std::scoped_lock lock{slow_write_mutex};
     std::vector<SlowWriteFaultSite> sites;
     sites.reserve(slow_write_sites.size());
-    for (const auto& [key, count] : slow_write_sites) {
-        sites.push_back({key.first, key.second, count});
+    for (const auto& [key, totals] : slow_write_sites) {
+        sites.push_back({key.first, key.second, totals.count, totals.total_ns, totals.phases});
     }
     slow_write_sites.clear();
     return sites;
@@ -266,7 +280,7 @@ struct PageManager::Impl {
                 continue;
             }
 
-            locks[page].lock();
+            LockTimingWriteFault(locks[page], write_fault_phases.page_lock_ns);
 
             const auto old_perms = state->Perms();
             if (page == page_start) {
@@ -331,7 +345,7 @@ struct PageManager::Impl {
                 continue;
             }
 
-            locks[base_page + page].lock();
+            LockTimingWriteFault(locks[base_page + page], write_fault_phases.page_lock_ns);
 
             const auto old_perms = state->Perms();
             if (page == page_start) {
@@ -546,7 +560,11 @@ struct SignalImpl : public PageManager::Impl {
         auto& impl = memory->GetAddressSpace();
         ASSERT_MSG(perms != Core::MemoryPermission::Write,
                    "Attempted to protect region as write-only which is not a valid permission");
+        const u64 start = write_fault_phases.active ? WriteFaultClockNs() : 0;
         impl.Protect(address, size, perms);
+        if (write_fault_phases.active) {
+            write_fault_phases.protect_ns += WriteFaultClockNs() - start;
+        }
     }
 
     static bool GuestFaultSignalHandler(void* context, void* fault_address) {
