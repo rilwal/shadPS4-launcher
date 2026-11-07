@@ -6,7 +6,10 @@
 #include <condition_variable>
 #include <mutex>
 #include <optional>
+#include <source_location>
+#include <string>
 #include <thread>
+#include <vector>
 #include <queue>
 
 #include "common/interval_set.h"
@@ -374,10 +377,14 @@ public:
     void Flush();
 
     /// Sends the current execution context to the GPU and waits for it to complete.
-    void Finish();
+    void Finish(std::source_location where = std::source_location::current());
 
     /// Waits for the given tick to trigger on the GPU.
-    void Wait(u64 tick);
+    void Wait(u64 tick, std::source_location where = std::source_location::current());
+
+    /// Where the GPU thread waited for the GPU since the last call, most time first, as
+    /// "file:line n waits X ms" entries.
+    std::vector<std::string> TakeWaitSites();
 
     /// Attempts to execute operations whose tick the GPU has caught up with.
     void PopPendingOperations();
@@ -540,6 +547,15 @@ private:
     void PriorityPendingOpsThread(std::stop_token stoken);
 
 private:
+    /// GPU-thread waits by the call site that asked for them.
+    struct WaitSite {
+        const char* file;
+        u32 line;
+        u64 count;
+        u64 ns;
+    };
+    std::vector<WaitSite> wait_sites;
+
     const Instance& instance;
     Semaphore work_semaphore;
     CommandPool command_pool;

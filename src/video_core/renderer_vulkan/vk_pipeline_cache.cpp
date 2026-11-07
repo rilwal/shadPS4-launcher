@@ -261,6 +261,10 @@ void PipelineCache::FlushCompileStats(u64 now_ns) {
             }
             LOG_INFO(Render, "GPU thread per frame over {:.1f} s: {}", seconds,
                      VideoCore::PerfStats::Frames::DescribeCosts(per_frame));
+            if (const auto sites = scheduler.TakeWaitSites(); !sites.empty()) {
+                LOG_INFO(Render, "GPU thread waited for the GPU over {:.1f} s at: {}", seconds,
+                         fmt::join(sites, "; "));
+            }
         }
     }
     if (stats.shaders != 0) {

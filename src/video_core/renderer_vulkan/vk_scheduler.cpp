@@ -1,6 +1,8 @@
 // SPDX-FileCopyrightText: Copyright 2025 shadPS4 Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+#include <algorithm>
+#include <functional>
 #include <iterator>
 #include <fmt/format.h>
 #include "common/assert.h"
@@ -130,22 +132,52 @@ void Scheduler::Flush() {
     Flush(info);
 }
 
-void Scheduler::Finish() {
+void Scheduler::Finish(std::source_location where) {
     // When finishing, we need to wait for the submission to have executed on the device.
     const u64 presubmit_tick = CurrentTick();
     SubmitInfo info{};
     SubmitExecution(info);
-    Wait(presubmit_tick);
+    Wait(presubmit_tick, where);
 }
 
-void Scheduler::Wait(u64 tick) {
+void Scheduler::Wait(u64 tick, std::source_location where) {
     const VideoCore::PerfStats::ScopedCost cost{VideoCore::PerfStats::Cost::GpuWaits};
+    const bool timed = VideoCore::PerfStats::is_gpu_thread;
+    const u64 start = timed ? VideoCore::PerfStats::NowNs() : 0;
     if (tick >= work_semaphore.CurrentTick()) {
         // Make sure we are not waiting for the current tick without signalling
         SubmitInfo info{};
         Flush(info);
     }
     work_semaphore.Wait(tick);
+    if (!timed) {
+        return;
+    }
+    const u64 ns = VideoCore::PerfStats::NowNs() - start;
+    const auto it = std::ranges::find_if(wait_sites, [&](const WaitSite& site) {
+        return site.line == where.line() && site.file == where.file_name();
+    });
+    if (it != wait_sites.end()) {
+        ++it->count;
+        it->ns += ns;
+    } else {
+        wait_sites.push_back({where.file_name(), where.line(), 1, ns});
+    }
+}
+
+std::vector<std::string> Scheduler::TakeWaitSites() {
+    std::ranges::sort(wait_sites, std::greater{}, &WaitSite::ns);
+    std::vector<std::string> out;
+    for (const auto& site : wait_sites) {
+        std::string_view file{site.file};
+        if (const auto slash = file.find("src/"); slash != std::string_view::npos) {
+            file.remove_prefix(slash + 4);
+        }
+        out.push_back(
+            fmt::format("{}:{} {} waits {:.1f} ms", file, site.line, site.count, site.ns / 1e6));
+    }
+    wait_sites.clear();
+    return out;
 }
 
 void Scheduler::PopPendingOperations() {
