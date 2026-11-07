@@ -625,7 +625,9 @@ ImageId TextureCache::ExpandImage(const ImageInfo& info, ImageId image_id) {
 }
 
 ImageId TextureCache::FindImage(ImageDesc& desc, bool exact_fmt) {
-    const VideoCore::PerfStats::ScopedCost cost{VideoCore::PerfStats::Cost::Textures};
+    // Thousands of lookups a frame: timed whole only with SHADPS4_DRAW_COSTS=1. Otherwise only
+    // resolving overlaps and creating images are (uploads time themselves in RefreshImage).
+    const VideoCore::PerfStats::ScopedCost cost{VideoCore::PerfStats::Cost::Textures, true};
     const auto& info = desc.info;
 
     ASSERT(info.guest_address != 0);
@@ -661,7 +663,8 @@ ImageId TextureCache::FindImage(ImageDesc& desc, bool exact_fmt) {
     // Try to resolve overlaps (if any)
     int view_mip{-1};
     int view_slice{-1};
-    if (!image_id) {
+    if (!image_id && !image_ids.empty()) {
+        const VideoCore::PerfStats::ScopedCost overlaps{VideoCore::PerfStats::Cost::Textures};
         for (const auto& cache_id : image_ids) {
             view_mip = -1;
             view_slice = -1;
@@ -691,6 +694,7 @@ ImageId TextureCache::FindImage(ImageDesc& desc, bool exact_fmt) {
     }
     // Create and register a new image
     if (!image_id) {
+        const VideoCore::PerfStats::ScopedCost create{VideoCore::PerfStats::Cost::Textures};
         image_id = slot_images.Insert(instance, runtime, slot_image_views, info);
         RegisterImage(image_id);
     }

@@ -88,14 +88,45 @@ inline const TscClock& Tsc() {
     return SteadyNs();
 }
 
+/// A raw clock reading for the cost scopes: TSC ticks where usable, else nanoseconds. Scopes sum
+/// ticks and convert once per flush; converting at every reading was 40% of a scope's cost.
+[[nodiscard]] inline u64 NowTicks() {
+#ifdef SHADPS4_PERF_TSC
+    if (Detail::Tsc().usable) {
+        return __rdtsc();
+    }
+#endif
+    return SteadyNs();
+}
+
+[[nodiscard]] inline u64 TicksToNs(u64 ticks) {
+#ifdef SHADPS4_PERF_TSC
+    if (const auto& tsc = Detail::Tsc(); tsc.usable) {
+        return u64(double(ticks) * tsc.ns_per_tick);
+    }
+#endif
+    return ticks;
+}
+
+[[nodiscard]] inline u64 NsToTicks(u64 ns) {
+#ifdef SHADPS4_PERF_TSC
+    if (const auto& tsc = Detail::Tsc(); tsc.usable) {
+        return u64(double(ns) / tsc.ns_per_tick);
+    }
+#endif
+    return ns;
+}
+
 /// Where the GPU thread's time goes, split so a stutter's log line can say what held it up.
 /// Shaders is added by the pipeline cache; the rest by scopes (`ScopedCost`). Busy is the GPU
 /// thread's time outside its idle waits, and what the named costs don't explain of it is command
 /// translation itself.
 enum class Cost : u32 {
     Shaders,      ///< Translating shaders, creating pipelines, waiting for compile workers.
-    Textures,     ///< Finding and creating images, uploading and detiling them.
-    Buffers,      ///< Obtaining buffers and syncing their memory from the guest.
+    Textures,     ///< Creating images, resolving overlaps, uploading and detiling them (and every
+                  ///< lookup, with SHADPS4_DRAW_COSTS=1).
+    Buffers,      ///< Making buffer memory resident and uploading it from the guest (and every
+                  ///< lookup, with SHADPS4_DRAW_COSTS=1).
     GpuWaits,     ///< Waiting for the host GPU to finish work (scheduler waits).
     Submits,      ///< Submitting command buffers to the host queue.
     Presents,     ///< Waiting for the presenter to flip (video out label waits).
@@ -374,7 +405,7 @@ public:
             return;
         }
         active = true;
-        const u64 now = NowNs();
+        const u64 now = NowTicks();
         parent = current;
         if (parent != nullptr) {
             local_costs[static_cast<size_t>(parent->cost)] += now - parent->start;
@@ -386,7 +417,7 @@ public:
         if (!active) {
             return;
         }
-        const u64 now = NowNs();
+        const u64 now = NowTicks();
         local_costs[static_cast<size_t>(cost)] += now - start;
         current = parent;
         if (parent != nullptr) {
@@ -402,7 +433,7 @@ public:
         if (!active) {
             return;
         }
-        const u64 now = NowNs();
+        const u64 now = NowTicks();
         local_costs[static_cast<size_t>(cost)] += now - start;
         cost = next;
         start = now;
@@ -413,11 +444,14 @@ public:
         if (current == nullptr) {
             return;
         }
-        current->start = std::min(current->start + ns, NowNs());
+        current->start = std::min(current->start + NsToTicks(ns), NowTicks());
     }
 
-    /// Time gathered by this thread's scopes, added to `frames` by FlushLocalCosts.
+    /// Time gathered by this thread's scopes, in NowTicks units, added to `frames` by
+    /// FlushLocalCosts.
     static inline thread_local std::array<u64, Frames::CostCount> local_costs{};
+    /// Counts gathered by CountLocal, added to `frames` by FlushLocalCosts.
+    static inline thread_local std::array<u64, Frames::CostCount> local_counts{};
 
 private:
     static inline thread_local ScopedCost* current = nullptr;
@@ -428,15 +462,20 @@ private:
 };
 
 inline void CountLocal(Cost cost, u64 amount) {
-    ScopedCost::local_costs[static_cast<size_t>(cost)] += amount;
+    ScopedCost::local_counts[static_cast<size_t>(cost)] += amount;
 }
 
 inline void Frames::FlushLocalCosts() {
     auto& local = ScopedCost::local_costs;
+    auto& counts = ScopedCost::local_counts;
     for (size_t i = 0; i < CostCount; ++i) {
         if (local[i] != 0) {
-            costs[i].fetch_add(local[i], std::memory_order_relaxed);
+            costs[i].fetch_add(TicksToNs(local[i]), std::memory_order_relaxed);
             local[i] = 0;
+        }
+        if (counts[i] != 0) {
+            costs[i].fetch_add(counts[i], std::memory_order_relaxed);
+            counts[i] = 0;
         }
     }
 }

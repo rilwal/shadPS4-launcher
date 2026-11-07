@@ -517,7 +517,9 @@ void BufferCache::WaitForLandings(VAddr device_addr, u64 size) {
 
 std::pair<const Buffer*, u64> BufferCache::ObtainBuffer(VAddr device_addr, u32 size,
                                                         ObtainBufferFlags flags) {
-    const VideoCore::PerfStats::ScopedCost cost{VideoCore::PerfStats::Cost::Buffers};
+    // Thousands of calls a frame: timed whole only with SHADPS4_DRAW_COSTS=1. Otherwise only
+    // the slow parts below are (making memory resident, uploading it).
+    const VideoCore::PerfStats::ScopedCost cost{VideoCore::PerfStats::Cost::Buffers, true};
     const bool is_written = True(flags & ObtainBufferFlags::IsWritten);
     const bool is_texel_buffer = True(flags & ObtainBufferFlags::IsTexelBuffer);
     const bool skip_stream_buffer = True(flags & ObtainBufferFlags::IgnoreStreamBuffer);
@@ -706,6 +708,7 @@ void BufferCache::EnsureResident(const Buffer* arena, u64 first_block, u64 last_
     if (bind_ranges.Empty()) {
         return;
     }
+    const VideoCore::PerfStats::ScopedCost cost{VideoCore::PerfStats::Cost::Buffers};
 
     const bool has_bda = instance.IsBufferDeviceAddressSupported();
     const vk::MemoryAllocateFlagsInfo alloc_flags = {
@@ -770,6 +773,7 @@ bool BufferCache::SynchronizeMemory(const Buffer* arena, VAddr device_addr, u32 
         total_size_bytes += size;
     });
     if (!copies.empty()) {
+        const VideoCore::PerfStats::ScopedCost cost{VideoCore::PerfStats::Cost::Buffers};
         const auto staging = staging_pool.Request(total_size_bytes, MemoryType::HostUncached);
         for (auto& copy : copies) {
             memory->CopySparseMemory(copy.dstOffset, staging.mapped + copy.srcOffset, copy.size);
