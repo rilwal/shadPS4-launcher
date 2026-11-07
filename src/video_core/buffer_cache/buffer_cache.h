@@ -118,6 +118,9 @@ public:
                            u16 mnemonic, u8* data, bool assume_locks);
 
     /// With `assume_locks` (on the GPU thread) runs here instead of on the GPU thread.
+    /// Whether any byte of the range has GPU data not yet in guest memory. On the GPU thread.
+    [[nodiscard]] bool GpuBytesPending(VAddr address, u64 size) const;
+
     /// ReadMemoryForLoad for a movs that faulted reading `src`: if neither `src` nor `dst` has
     /// GPU bytes pending, copies `bytes` from `src` to `dst` through guest memory's backing,
     /// with `write_dst` (run on the GPU thread, false if it can't) doing the write, and returns
@@ -268,9 +271,6 @@ private:
 
     /// ReadMemory's work, on the GPU thread.
     void ReadMemoryNow(VAddr device_addr, u64 size, bool is_write, bool async);
-
-    /// Whether any byte of the range has GPU data not yet in guest memory.
-    [[nodiscard]] bool GpuBytesPending(VAddr address, u64 size) const;
 
     /// Read faults whose load the handler couldn't decode, by mnemonic, this stats window.
     std::unordered_map<u16, u32> unsupported_loads;

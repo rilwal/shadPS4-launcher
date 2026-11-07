@@ -56,6 +56,8 @@ Rasterizer::Rasterizer(const Instance& instance_, Scheduler& scheduler_, Runtime
         liverpool->BindRasterizer(this);
     }
     memory->SetRasterizer(this);
+    pipeline_cache.SetGpuBytesPending(
+        [this](VAddr address, u64 size) { return buffer_cache.GpuBytesPending(address, size); });
     if (instance.UsesDescriptorHeap()) {
         heaps =
             std::make_unique<ResourceHeaps>(instance, scheduler, buffer_cache.GetStreamBuffer());

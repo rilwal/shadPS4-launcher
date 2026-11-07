@@ -18,6 +18,7 @@
 #include "common/thread.h"
 #include "core/debug_state.h"
 #include "core/emulator_settings.h"
+#include "core/memory.h"
 #include "shader_recompiler/backend/spirv/emit_spirv.h"
 #include "shader_recompiler/info.h"
 #include "shader_recompiler/recompiler.h"
@@ -742,6 +743,34 @@ bool PipelineCache::RefreshGraphicsKey() {
     return true;
 }
 
+template <typename Program>
+Shader::ShaderParams PipelineCache::ProgramParams(const Program& pgm) const {
+    // Every draw reads its shaders' headers. A header on a page that also holds GPU-written
+    // bytes is read-protected under precise and fenced readbacks, and read directly it faulted
+    // on every draw, each fault a readback (Bloodborne: ~160 a second, 10 ms of every frame).
+    // The backing has the same bytes wherever no GPU data is pending.
+    constexpr u32 token_mov_vcchi = 0xBEEB03FF;
+    const auto* code = pgm.template Address<u32*>();
+    const VAddr address = std::bit_cast<VAddr>(code);
+    auto* memory = Core::Memory::Instance();
+    std::array<u32, 2> head;
+    AmdGpu::BinaryInfo info;
+    if (gpu_bytes_pending && !gpu_bytes_pending(address, sizeof(head)) &&
+        memory->ReadBackingPages(address, head.data(), sizeof(head)) &&
+        head[0] == token_mov_vcchi) {
+        const VAddr info_address = address + (u64{head[1]} + 1) * 8;
+        if (!gpu_bytes_pending(info_address, sizeof(info)) &&
+            memory->ReadBackingPages(info_address, &info, sizeof(info)) && info.Valid()) {
+            return {
+                .user_data = pgm.user_data,
+                .code = std::span{code, info.length / sizeof(u32)},
+                .hash = info.shader_hash,
+            };
+        }
+    }
+    return AmdGpu::GetParams(pgm);
+}
+
 bool PipelineCache::RefreshGraphicsStages() {
     const auto& regs = liverpool->regs;
     auto& key = graphics_key;
@@ -764,7 +793,7 @@ bool PipelineCache::RefreshGraphicsStages() {
             return false;
         }
 
-        const auto params = AmdGpu::GetParams(*pgm);
+        const auto params = ProgramParams(*pgm);
         if (profile.uses_descriptor_heap) {
             // Each stage maps its own bindings onto the heap, so its numbers start at 0.
             binding = {};
@@ -868,7 +897,7 @@ bool PipelineCache::RefreshGraphicsStages() {
 bool PipelineCache::RefreshComputeKey() {
     Shader::Backend::Bindings binding{};
     const auto& cs_pgm = liverpool->GetCsRegs();
-    const auto cs_params = AmdGpu::GetParams(cs_pgm);
+    const auto cs_params = ProgramParams(cs_pgm);
     std::tie(infos[0], modules[0], compute_key.value) =
         GetProgram(HwStage::Compute, SwStage::Compute, cs_params, binding);
     return true;

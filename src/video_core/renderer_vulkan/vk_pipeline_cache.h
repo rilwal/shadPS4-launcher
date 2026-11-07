@@ -4,6 +4,7 @@
 #pragma once
 
 #include <condition_variable>
+#include <functional>
 #include <map>
 #include <mutex>
 #include <string>
@@ -134,6 +135,20 @@ private:
     bool RefreshGraphicsKey();
     bool RefreshGraphicsStages();
     bool RefreshComputeKey();
+
+    /// A draw's shader parameters from its program registers (AmdGpu::GetParams), reading the
+    /// shader's header through guest memory's backing where no GPU bytes are pending there.
+    template <typename Program>
+    Shader::ShaderParams ProgramParams(const Program& pgm) const;
+
+public:
+    /// Whether any byte of a range has GPU data not yet in guest memory (the buffer cache's).
+    void SetGpuBytesPending(std::function<bool(VAddr, u64)> func) {
+        gpu_bytes_pending = std::move(func);
+    }
+
+private:
+    std::function<bool(VAddr, u64)> gpu_bytes_pending;
 
     void DumpShader(std::span<const u32> code, u64 hash, Shader::HwStage stage, size_t perm_idx,
                     std::string_view ext);
