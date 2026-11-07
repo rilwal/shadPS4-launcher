@@ -44,16 +44,6 @@ public:
         });
     }
 
-    /// Fenced readbacks: lets the CPU read GPU-modified pages before their data lands
-    /// (RegionManager::LendForReads). Returns whether a page was lent.
-    bool LendForReads(VAddr cpu_addr, u64 size) noexcept {
-        bool lent = false;
-        IteratePages(cpu_addr, size, [&lent](RegionManager* manager, u64 offset, u64 size) {
-            lent |= manager->LendForReads(offset, size);
-        });
-        return lent;
-    }
-
     /// Unmark region as modified from the host GPU
     void UnmarkRegionAsGpuModified(VAddr cpu_addr, u64 size, bool is_write) noexcept {
         IteratePages(cpu_addr, size, [is_write](RegionManager* manager, u64 offset, u64 size) {

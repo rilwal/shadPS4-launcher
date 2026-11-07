@@ -3,7 +3,6 @@
 
 #pragma once
 
-#include <mutex>
 #include <utility>
 
 #include "common/adaptive_mutex.h"
@@ -31,7 +30,6 @@ public:
           readbacks_mode{EmulatorSettings.GetReadbacksMode()} {
         cpu.Fill(true);
         gpu.Fill(false);
-        lent.Fill(false);
     }
     explicit RegionManager() = default;
 
@@ -164,40 +162,6 @@ public:
         }
     }
 
-    /// Fenced readbacks: lets the CPU read GPU-modified pages before their data lands, as it
-    /// could on the console, where it reads whatever the GPU has written so far. The pages stay
-    /// GPU-modified, so their landings still come and a CPU write still waits for the GPU's
-    /// data. Only pages whose CPU writes are tracked are lent: those stay write-protected. A GPU
-    /// write or the data landing ends the loan. Returns whether a page was lent.
-    bool LendForReads(u64 offset, u64 size) {
-        if (readbacks_mode != GpuReadbacksMode::Fenced) {
-            return false;
-        }
-        const auto bounds = GetBounds(offset, size);
-        RegionBits write_prot{};
-        RegionBits read_prot{};
-        Bounds watcher_bounds = MIN_BOUNDS;
-        bool any = false;
-        std::scoped_lock lock{mutex};
-        IterateWords(bounds, [&](u64 index, u64 mask) {
-            const u64 pages = gpu[index] & ~cpu[index] & ~lent[index] & mask;
-            read_prot[index] = pages;
-            if (pages) {
-                ExtendBounds(watcher_bounds, index, pages);
-                any = true;
-            }
-        });
-        if (!any) {
-            return false;
-        }
-        tracker->UpdatePageWatchersForRegion(cpu_addr, watcher_bounds, write_prot, read_prot,
-                                             PageOp::None, PageOp::Untrack);
-        IterateWords(bounds, [&](u64 index, u64 mask) {
-            SetWord(lent, index, lent[index] | read_prot[index]);
-        });
-        return true;
-    }
-
     template <Type type>
     bool IsRegionModified(u64 offset, u64 size) noexcept {
         const auto& state = GetRegionBits<type>();
@@ -251,41 +215,21 @@ private:
         if constexpr (gpu_op != StateOp::None) {
             const u64 prev = gpu[index];
             const u64 next = Apply<gpu_op>(prev, mask);
-            // Lent pages are already readable: a GPU write protects them again, and clearing
-            // them has nothing left to unprotect.
-            const u64 lent_pages = lent[index] & mask;
-            if constexpr (gpu_op == StateOp::Set) {
-                read_prot[index] = ((next ^ prev) & mask) | lent_pages;
-            } else {
-                read_prot[index] = (next ^ prev) & mask & ~lent_pages;
-            }
+            read_prot[index] = (next ^ prev) & mask;
             prot_word |= read_prot[index];
         }
         if (prot_word) {
-            ExtendBounds(bounds, index, prot_word);
+            if (index <= bounds.start_word) {
+                bounds.start_word = index;
+                bounds.start_page = std::countr_zero(prot_word);
+            }
+            if (index >= bounds.end_word) {
+                bounds.end_word = index;
+                bounds.end_page = PAGES_PER_WORD - std::countl_zero(prot_word) - 1;
+            }
             return true;
         }
         return false;
-    }
-
-    static constexpr void ExtendBounds(Bounds& bounds, u64 index, u64 prot_word) {
-        if (index <= bounds.start_word) {
-            bounds.start_word = index;
-            bounds.start_page = std::countr_zero(prot_word);
-        }
-        if (index >= bounds.end_word) {
-            bounds.end_word = index;
-            bounds.end_page = PAGES_PER_WORD - std::countl_zero(prot_word) - 1;
-        }
-    }
-
-    static constexpr void SetWord(RegionBits& bits, u64 index, u64 value) {
-        const u64 summary_bit = u64{1} << index;
-        bits[index] = value;
-        bits.set_summary =
-            value ? (bits.set_summary | summary_bit) : (bits.set_summary & ~summary_bit);
-        bits.clear_summary = value != ~u64{0} ? (bits.clear_summary | summary_bit)
-                                              : (bits.clear_summary & ~summary_bit);
     }
 
     template <StateOp cpu_op, StateOp gpu_op>
@@ -299,9 +243,6 @@ private:
                                                       : (cpu.clear_summary & ~summary_bit);
         }
         if constexpr (gpu_op != StateOp::None) {
-            if (lent[index] & mask) {
-                SetWord(lent, index, lent[index] & ~mask);
-            }
             gpu[index] = Apply<gpu_op>(gpu[index], mask);
             gpu.set_summary =
                 gpu[index] ? (gpu.set_summary | summary_bit) : (gpu.set_summary & ~summary_bit);
@@ -351,7 +292,7 @@ private:
         if constexpr (iter_type == Type::GPU) {
             return any_set(gpu);
         } else if constexpr (gpu_op == StateOp::Set) {
-            return any_clear(gpu) || any_set(lent);
+            return any_clear(gpu);
         } else if constexpr (gpu_op == StateOp::Clear) {
             return any_set(gpu);
         } else {
@@ -394,8 +335,6 @@ private:
     u32 readbacks_mode;
     RegionBits cpu;
     RegionBits gpu;
-    /// GPU-modified pages lent to the CPU for reads (LendForReads): not read-protected.
-    RegionBits lent;
     LockType mutex;
 };
 

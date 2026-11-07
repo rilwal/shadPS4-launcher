@@ -83,9 +83,6 @@ BufferCache::BufferCache(const Vulkan::Instance& instance_, Vulkan::Scheduler& s
     const u32 readbacks_mode = EmulatorSettings.GetReadbacksMode();
     tracks_gpu_pages =
         readbacks_mode == GpuReadbacksMode::Precise || readbacks_mode == GpuReadbacksMode::Fenced;
-    if (const char* lend = std::getenv("SHADPS4_LEND_READS")) {
-        lend_reads = readbacks_mode == GpuReadbacksMode::Fenced && lend[0] == '1';
-    }
     const vk::BufferCreateInfo probe_ci = {
         .flags =
             vk::BufferCreateFlagBits::eSparseBinding | vk::BufferCreateFlagBits::eSparseResidency,
@@ -162,10 +159,6 @@ void BufferCache::ReadMemory(VAddr device_addr, u64 size, bool is_write, bool as
             cpu_read_ranges.Add(page_start, page_size);
             if (read_reason == ReadReason::RepeatRead) {
                 NoteRepeatRead(device_addr, size);
-                if (lend_reads && LendRepeatRead(device_addr, size)) {
-                    read_reason = ReadReason::Other;
-                    return;
-                }
             }
         }
         const u32 first_block = device_addr >> block_shift;
@@ -216,32 +209,6 @@ void BufferCache::NoteRepeatRead(VAddr address, u64 size) {
     auto& entry = fault_pages[page];
     ++entry.faults;
     entry.gpu_bytes = std::max<u32>(entry.gpu_bytes, std::min<u64>(gpu_bytes, BYTES_PER_PAGE));
-}
-
-bool BufferCache::LendRepeatRead(VAddr address, u64 size) {
-    // Only while fences land data: right after an A/B switch to Precise, nothing would land.
-    if (Common::AbSwitch::IsRegistered() && !Common::AbSwitch::IsB()) {
-        return false;
-    }
-    const VAddr page = Common::AlignDown(address, BYTES_PER_PAGE);
-    const u64 page_size = Common::AlignUp(address + size, BYTES_PER_PAGE) - page;
-    ProcessLandings();
-    // The page's GPU data must be on its way, or a CPU polling it would never see it.
-    if (gpu_modified_ranges.Intersects(page, page_size)) {
-        if (!LandGpuModifiedMemory() || gpu_modified_ranges.Intersects(page, page_size)) {
-            return false;
-        }
-        lend_tick = scheduler.CurrentTick();
-    }
-    if (!memory_tracker->LendForReads(page, page_size)) {
-        return false;
-    }
-    ++readback_stats.lent_reads;
-    return true;
-}
-
-bool BufferCache::NeedsLendSubmit() const {
-    return lend_tick != 0 && lend_tick == scheduler.CurrentTick();
 }
 
 void BufferCache::DownloadMemory(const Buffer* arena, VAddr device_addr, u64 size, bool async) {
@@ -513,7 +480,7 @@ void BufferCache::FlushReadbackStats() {
                  ns[1] / 1e6 / seconds, n[2] / seconds, ns[2] / 1e6 / seconds, n[3] / seconds,
                  ns[3] / 1e6 / seconds, stats.skipped_landings / seconds,
                  stats.full_ring_landings / seconds);
-        if (n[1] != 0 || stats.lent_reads != 0) {
+        if (n[1] != 0) {
             std::vector<std::pair<VAddr, FaultPage>> pages(fault_pages.begin(), fault_pages.end());
             const size_t shown = std::min<size_t>(pages.size(), 6);
             std::partial_sort(
@@ -526,10 +493,9 @@ void BufferCache::FlushReadbackStats() {
             }
             LOG_INFO(Render,
                      "Repeat read faults per second [{}]: {:.1f} read bytes the GPU wrote, {:.1f} "
-                     "hit a page a landing was filling, {:.1f} lent; {} pages, most faulted: {}",
+                     "hit a page a landing was filling; {} pages, most faulted: {}",
                      variant ? variant : "-", stats.repeat_reads_of_gpu_bytes / seconds,
-                     stats.repeat_reads_in_flight / seconds, stats.lent_reads / seconds,
-                     pages.size(), top);
+                     stats.repeat_reads_in_flight / seconds, pages.size(), top);
         }
     }
     fault_pages.clear();

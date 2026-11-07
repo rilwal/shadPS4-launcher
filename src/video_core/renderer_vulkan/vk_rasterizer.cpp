@@ -710,9 +710,8 @@ bool Rasterizer::DeferFenceSignal(Common::UniqueFunction<void>&& signal, bool th
 }
 
 void Rasterizer::FlushFenceSignals() {
-    if ((unsubmitted_signal_tick == scheduler.CurrentTick() &&
-         deferred_signals_in_flight.load(std::memory_order_acquire) != 0) ||
-        buffer_cache.NeedsLendSubmit()) {
+    if (unsubmitted_signal_tick == scheduler.CurrentTick() &&
+        deferred_signals_in_flight.load(std::memory_order_acquire) != 0) {
         Flush();
     }
 }
