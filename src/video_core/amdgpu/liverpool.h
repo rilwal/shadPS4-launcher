@@ -210,7 +210,8 @@ private:
     Task ProcessCompute(std::span<const u32> acb, u32 vqid);
 
     void ProcessCommands();
-    void ProcessCeQueue();
+    /// Runs the constant engine's task, if any; returns whether there was one.
+    bool ProcessCeQueue();
     void Process(std::stop_token stoken);
     void HandleGetLodStats(const PM4CmdGetLodStats* get_lod);
 

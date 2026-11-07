@@ -1,6 +1,12 @@
 // SPDX-FileCopyrightText: Copyright 2024-2026 shadPS4 Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+#include <chrono>
+#include <cstdlib>
+#include <thread>
+#if defined(__x86_64__) || defined(_M_X64)
+#include <immintrin.h>
+#endif
 #include <boost/preprocessor/stringize.hpp>
 
 #include "common/assert.h"
@@ -95,13 +101,13 @@ Liverpool::~Liverpool() {
     }
 }
 
-void Liverpool::ProcessCeQueue() {
+bool Liverpool::ProcessCeQueue() {
     auto& queue = mapped_queues[GfxQueueId];
     Task::Handle task{};
     {
         std::scoped_lock lock{queue.m_access};
         if (ce_submits.empty()) {
-            return;
+            return false;
         }
         task = ce_submits.front();
     }
@@ -114,7 +120,37 @@ void Liverpool::ProcessCeQueue() {
         std::scoped_lock lock2{submit_mutex};
         submit_cv.notify_all();
     }
+    return true;
 }
+
+namespace {
+
+/// Tells the CPU this core is spinning, so it can save power and let a sibling thread run.
+inline void CpuRelax() {
+#if defined(__x86_64__) || defined(_M_X64)
+    _mm_pause();
+#elif defined(__aarch64__)
+    asm volatile("yield");
+#endif
+}
+
+/// How the GPU thread waits while every queue is empty or blocked on the guest. Upstream spins
+/// at full speed; with the backoff it pauses, then yields its core, and optionally sleeps.
+struct IdleBackoff {
+    bool enabled;
+    u64 sleep_ns;
+
+    static IdleBackoff FromEnv() {
+        const char* backoff = std::getenv("SHADPS4_GPU_IDLE_BACKOFF");
+        const char* sleep = std::getenv("SHADPS4_GPU_IDLE_SLEEP_US");
+        return {
+            .enabled = backoff == nullptr || backoff[0] != '0',
+            .sleep_ns = sleep ? std::strtoull(sleep, nullptr, 10) * 1000 : 0,
+        };
+    }
+};
+
+} // Anonymous namespace
 
 void Liverpool::ProcessCommands() {
     // Process incoming commands with high priority
@@ -135,6 +171,7 @@ void Liverpool::Process(std::stop_token stoken) {
     gpu_id = std::this_thread::get_id();
     VideoCore::PerfStats::is_gpu_thread = true;
     const bool costs = VideoCore::PerfStats::CostsEnabled();
+    const auto idle_backoff = IdleBackoff::FromEnv();
 #ifdef __linux__
     gpu_tid = gettid();
 #endif
@@ -152,25 +189,57 @@ void Liverpool::Process(std::stop_token stoken) {
         VideoCore::StartCapture();
 
         curr_qid = -1;
+        // Passes in a row that only checked waits or found the queue empty, and when they began.
+        u32 idle_passes = 0;
+        u64 idle_since = 0;
 
         while ((num_submits || num_commands) && !stoken.stop_requested()) {
-            // A short pass that ended on a wait was only checking it: count it as waiting, and
-            // everything else as busy.
+            // A pass that ran nothing, or a short one that ended on a wait, was only checking:
+            // count it as waiting, and everything else as busy.
             const u64 pass_start = costs ? VideoCore::PerfStats::NowNs() : 0;
             yielded_waiting = false;
+            bool ran = false;
             SCOPE_EXIT {
+                constexpr u64 CheckNs = 20'000;
+                const u64 now = costs ? VideoCore::PerfStats::NowNs() : 0;
+                const bool waiting =
+                    !ran || (yielded_waiting && (!costs || now - pass_start < CheckNs));
                 if (costs) {
-                    const u64 pass_ns = VideoCore::PerfStats::NowNs() - pass_start;
-                    constexpr u64 CheckNs = 20'000;
                     VideoCore::PerfStats::frames.AddCost(
-                        yielded_waiting && pass_ns < CheckNs
-                            ? VideoCore::PerfStats::Cost::GuestWaits
-                            : VideoCore::PerfStats::Cost::Busy,
-                        pass_ns);
+                        waiting ? VideoCore::PerfStats::Cost::GuestWaits
+                                : VideoCore::PerfStats::Cost::Busy,
+                        now - pass_start);
+                }
+                if (!waiting || !idle_backoff.enabled) {
+                    idle_passes = 0;
+                    return;
+                }
+                // Spin briefly for a wait that ends soon, then give the core away.
+                constexpr u32 SpinPasses = 64;
+                constexpr u64 YieldAfterNs = 100'000;
+                constexpr u64 SleepAfterNs = 1'000'000;
+                if (++idle_passes < SpinPasses) {
+                    CpuRelax();
+                    return;
+                }
+                const u64 idle_now = VideoCore::PerfStats::NowNs();
+                if (idle_passes == SpinPasses) {
+                    idle_since = idle_now;
+                }
+                const u64 idle_ns = idle_now - idle_since;
+                if (idle_backoff.sleep_ns != 0 && idle_ns >= SleepAfterNs) {
+                    std::this_thread::sleep_for(std::chrono::nanoseconds{idle_backoff.sleep_ns});
+                } else if (idle_ns >= YieldAfterNs) {
+                    std::this_thread::yield();
+                } else {
+                    CpuRelax();
                 }
             };
-            ProcessCommands();
-            ProcessCeQueue();
+            if (num_commands) {
+                ran = true;
+                ProcessCommands();
+            }
+            ran |= ProcessCeQueue();
 
             curr_qid = (curr_qid + 1) % num_mapped_queues;
 
@@ -184,6 +253,7 @@ void Liverpool::Process(std::stop_token stoken) {
                 }
                 task = queue.submits.front();
             }
+            ran = true;
             task.resume();
 
             if (task.done()) {
