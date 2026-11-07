@@ -3,6 +3,7 @@
 
 #pragma once
 
+#include <array>
 #include <atomic>
 #include <deque>
 #include <memory>
@@ -144,6 +145,12 @@ public:
         readback_stats.throttle_ns += throttle_ns;
     }
 
+    /// Readback profiling: a fence that could have landed GPU-written memory but didn't,
+    /// because the last landing was too recent.
+    void RecordSkippedLanding() {
+        ++readback_stats.skipped_landings;
+    }
+
     /// Synchronizes all buffers needed for DMA.
     void SynchronizeDmaBuffers();
 
@@ -217,6 +224,19 @@ private:
     std::unique_ptr<Buffer> landing_ring;
     u64 landing_ring_head{};
     std::atomic<u64> landing_ring_tail{};
+    /// Why a synchronous readback was needed, for the readback stats.
+    enum class ReadReason : u8 {
+        /// The CPU read a page it hadn't read before.
+        FirstRead,
+        /// The CPU read a page it had read before, whose data hadn't landed.
+        RepeatRead,
+        /// The CPU wrote a page the GPU had written.
+        Write,
+        /// Anything else: unmaps, the texture cache, GC.
+        Other,
+    };
+    ReadReason read_reason{ReadReason::Other};
+
     /// Precise or Fenced: GPU-written pages are protected until their data is in guest memory.
     bool tracks_gpu_pages{};
 
@@ -230,6 +250,11 @@ private:
         u64 throttle_ns{};
         u64 deferred_fences{};
         u64 immediate_fences{};
+        u64 skipped_landings{};
+        u64 full_ring_landings{};
+        /// Stalling downloads and their stalls by why they were needed (ReadReason).
+        std::array<u64, 4> sync_by_reason{};
+        std::array<u64, 4> stall_ns_by_reason{};
         u64 last_log_ns{};
         u64 ab_switches{};
     } readback_stats;

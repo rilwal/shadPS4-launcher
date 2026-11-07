@@ -148,12 +148,15 @@ void BufferCache::UnmarkRegionAsGpuModified(VAddr device_addr, u64 size, bool is
 void BufferCache::ReadMemory(VAddr device_addr, u64 size, bool is_write, bool async,
                              bool assume_locks) {
     const auto flush_request = [this, device_addr, size, is_write, async] {
+        read_reason = is_write ? ReadReason::Write : ReadReason::Other;
         if (tracks_gpu_pages && !is_write && !async) {
             // A CPU read fault: remembered so fenced readbacks land this memory early from now
             // on. Write faults, unmaps and GC evictions also come here, but don't count.
             const VAddr page_start = Common::AlignDown(device_addr, BYTES_PER_PAGE);
-            cpu_read_ranges.Add(page_start,
-                                Common::AlignUp(device_addr + size, BYTES_PER_PAGE) - page_start);
+            const u64 page_size = Common::AlignUp(device_addr + size, BYTES_PER_PAGE) - page_start;
+            read_reason = cpu_read_ranges.Intersects(page_start, page_size) ? ReadReason::RepeatRead
+                                                                            : ReadReason::FirstRead;
+            cpu_read_ranges.Add(page_start, page_size);
         }
         const u32 first_block = device_addr >> block_shift;
         const u32 last_block = (device_addr + size - 1) >> block_shift;
@@ -168,6 +171,7 @@ void BufferCache::ReadMemory(VAddr device_addr, u64 size, bool is_write, bool as
         const VAddr window_end = std::min<VAddr>(
             std::max<VAddr>(window_start + WindowSize, device_addr + size), arena_end);
         DownloadMemory(arena, window_start, window_end - window_start, async);
+        read_reason = ReadReason::Other;
         if (is_write) {
             memory_tracker->MarkRegionAsCpuModified(device_addr, size);
         }
@@ -223,6 +227,7 @@ void BufferCache::DownloadMemory(const Buffer* arena, VAddr device_addr, u64 siz
     if (!async) {
         ++readback_stats.sync_downloads;
         readback_stats.sync_download_bytes += total_size_bytes;
+        ++readback_stats.sync_by_reason[static_cast<u32>(read_reason)];
     }
 
     const auto write_data = [this, arena_base, device_addr, size, download, async,
@@ -251,9 +256,11 @@ void BufferCache::DownloadMemory(const Buffer* arena, VAddr device_addr, u64 siz
     } else {
         const auto stall_start = std::chrono::steady_clock::now();
         scheduler.Finish();
-        readback_stats.stall_ns += std::chrono::duration_cast<std::chrono::nanoseconds>(
-                                       std::chrono::steady_clock::now() - stall_start)
-                                       .count();
+        const u64 stall_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(
+                                 std::chrono::steady_clock::now() - stall_start)
+                                 .count();
+        readback_stats.stall_ns += stall_ns;
+        readback_stats.stall_ns_by_reason[static_cast<u32>(read_reason)] += stall_ns;
         write_data();
     }
 }
@@ -326,6 +333,7 @@ bool BufferCache::LandGpuModifiedMemory() {
     }
     const u64 ring_end = ring_start + total_size_bytes;
     if (ring_end - landing_ring_tail.load(std::memory_order_acquire) > LandingRingSize) {
+        ++readback_stats.full_ring_landings;
         return false;
     }
     landing_ring_head = ring_end;
@@ -434,6 +442,16 @@ void BufferCache::FlushReadbackStats() {
                  stats.landings / seconds, stats.landing_bytes / 1024.0 / seconds,
                  stats.deferred_fences / seconds, stats.immediate_fences / seconds,
                  stats.throttle_ns / 1e6 / seconds);
+        const auto& n = stats.sync_by_reason;
+        const auto& ns = stats.stall_ns_by_reason;
+        LOG_INFO(Render,
+                 "Stalling downloads per second [{}]: first reads {:.1f} ({:.2f} ms), repeat reads "
+                 "{:.1f} ({:.2f} ms), writes {:.1f} ({:.2f} ms), other {:.1f} ({:.2f} ms); "
+                 "landings skipped {:.1f} as too soon, {:.1f} for a full ring",
+                 variant ? variant : "-", n[0] / seconds, ns[0] / 1e6 / seconds, n[1] / seconds,
+                 ns[1] / 1e6 / seconds, n[2] / seconds, ns[2] / 1e6 / seconds, n[3] / seconds,
+                 ns[3] / 1e6 / seconds, stats.skipped_landings / seconds,
+                 stats.full_ring_landings / seconds);
     }
     stats = ReadbackStats{.last_log_ns = now, .ab_switches = Common::AbSwitch::Switches()};
 }

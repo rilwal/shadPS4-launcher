@@ -632,8 +632,15 @@ bool Rasterizer::DeferFenceSignal(Common::UniqueFunction<void>&& signal, bool th
     // fences a second. Skipping one is always safe: what it would have landed stays protected,
     // so a CPU read of it takes the fault path as with Precise. So buffers land only at the
     // end-of-frame fences, and at most every MinLandingInterval at the others.
-    constexpr auto MinLandingInterval = std::chrono::milliseconds{1};
+    // SHADPS4_LANDING_INTERVAL_US sets it, for measuring.
+    static const auto MinLandingInterval = [] {
+        const char* env = std::getenv("SHADPS4_LANDING_INTERVAL_US");
+        return std::chrono::microseconds{env ? std::strtoull(env, nullptr, 10) : 1000};
+    }();
     const bool land = fenced && (throttle || now - last_landing >= MinLandingInterval);
+    if (fenced && !land) {
+        buffer_cache.RecordSkippedLanding();
+    }
 
     // Priority operations run in order once the GPU reaches their tick, so the image and
     // buffer data queued here land in guest memory before the signal runs. Right after an
