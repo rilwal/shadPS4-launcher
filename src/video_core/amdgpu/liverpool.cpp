@@ -375,11 +375,10 @@ bool Liverpool::DeferFenceSignal(Common::UniqueFunction<void>&& signal, bool thr
     return true;
 }
 
-bool Liverpool::OrderCpWrite(VAddr address, u64 size, const void* data, const char* what,
-                             bool can_defer) {
+void Liverpool::OrderCpWrite(VAddr address, u64 size, const void* data, const char* what) {
     Core::MemoryManager::NoteWatchedWrite(address, size, data, what);
     if (size == 0) {
-        return false;
+        return;
     }
     const u64 landed = landed_label_seq.load(std::memory_order_acquire);
     u64 need = cp_order_seq;
@@ -405,33 +404,6 @@ bool Liverpool::OrderCpWrite(VAddr address, u64 size, const void* data, const ch
         for_each_overlap(
             [&](const DeferredLabel& deferred) { need = std::max(need, deferred.seq); });
     }
-    // A small write with its data at hand (WRITE_DATA, mostly labels) queues behind the
-    // deferred signals instead, like one more: the command processor doesn't stop, and its
-    // own waits read the value from the deferred labels as for a signal. Bloodborne does
-    // ~200 such writes a second right behind fences, and waiting for each cost 3 ms a frame.
-    constexpr u64 MaxDeferredWrite = 64;
-    if (need > landed && rasterizer && can_defer && data && size <= MaxDeferredWrite &&
-        address % sizeof(u32) == 0 && size % sizeof(u32) == 0) {
-        boost::container::small_vector<u32, MaxDeferredWrite / sizeof(u32)> words(size /
-                                                                                  sizeof(u32));
-        std::memcpy(words.data(), data, size);
-        LabelWrites writes;
-        for (u32 i = 0; i < words.size(); ++i) {
-            writes.emplace_back(address + i * sizeof(u32), words[i]);
-        }
-        const bool deferred = DeferFenceSignal(
-            [address, words = std::move(words), what] {
-                const u64 bytes = words.size() * sizeof(u32);
-                Core::MemoryManager::NoteWatchedWrite(address, bytes, words.data(), what);
-                ASSERT(Core::Memory::Instance()->TryWriteBacking(std::bit_cast<void*>(address),
-                                                                 words.data(), bytes));
-            },
-            false, writes);
-        if (deferred) {
-            ++wait_stats.deferred_writes;
-            return true;
-        }
-    }
     if (need > landed && rasterizer) {
         // Only the GPU work queued before the signal is waited for, as hardware would have
         // at the wait. The signal's tick may not be submitted yet.
@@ -448,7 +420,7 @@ bool Liverpool::OrderCpWrite(VAddr address, u64 size, const void* data, const ch
                                         .count();
     }
     if (deferred_labels.empty()) {
-        return false;
+        return;
     }
     // The command processor's own waits must now read this write from memory.
     if (walk_dwords) {
@@ -460,7 +432,6 @@ bool Liverpool::OrderCpWrite(VAddr address, u64 size, const void* data, const ch
             return entry.first >= first_dword && entry.first < end;
         });
     }
-    return false;
 }
 
 bool Liverpool::TestWait(const PM4CmdWaitRegMem* wait) {
@@ -504,18 +475,17 @@ void Liverpool::LogWaitStats() {
     }
     const double seconds = double(now - wait_stats.last_log_ns) / 1e9;
     if (seconds > 0.5 && (wait_stats.failed_polls != 0 || wait_stats.deferred_label_hits != 0 ||
-                          wait_stats.order_waits != 0 || wait_stats.deferred_writes != 0)) {
+                          wait_stats.order_waits != 0)) {
         const char* variant = Common::AbSwitch::Label();
         if (variant && switched) {
             variant = Common::AbSwitch::LabelOf(!Common::AbSwitch::IsB());
         }
         LOG_INFO(Render,
                  "Queue waits per second [{}] over {:.1f} s: {:.0f} polls failed, {:.0f} read a "
-                 "deferred label, {:.0f} writes queued behind one, {:.0f} waited for one "
-                 "({:.2f} ms)",
+                 "deferred label, {:.0f} writes waited for one ({:.2f} ms)",
                  variant ? variant : "-", seconds, wait_stats.failed_polls / seconds,
-                 wait_stats.deferred_label_hits / seconds, wait_stats.deferred_writes / seconds,
-                 wait_stats.order_waits / seconds, wait_stats.order_wait_ns / 1e6 / seconds);
+                 wait_stats.deferred_label_hits / seconds, wait_stats.order_waits / seconds,
+                 wait_stats.order_wait_ns / 1e6 / seconds);
     }
     wait_stats = WaitStats{.last_log_ns = now, .ab_switches = switches};
 }
@@ -1371,10 +1341,9 @@ Liverpool::Task Liverpool::ProcessGraphics(std::span<const u32> dcb) {
                     if (rasterizer) {
                         rasterizer->OnFence();
                     }
-                    if (!OrderCpWrite(std::bit_cast<VAddr>(address), data_size, write_data->data,
-                                      "a WRITE_DATA", true)) {
-                        std::memcpy(address, write_data->data, data_size);
-                    }
+                    OrderCpWrite(std::bit_cast<VAddr>(address), data_size, write_data->data,
+                                 "a WRITE_DATA");
+                    std::memcpy(address, write_data->data, data_size);
                 } else {
                     UNREACHABLE();
                 }
@@ -1774,10 +1743,9 @@ Liverpool::Task Liverpool::ProcessCompute(std::span<const u32> acb, u32 vqid) {
                 if (rasterizer) {
                     rasterizer->OnFence();
                 }
-                if (!OrderCpWrite(write_data->Address<VAddr>(), data_size, write_data->data,
-                                  "a WRITE_DATA", true)) {
-                    std::memcpy(write_data->Address<void*>(), write_data->data, data_size);
-                }
+                OrderCpWrite(write_data->Address<VAddr>(), data_size, write_data->data,
+                             "a WRITE_DATA");
+                std::memcpy(write_data->Address<void*>(), write_data->data, data_size);
             } else {
                 UNREACHABLE();
             }
