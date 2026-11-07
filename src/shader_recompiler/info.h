@@ -202,6 +202,11 @@ struct Info : InfoPersistent {
         if (ptr_index != IR::NumScalarRegs) {
             std::memcpy(&base, &user_data[ptr_index], sizeof(base));
             base = reinterpret_cast<const u32*>(VAddr(base) & 0xFFFFFFFFFFFFULL);
+            if (base == nullptr) {
+                // A table pointer the game hasn't set up (Bloodborne's loading, run uncapped).
+                // The GPU would fault on it; reading host address 0 crashes the emulator.
+                return T{};
+            }
         }
         std::memcpy(&data, base + dword_offset, sizeof(T));
         return data;
