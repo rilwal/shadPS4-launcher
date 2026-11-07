@@ -421,7 +421,13 @@ struct GPUSettings {
     Setting<u32> internal_screen_height{720};
     Setting<bool> null_gpu{false};
     Setting<bool> copy_gpu_buffers{false};
-    Setting<u32> readbacks_mode{GpuReadbacksMode::Disabled};
+    /// Fenced: GPU-written memory lands in guest memory at fences, and CPU reads of memory
+    /// still in flight wait for it. Measured as cheap as Disabled where nothing is read back.
+    Setting<u32> readbacks_mode{GpuReadbacksMode::Fenced};
+    /// With Precise or Fenced readbacks, a CPU load that faults on a protected page but reads
+    /// none of its GPU-written bytes is finished from guest memory by the fault handler instead
+    /// of reading the page back (src/core/fault_load.h). Linux x86-64 only.
+    Setting<bool> fault_load_emulation{true};
     Setting<bool> readback_linear_images_enabled{false};
     Setting<bool> direct_memory_access_enabled{false};
     Setting<bool> dump_shaders{false};
@@ -490,6 +496,7 @@ struct GPUSettings {
             make_override<GPUSettings>("dump_shaders", &GPUSettings::dump_shaders),
             make_override<GPUSettings>("patch_shaders", &GPUSettings::patch_shaders),
             make_override<GPUSettings>("readbacks_mode", &GPUSettings::readbacks_mode),
+            make_override<GPUSettings>("fault_load_emulation", &GPUSettings::fault_load_emulation),
             make_override<GPUSettings>("readback_linear_images_enabled",
                                        &GPUSettings::readback_linear_images_enabled),
             make_override<GPUSettings>("direct_memory_access_enabled",
@@ -520,13 +527,13 @@ struct GPUSettings {
 };
 NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE(
     GPUSettings, window_width, window_height, internal_screen_width, internal_screen_height,
-    null_gpu, copy_gpu_buffers, readbacks_mode, readback_linear_images_enabled,
-    direct_memory_access_enabled, dump_shaders, patch_shaders, vblank_frequency, full_screen,
-    full_screen_mode, present_mode, hdr_allowed, fsr_enabled, rcas_enabled, rcas_attenuation,
-    userfaultfd, inline_fetch_shader, fast_shader_math, async_pipelines, async_pipeline_wait_ms,
-    async_pipelines_ab_seconds, pipeline_compile_probe, descriptor_heap, shader_objects,
-    compile_lookahead, shader_prescan, fewer_shader_variants, gpu_timing, shader_precompile_threads,
-    ab_switch_seconds)
+    null_gpu, copy_gpu_buffers, readbacks_mode, fault_load_emulation,
+    readback_linear_images_enabled, direct_memory_access_enabled, dump_shaders, patch_shaders,
+    vblank_frequency, full_screen, full_screen_mode, present_mode, hdr_allowed, fsr_enabled,
+    rcas_enabled, rcas_attenuation, userfaultfd, inline_fetch_shader, fast_shader_math,
+    async_pipelines, async_pipeline_wait_ms, async_pipelines_ab_seconds, pipeline_compile_probe,
+    descriptor_heap, shader_objects, compile_lookahead, shader_prescan, fewer_shader_variants,
+    gpu_timing, shader_precompile_threads, ab_switch_seconds)
 
 // -------------------------------
 // Vulkan settings
@@ -828,6 +835,7 @@ public:
     SETTING_FORWARD_BOOL(m_gpu, RcasEnabled, rcas_enabled)
     SETTING_FORWARD(m_gpu, RcasAttenuation, rcas_attenuation)
     SETTING_FORWARD(m_gpu, ReadbacksMode, readbacks_mode)
+    SETTING_FORWARD_BOOL(m_gpu, FaultLoadEmulation, fault_load_emulation)
     SETTING_FORWARD(m_gpu, AbSwitchSeconds, ab_switch_seconds)
     SETTING_FORWARD_BOOL(m_gpu, ReadbackLinearImagesEnabled, readback_linear_images_enabled)
     SETTING_FORWARD_BOOL(m_gpu, DirectMemoryAccessEnabled, direct_memory_access_enabled)

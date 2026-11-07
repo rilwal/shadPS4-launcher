@@ -395,6 +395,12 @@ const std::vector<Entry>& Entries() {
             [](const std::string& value) {
                 EmulatorSettings.SetReadbacksMode(static_cast<u32>(std::stoi(value)), G);
             }));
+        e.push_back(Toggle(
+            "fault-load-emulation", "Finish reads without readbacks", "Accuracy",
+            "With Precise or Fenced readbacks, finish a game read that touches none of the GPU's "
+            "data from memory instead of waiting for the GPU. Turn off to compare.",
+            [] { return EmulatorSettings.IsFaultLoadEmulation(); },
+            [](bool v) { EmulatorSettings.SetFaultLoadEmulation(v, G); }));
         // A/B testing: flip between two variants of an experiment while the game runs
         // (e.g. Precise vs Fenced readbacks), which compares them with far less noise than
         // separate runs. The active variant shows under the FPS counter.

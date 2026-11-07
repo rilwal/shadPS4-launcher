@@ -97,13 +97,10 @@ private:
 
 FaultAhead fault_ahead;
 
-/// SHADPS4_FAULT_LOADS=1: read faults whose load reads no GPU-written bytes are finished from
-/// guest memory (Core::FaultLoad) instead of reading back the page.
+/// Read faults whose load reads no GPU-written bytes are finished from guest memory
+/// (Core::FaultLoad) instead of reading back the page. Read once: the handler runs often.
 bool FaultLoadsEnabled() {
-    static const bool enabled = [] {
-        const char* env = std::getenv("SHADPS4_FAULT_LOADS");
-        return env != nullptr && env[0] == '1';
-    }();
+    static const bool enabled = EmulatorSettings.IsFaultLoadEmulation();
     return enabled;
 }
 
