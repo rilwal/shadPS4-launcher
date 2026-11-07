@@ -1110,6 +1110,7 @@ void Rasterizer::BindBuffers(const Shader::Info& stage, Shader::Backend::Binding
                     // hashing their memory as maybe GPU-dirty: that hash is never used.
                     texture_cache.InvalidateMemoryFromGPU(vsharp.base_address, size);
                 }
+                VideoCore::PerfStats::CountLocal(VideoCore::PerfStats::Cost::BoundBuffers);
                 const auto [buffer, offset] =
                     buffer_cache.ObtainBuffer(vsharp.base_address, size, flags);
                 const u64 offset_aligned = Common::AlignDown(offset, alignment);
@@ -1201,6 +1202,7 @@ void Rasterizer::BindTextures(const Shader::Info& stage, Shader::Backend::Bindin
                 desc.view_info.range.extent.levels = 1;
             }
 
+            VideoCore::PerfStats::CountLocal(VideoCore::PerfStats::Cost::BoundImages);
             image_id = texture_cache.FindImage(desc);
             auto* image = &texture_cache.GetImage(image_id);
             if (auto depth_image_id = texture_cache.GetAssociatedDepth(*image)) {

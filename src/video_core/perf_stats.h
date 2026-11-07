@@ -111,6 +111,8 @@ enum class Cost : u32 {
     ImageBytes,   ///< Their guest size (bytes).
     Draws,        ///< Draws recorded (a count).
     Dispatches,   ///< Dispatches recorded (a count).
+    BoundBuffers, ///< Guest buffers bound to draws and dispatches (a count).
+    BoundImages,  ///< Images bound to draws and dispatches (a count).
     // Command translation for draws and dispatches, split only with SHADPS4_DRAW_COSTS=1; the
     // named costs above (shaders, textures, buffers) stay out of these.
     DrawChecks,  ///< Pending GPU operations, draw filters, render state set-up.
@@ -293,18 +295,18 @@ struct Frames {
                               ms(Cost::DrawChecks), ms(Cost::Pipelines), ms(Cost::Bindings),
                               ms(Cost::Targets), ms(Cost::Descriptors), ms(Cost::Recording));
         return fmt::format(
-            "{} draws and {} dispatches; "
+            "{} draws and {} dispatches binding {} buffers and {} images; "
             "busy {:.1f} ms (shaders {:.1f}, textures {:.1f} for {} images of {:.1f} MB, "
             "buffers {:.1f} for {:.1f} MB, GPU "
             "waits {:.1f}, submits {:.1f}, present waits {:.1f}, flips {:.1f}, DMA {:.1f}{}, "
             "other {:.1f}), "
             "guest waits {:.1f} ms; page faults {} taking {:.1f} ms, {} pages "
             "unprotected ahead",
-            c[size_t(Cost::Draws)], c[size_t(Cost::Dispatches)], busy / 1e6, ms(Cost::Shaders),
-            ms(Cost::Textures), c[size_t(Cost::ImageUploads)],
-            c[size_t(Cost::ImageBytes)] / 1048576.0, ms(Cost::Buffers),
-            c[size_t(Cost::BufferBytes)] / 1048576.0, ms(Cost::GpuWaits), ms(Cost::Submits),
-            ms(Cost::Presents), ms(Cost::Flips), ms(Cost::Dma), steps,
+            c[size_t(Cost::Draws)], c[size_t(Cost::Dispatches)], c[size_t(Cost::BoundBuffers)],
+            c[size_t(Cost::BoundImages)], busy / 1e6, ms(Cost::Shaders), ms(Cost::Textures),
+            c[size_t(Cost::ImageUploads)], c[size_t(Cost::ImageBytes)] / 1048576.0,
+            ms(Cost::Buffers), c[size_t(Cost::BufferBytes)] / 1048576.0, ms(Cost::GpuWaits),
+            ms(Cost::Submits), ms(Cost::Presents), ms(Cost::Flips), ms(Cost::Dma), steps,
             busy > named ? (busy - named) / 1e6 : 0.0, ms(Cost::GuestWaits),
             c[size_t(Cost::NumFaults)], ms(Cost::Faults), c[size_t(Cost::PagesAhead)]);
     }
@@ -358,6 +360,9 @@ private:
 };
 
 inline Frames frames;
+
+/// Counts one of something on the GPU thread, in its thread-local sums (no atomics).
+inline void CountLocal(Cost cost, u64 amount = 1);
 
 /// Adds the time it's alive to a cost, on the GPU thread. Nested scopes pause the outer one, so
 /// each nanosecond lands in one cost only (a buffer sync that waits on the GPU is a GPU wait).
@@ -421,6 +426,10 @@ private:
     ScopedCost* parent = nullptr;
     u64 start = 0;
 };
+
+inline void CountLocal(Cost cost, u64 amount) {
+    ScopedCost::local_costs[static_cast<size_t>(cost)] += amount;
+}
 
 inline void Frames::FlushLocalCosts() {
     auto& local = ScopedCost::local_costs;
