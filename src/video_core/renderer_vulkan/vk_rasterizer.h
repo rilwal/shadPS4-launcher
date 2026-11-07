@@ -88,6 +88,10 @@ public:
     /// Removes buffer write traps ahead of a guest that's writing memory in order.
     void InvalidateMemoryAhead(VAddr addr, u64 size);
     bool ReadMemory(VAddr addr, u64 size, bool assume_locks = false);
+    /// ReadMemory for a read fault whose load the handler decoded (BufferCache::ReadMemoryForLoad).
+    /// `served` says the load's bytes were copied to `data` instead of read back.
+    bool ReadMemoryForLoad(VAddr addr, u64 size, VAddr load_addr, u32 load_size, u16 mnemonic,
+                           u8* data, bool& served);
     bool IsMapped(VAddr addr, u64 size);
     void MapMemory(VAddr addr, u64 size);
     void RegisterMemory(VAddr addr, u64 size);

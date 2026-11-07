@@ -4,6 +4,7 @@
 #include <algorithm>
 #include <chrono>
 #include <optional>
+#include <Zydis/Zydis.h>
 #include <magic_enum/magic_enum.hpp>
 #include <xxhash.h>
 
@@ -147,42 +148,73 @@ void BufferCache::UnmarkRegionAsGpuModified(VAddr device_addr, u64 size, bool is
 
 void BufferCache::ReadMemory(VAddr device_addr, u64 size, bool is_write, bool async,
                              bool assume_locks) {
-    const auto flush_request = [this, device_addr, size, is_write, async] {
-        read_reason = is_write ? ReadReason::Write : ReadReason::Other;
-        if (tracks_gpu_pages && !is_write && !async) {
-            // A CPU read fault: remembered so fenced readbacks land this memory early from now
-            // on. Write faults, unmaps and GC evictions also come here, but don't count.
-            const VAddr page_start = Common::AlignDown(device_addr, BYTES_PER_PAGE);
-            const u64 page_size = Common::AlignUp(device_addr + size, BYTES_PER_PAGE) - page_start;
-            read_reason = cpu_read_ranges.Intersects(page_start, page_size) ? ReadReason::RepeatRead
-                                                                            : ReadReason::FirstRead;
-            cpu_read_ranges.Add(page_start, page_size);
-            if (read_reason == ReadReason::RepeatRead) {
-                NoteRepeatRead(device_addr, size);
-            }
-        }
-        const u32 first_block = device_addr >> block_shift;
-        const u32 last_block = (device_addr + size - 1) >> block_shift;
-        const auto* arena = GetArena(first_block, last_block);
-
-        // GPU-modified ranges come as many small scattered islands,
-        // so the download is widened to a window around the request
-        constexpr u64 WindowSize = 512_KB;
-        const VAddr arena_end = arena->cpu_addr + arena->size_bytes;
-        const VAddr window_start =
-            std::max<VAddr>(Common::AlignDown(device_addr, WindowSize), arena->cpu_addr);
-        const VAddr window_end = std::min<VAddr>(
-            std::max<VAddr>(window_start + WindowSize, device_addr + size), arena_end);
-        DownloadMemory(arena, window_start, window_end - window_start, async);
-        read_reason = ReadReason::Other;
-        if (is_write) {
-            memory_tracker->MarkRegionAsCpuModified(device_addr, size);
-        }
-    };
     if (assume_locks) {
-        flush_request();
+        ReadMemoryNow(device_addr, size, is_write, async);
     } else {
-        liverpool->SendCommand<true>(std::move(flush_request));
+        liverpool->SendCommand<true>([this, device_addr, size, is_write, async] {
+            ReadMemoryNow(device_addr, size, is_write, async);
+        });
+    }
+}
+
+bool BufferCache::ReadMemoryForLoad(VAddr device_addr, u64 size, VAddr load_addr, u32 load_size,
+                                    u16 mnemonic, u8* data) {
+    bool served = false;
+    liverpool->SendCommand<true>([&] {
+        if (load_size == 0) {
+            ++unsupported_loads[mnemonic];
+        } else if (!GpuBytesPending(load_addr, load_size) &&
+                   memory->TryReadBacking(load_addr, data, load_size)) {
+            // Only bytes the CPU has the current data of: guest memory has them already.
+            ++readback_stats.served_loads;
+            served = true;
+            return;
+        } else {
+            ++readback_stats.gpu_byte_loads;
+        }
+        ReadMemoryNow(device_addr, size, false, false);
+    });
+    return served;
+}
+
+bool BufferCache::GpuBytesPending(VAddr address, u64 size) const {
+    return gpu_modified_ranges.Intersects(address, size) ||
+           async_downloads.Intersects(address, size) ||
+           std::ranges::any_of(landings, [&](const auto& landing) {
+               return landing->ranges.Intersects(address, size);
+           });
+}
+
+void BufferCache::ReadMemoryNow(VAddr device_addr, u64 size, bool is_write, bool async) {
+    read_reason = is_write ? ReadReason::Write : ReadReason::Other;
+    if (tracks_gpu_pages && !is_write && !async) {
+        // A CPU read fault: remembered so fenced readbacks land this memory early from now
+        // on. Write faults, unmaps and GC evictions also come here, but don't count.
+        const VAddr page_start = Common::AlignDown(device_addr, BYTES_PER_PAGE);
+        const u64 page_size = Common::AlignUp(device_addr + size, BYTES_PER_PAGE) - page_start;
+        read_reason = cpu_read_ranges.Intersects(page_start, page_size) ? ReadReason::RepeatRead
+                                                                        : ReadReason::FirstRead;
+        cpu_read_ranges.Add(page_start, page_size);
+        if (read_reason == ReadReason::RepeatRead) {
+            NoteRepeatRead(device_addr, size);
+        }
+    }
+    const u32 first_block = device_addr >> block_shift;
+    const u32 last_block = (device_addr + size - 1) >> block_shift;
+    const auto* arena = GetArena(first_block, last_block);
+
+    // GPU-modified ranges come as many small scattered islands,
+    // so the download is widened to a window around the request
+    constexpr u64 WindowSize = 512_KB;
+    const VAddr arena_end = arena->cpu_addr + arena->size_bytes;
+    const VAddr window_start =
+        std::max<VAddr>(Common::AlignDown(device_addr, WindowSize), arena->cpu_addr);
+    const VAddr window_end =
+        std::min<VAddr>(std::max<VAddr>(window_start + WindowSize, device_addr + size), arena_end);
+    DownloadMemory(arena, window_start, window_end - window_start, async);
+    read_reason = ReadReason::Other;
+    if (is_write) {
+        memory_tracker->MarkRegionAsCpuModified(device_addr, size);
     }
 }
 
@@ -480,6 +512,25 @@ void BufferCache::FlushReadbackStats() {
                  ns[1] / 1e6 / seconds, n[2] / seconds, ns[2] / 1e6 / seconds, n[3] / seconds,
                  ns[3] / 1e6 / seconds, stats.skipped_landings / seconds,
                  stats.full_ring_landings / seconds);
+        if (stats.served_loads != 0 || stats.gpu_byte_loads != 0 || !unsupported_loads.empty()) {
+            std::vector<std::pair<u16, u32>> loads(unsupported_loads.begin(),
+                                                   unsupported_loads.end());
+            const size_t shown = std::min<size_t>(loads.size(), 5);
+            std::partial_sort(loads.begin(), loads.begin() + shown, loads.end(),
+                              [](const auto& a, const auto& b) { return a.second > b.second; });
+            std::string top;
+            for (size_t i = 0; i < shown; ++i) {
+                const char* name =
+                    ZydisMnemonicGetString(static_cast<ZydisMnemonic>(loads[i].first));
+                top += fmt::format("{}{} {:.1f}", i ? ", " : "", name ? name : "?",
+                                   loads[i].second / seconds);
+            }
+            LOG_INFO(Render,
+                     "Read faults per second [{}]: {:.1f} served from guest memory (no GPU bytes), "
+                     "{:.1f} read GPU bytes; not decoded: {}",
+                     variant ? variant : "-", stats.served_loads / seconds,
+                     stats.gpu_byte_loads / seconds, top.empty() ? "none" : top);
+        }
         if (n[1] != 0) {
             std::vector<std::pair<VAddr, FaultPage>> pages(fault_pages.begin(), fault_pages.end());
             const size_t shown = std::min<size_t>(pages.size(), 6);
@@ -499,6 +550,7 @@ void BufferCache::FlushReadbackStats() {
         }
     }
     fault_pages.clear();
+    unsupported_loads.clear();
     stats = ReadbackStats{.last_log_ns = now, .ab_switches = Common::AbSwitch::Switches()};
 }
 

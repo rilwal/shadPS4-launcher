@@ -108,6 +108,13 @@ public:
     void ReadMemory(VAddr device_addr, u64 size, bool is_write = false, bool async = false,
                     bool assume_locks = false);
 
+    /// A CPU read fault from a load the fault handler decoded (load_size 0 if it couldn't, with
+    /// its mnemonic for the stats). If the load reads no byte whose GPU data is still on the GPU,
+    /// copies its bytes from guest memory into `data` and returns true: the handler finishes the
+    /// load. Otherwise reads back as ReadMemory does and returns false. Not on the GPU thread.
+    bool ReadMemoryForLoad(VAddr device_addr, u64 size, VAddr load_addr, u32 load_size,
+                           u16 mnemonic, u8* data);
+
     /// Fenced readbacks: records copies of every GPU-modified buffer range into staging memory.
     /// They are written to guest memory on the scheduler's priority thread once the GPU reaches
     /// the current tick, so a priority operation queued after this runs after they've landed.
@@ -245,6 +252,15 @@ private:
     };
     std::unordered_map<VAddr, FaultPage> fault_pages;
 
+    /// ReadMemory's work, on the GPU thread.
+    void ReadMemoryNow(VAddr device_addr, u64 size, bool is_write, bool async);
+
+    /// Whether any byte of the range has GPU data not yet in guest memory.
+    [[nodiscard]] bool GpuBytesPending(VAddr address, u64 size) const;
+
+    /// Read faults whose load the handler couldn't decode, by mnemonic, this stats window.
+    std::unordered_map<u16, u32> unsupported_loads;
+
     /// Readback profiling of a repeat read fault at the address.
     void NoteRepeatRead(VAddr address, u64 size);
 
@@ -270,6 +286,9 @@ private:
         /// page), and repeat reads of a page a landing in flight is filling.
         u64 repeat_reads_of_gpu_bytes{};
         u64 repeat_reads_in_flight{};
+        /// Read faults finished from guest memory, and ones that read GPU bytes.
+        u64 served_loads{};
+        u64 gpu_byte_loads{};
         u64 last_log_ns{};
         u64 ab_switches{};
     } readback_stats;

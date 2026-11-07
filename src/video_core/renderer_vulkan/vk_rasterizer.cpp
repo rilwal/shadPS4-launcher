@@ -1741,6 +1741,16 @@ bool Rasterizer::ReadMemory(VAddr addr, u64 size, bool assume_locks) {
     return true;
 }
 
+bool Rasterizer::ReadMemoryForLoad(VAddr addr, u64 size, VAddr load_addr, u32 load_size,
+                                   u16 mnemonic, u8* data, bool& served) {
+    served = false;
+    if (!IsMapped(addr, size)) {
+        return false;
+    }
+    served = buffer_cache.ReadMemoryForLoad(addr, size, load_addr, load_size, mnemonic, data);
+    return true;
+}
+
 bool Rasterizer::IsMapped(VAddr addr, u64 size) {
     if (size == 0) {
         // There is no memory, so not mapped.

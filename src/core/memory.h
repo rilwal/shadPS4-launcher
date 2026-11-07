@@ -3,6 +3,7 @@
 
 #pragma once
 
+#include <functional>
 #include <map>
 #include <mutex>
 #include <string>
@@ -259,6 +260,9 @@ public:
 
     bool TryWriteBacking(void* address, const void* data, u64 size);
 
+    /// Reads guest memory through its backing, which page protection doesn't cover.
+    bool TryReadBacking(VAddr address, void* data, u64 size);
+
     void SetupMemoryRegions(u64 flexible_size, bool use_extended_mem1, bool use_extended_mem2);
 
     PAddr PoolExpand(PAddr search_start, PAddr search_end, u64 size, u64 alignment);
@@ -312,6 +316,10 @@ public:
     std::vector<std::pair<VAddr, u64>> MappedRanges();
 
 private:
+    /// Calls func(backing, offset, length) for each physically backed piece of the range.
+    bool ForEachBacking(VAddr virtual_addr, u64 size,
+                        const std::function<void(u8*, u64, u64)>& func);
+
     VMAHandle FindVMA(VAddr target) {
         return std::prev(vma_map.upper_bound(target));
     }

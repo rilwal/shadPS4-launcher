@@ -15,6 +15,7 @@
 #include "common/signal_context.h"
 #include "common/thread.h"
 #include "core/emulator_settings.h"
+#include "core/fault_load.h"
 #include "core/memory.h"
 #include "core/signals.h"
 #include "video_core/page_manager.h"
@@ -94,6 +95,16 @@ private:
 };
 
 FaultAhead fault_ahead;
+
+/// SHADPS4_FAULT_LOADS=1: read faults whose load reads no GPU-written bytes are finished from
+/// guest memory (Core::FaultLoad) instead of reading back the page.
+bool FaultLoadsEnabled() {
+    static const bool enabled = [] {
+        const char* env = std::getenv("SHADPS4_FAULT_LOADS");
+        return env != nullptr && env[0] == '1';
+    }();
+    return enabled;
+}
 
 /// Handles a write fault on tracked memory, then unprotects ahead of it if the guest is
 /// writing in order. Not on the GPU thread, which may hold the trackers' locks.
@@ -518,7 +529,25 @@ struct SignalImpl : public PageManager::Impl {
             return HandleWriteFault(rasterizer, addr, size, is_gpu_thread);
         }
         const u64 start = VideoCore::PerfStats::NowNs();
-        const bool handled = rasterizer->ReadMemory(addr, size, is_gpu_thread);
+        bool handled;
+        if (!is_gpu_thread && FaultLoadsEnabled()) {
+            // A load that reads no GPU-written bytes is finished here from guest memory, which
+            // has the current data of everything else, instead of reading back the page.
+            Core::FaultLoad load{};
+            const bool decoded = Core::DecodeFaultLoad(context, load) && addr >= load.address &&
+                                 addr < load.address + load.size;
+            std::array<u8, 32> data;
+            bool served = false;
+            handled = rasterizer->ReadMemoryForLoad(addr, size, decoded ? load.address : 0,
+                                                    decoded ? load.size : 0, load.mnemonic,
+                                                    data.data(), served);
+            if (served && !Core::CompleteFaultLoad(context, load, data.data())) {
+                // Can't happen after a successful decode; retrying faults again and reads back.
+                handled = rasterizer->ReadMemory(addr, size, false);
+            }
+        } else {
+            handled = rasterizer->ReadMemory(addr, size, is_gpu_thread);
+        }
         if (handled) {
             VideoCore::PerfStats::frames.AddFault(VideoCore::PerfStats::NowNs() - start);
         }

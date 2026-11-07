@@ -164,7 +164,20 @@ void MemoryManager::CopySparseMemory(VAddr virtual_addr, u8* dest, u64 size) {
 }
 
 bool MemoryManager::TryWriteBacking(void* address, const void* data, u64 size) {
-    const VAddr virtual_addr = std::bit_cast<VAddr>(address);
+    return ForEachBacking(std::bit_cast<VAddr>(address), size,
+                          [data](u8* backing, u64 offset, u64 length) {
+                              memcpy(backing, static_cast<const u8*>(data) + offset, length);
+                          });
+}
+
+bool MemoryManager::TryReadBacking(VAddr address, void* data, u64 size) {
+    return ForEachBacking(address, size, [data](u8* backing, u64 offset, u64 length) {
+        memcpy(static_cast<u8*>(data) + offset, backing, length);
+    });
+}
+
+bool MemoryManager::ForEachBacking(VAddr virtual_addr, u64 size,
+                                   const std::function<void(u8*, u64, u64)>& func) {
     std::shared_lock lk{mutex};
     ASSERT_MSG(IsValidMapping(virtual_addr, size), "Attempted to access invalid address {:#x}",
                virtual_addr);
@@ -184,6 +197,7 @@ bool MemoryManager::TryWriteBacking(void* address, const void* data, u64 size) {
         return false;
     }
 
+    u64 offset = 0;
     for (const auto* vma_ptr : vmas_to_write) {
         const auto& vma = *vma_ptr;
         auto start_in_vma = std::max<VAddr>(virtual_addr, vma.base) - vma.base;
@@ -196,8 +210,8 @@ bool MemoryManager::TryWriteBacking(void* address, const void* data, u64 size) {
                 std::max<u64>(start_in_vma, phys_handle->first) - phys_handle->first;
             u8* backing = impl.BackingBase() + phys_handle->second.base + start_in_dma;
             u64 copy_size = std::min<u64>(size, phys_handle->second.size - start_in_dma);
-            memcpy(backing, data, copy_size);
-            data = static_cast<const u8*>(data) + copy_size;
+            func(backing, offset, copy_size);
+            offset += copy_size;
             size -= copy_size;
         }
     }
