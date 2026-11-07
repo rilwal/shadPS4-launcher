@@ -57,18 +57,23 @@ Rasterizer::Rasterizer(const Instance& instance_, Scheduler& scheduler_, Runtime
         liverpool->BindRasterizer(this);
     }
     memory->SetRasterizer(this);
-    // Off the GPU thread everything counts as pending, so the guest is read directly.
-    pipeline_cache.SetGpuBytesPending([this](VAddr address, u64 size) {
-        return std::this_thread::get_id() != liverpool->GetGpuCommandProcessorThread() ||
-               buffer_cache.GpuBytesPending(address, size);
-    });
-    // Only the GPU thread may look at the buffer cache's pending ranges; other threads that
-    // parse fetch shaders (compile workers) read the guest directly.
-    Shader::Gcn::SetGuestCodeReader([this](VAddr address, void* data, u64 size) {
-        return std::this_thread::get_id() == liverpool->GetGpuCommandProcessorThread() &&
-               !buffer_cache.GpuBytesPending(address, size) &&
-               memory->ReadBackingPages(address, data, size);
-    });
+    // Shader code on pages holding GPU data is read through the backing, which doesn't fault.
+    // Without GPU page tracking (readbacks off) nothing is protected for reads, so the guest is
+    // read directly and these aren't set.
+    if (buffer_cache.TracksGpuPages()) {
+        // Off the GPU thread everything counts as pending, so the guest is read directly.
+        pipeline_cache.SetGpuBytesPending([this](VAddr address, u64 size) {
+            return std::this_thread::get_id() != liverpool->GetGpuCommandProcessorThread() ||
+                   buffer_cache.GpuBytesPending(address, size);
+        });
+        // Only the GPU thread may look at the buffer cache's pending ranges; other threads that
+        // parse fetch shaders (compile workers) read the guest directly.
+        Shader::Gcn::SetGuestCodeReader([this](VAddr address, void* data, u64 size) {
+            return std::this_thread::get_id() == liverpool->GetGpuCommandProcessorThread() &&
+                   !buffer_cache.GpuBytesPending(address, size) &&
+                   memory->ReadBackingPages(address, data, size);
+        });
+    }
     if (instance.UsesDescriptorHeap()) {
         heaps =
             std::make_unique<ResourceHeaps>(instance, scheduler, buffer_cache.GetStreamBuffer());

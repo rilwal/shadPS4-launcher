@@ -121,6 +121,11 @@ public:
     /// Whether any byte of the range has GPU data not yet in guest memory. On the GPU thread.
     [[nodiscard]] bool GpuBytesPending(VAddr address, u64 size) const;
 
+    /// Precise or Fenced readbacks: GPU-written pages stay protected until their data lands.
+    [[nodiscard]] bool TracksGpuPages() const {
+        return tracks_gpu_pages;
+    }
+
     /// ReadMemoryForLoad for a movs that faulted reading `src`: if neither `src` nor `dst` has
     /// GPU bytes pending, copies `bytes` from `src` to `dst` through guest memory's backing,
     /// with `write_dst` (run on the GPU thread, false if it can't) doing the write, and returns
