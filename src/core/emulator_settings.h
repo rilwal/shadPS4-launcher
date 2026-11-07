@@ -426,8 +426,10 @@ struct GPUSettings {
     Setting<u32> readbacks_mode{GpuReadbacksMode::Fenced};
     /// With Precise or Fenced readbacks, a CPU load that faults on a protected page but reads
     /// none of its GPU-written bytes is finished from guest memory by the fault handler instead
-    /// of reading the page back (src/core/fault_load.h). Linux x86-64 only.
-    Setting<bool> fault_load_emulation{true};
+    /// of reading the page back (src/core/fault_load.h). Linux x86-64 only. Off by default:
+    /// once the GPU thread read shader code through the backing, it measured no faster (it
+    /// trades Uncharted's stalling reads for as many stalling writes to the same pages).
+    Setting<bool> fault_load_emulation{false};
     Setting<bool> readback_linear_images_enabled{false};
     Setting<bool> direct_memory_access_enabled{false};
     Setting<bool> dump_shaders{false};
