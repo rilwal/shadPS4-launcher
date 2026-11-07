@@ -109,6 +109,11 @@ CFG::CFG(Common::ObjectPool<Block>& block_pool_, std::span<const GcnInst> inst_l
     labels.reserve(LabelReserveSize);
     EmitLabels();
     EmitBlocks();
+    // Code with no s_endpgm or branch has one label and so no blocks (bytes the shader scanner
+    // took for a shader, seen in The Last Guardian). An empty block set made
+    // RemoveUnreachableBlocks loop forever.
+    ASSERT_MSG(!blocks.empty(), "Program of {} instructions has no blocks (no s_endpgm)",
+               inst_list.size());
     LinkBlocks();
     SplitDivergenceScopes();
     RemoveUnreachableBlocks();
@@ -393,9 +398,6 @@ void CFG::LinkBlocks() {
 void CFG::RemoveUnreachableBlocks() {
     // Each step visits or erases a block, so more steps than blocks means the set is corrupt
     // (seen with a scanned guess in The Last Guardian, which spun here forever).
-    if (blocks.empty()) {
-        return;
-    }
     size_t steps_left = blocks.size();
     for (auto it = std::next(blocks.begin()); it != blocks.end();) {
         ASSERT_MSG(steps_left-- != 0, "Block list of {} blocks doesn't end", blocks.size());
