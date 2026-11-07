@@ -632,32 +632,30 @@ ImageId TextureCache::FindImage(ImageDesc& desc, bool exact_fmt) {
 
     ASSERT(info.guest_address != 0);
 
-    SmallVector<ImageId, 8> image_ids;
-    ForEachImageInRegion(info.guest_address, info.guest_size,
-                         [&](ImageId image_id, Image& image) { image_ids.push_back(image_id); });
+    const auto is_perfect_match = [&](const Image& cache_image) {
+        return cache_image.info.guest_address == info.guest_address &&
+               cache_image.info.guest_size == info.guest_size &&
+               cache_image.info.size == info.size &&
+               IsVulkanFormatCompatible(cache_image.info.pixel_format, info.pixel_format) &&
+               (cache_image.info.type == info.type || info.size == Extent3D{1, 1, 1}) &&
+               (!exact_fmt || info.pixel_format == cache_image.info.pixel_format);
+    };
 
+    // A perfect match starts at the same address, so it's among the images registered there.
+    // The last one wins, as in the full search below, which walks every page of the image and
+    // runs only when there's none.
     ImageId image_id{};
+    ForEachImageWithAddress(info.guest_address, [&](ImageId cache_id, Image& cache_image) {
+        if (is_perfect_match(cache_image)) {
+            image_id = cache_id;
+        }
+    });
 
-    // Check for a perfect match first
-    for (const auto& cache_id : image_ids) {
-        auto& cache_image = slot_images[cache_id];
-        if (cache_image.info.guest_address != info.guest_address) {
-            continue;
-        }
-        if (cache_image.info.guest_size != info.guest_size) {
-            continue;
-        }
-        if (cache_image.info.size != info.size) {
-            continue;
-        }
-        if (!IsVulkanFormatCompatible(cache_image.info.pixel_format, info.pixel_format) ||
-            (cache_image.info.type != info.type && info.size != Extent3D{1, 1, 1})) {
-            continue;
-        }
-        if (exact_fmt && info.pixel_format != cache_image.info.pixel_format) {
-            continue;
-        }
-        image_id = cache_id;
+    SmallVector<ImageId, 8> image_ids;
+    if (!image_id) {
+        ForEachImageInRegion(
+            info.guest_address, info.guest_size,
+            [&](ImageId cache_id, Image& image) { image_ids.push_back(cache_id); });
     }
 
     // Try to resolve overlaps (if any)
