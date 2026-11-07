@@ -1,7 +1,12 @@
 // SPDX-FileCopyrightText: Copyright 2020 yuzu Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+#include <algorithm>
 #include <limits>
+#include <mutex>
+#include <vector>
+#include <fmt/format.h>
+#include "common/logging/log.h"
 #include "video_core/renderer_vulkan/vk_instance.h"
 #include "video_core/renderer_vulkan/vk_semaphore.h"
 
@@ -10,6 +15,11 @@
 namespace Vulkan {
 
 constexpr u64 WAIT_TIMEOUT = std::numeric_limits<u64>::max();
+
+namespace {
+std::mutex registry_mutex;
+std::vector<const Semaphore*> registry;
+} // namespace
 
 Semaphore::Semaphore(const Instance& instance_) : instance{instance_} {
     const vk::StructureChain semaphore_chain = {
@@ -24,9 +34,27 @@ Semaphore::Semaphore(const Instance& instance_) : instance{instance_} {
     ASSERT_MSG(semaphore_result == vk::Result::eSuccess, "Failed to create master semaphore: {}",
                vk::to_string(semaphore_result));
     semaphore = std::move(sem);
+    std::scoped_lock lock{registry_mutex};
+    registry.push_back(this);
 }
 
-Semaphore::~Semaphore() = default;
+Semaphore::~Semaphore() {
+    std::scoped_lock lock{registry_mutex};
+    std::erase(registry, this);
+}
+
+std::string Semaphore::DescribeAll(const Instance& instance) {
+    std::scoped_lock lock{registry_mutex};
+    std::string out;
+    for (const auto* sem : registry) {
+        const auto [result, reached] =
+            instance.GetDevice().getSemaphoreCounterValue(*sem->semaphore);
+        out +=
+            fmt::format("{}{} reached {} of {}", out.empty() ? "" : "; ", sem->name,
+                        result == vk::Result::eSuccess ? reached : u64{0}, sem->CurrentTick() - 1);
+    }
+    return out;
+}
 
 void Semaphore::Refresh() {
     u64 this_tick{};
@@ -62,7 +90,26 @@ void Semaphore::Wait(u64 tick) {
         .pValues = &tick,
     };
 
-    while (instance.GetDevice().waitSemaphores(&wait_info, WAIT_TIMEOUT) != vk::Result::eSuccess) {
+    // A wait this long means the GPU is stuck, or the queue is blocked by a submission waiting on
+    // something that never comes: say which timelines got how far.
+    constexpr u64 LongWaitNs = 2'000'000'000;
+    bool logged = false;
+    while (true) {
+        const vk::Result result =
+            instance.GetDevice().waitSemaphores(&wait_info, logged ? WAIT_TIMEOUT : LongWaitNs);
+        if (result == vk::Result::eSuccess) {
+            break;
+        }
+        if (result == vk::Result::eTimeout && !logged) {
+            LOG_ERROR(Render_Vulkan,
+                      "GPU wait for {} tick {} over 2 s. Timelines (reached of last handed "
+                      "out): {}",
+                      name, tick, DescribeAll(instance));
+            logged = true;
+        }
+    }
+    if (logged) {
+        LOG_ERROR(Render_Vulkan, "GPU wait for {} tick {} finished after all", name, tick);
     }
     Refresh();
 }

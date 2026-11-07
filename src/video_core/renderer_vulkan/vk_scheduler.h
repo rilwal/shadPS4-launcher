@@ -407,6 +407,11 @@ public:
     }
 
     /// Sets a function to be called on every scheduler submission.
+    /// Names this scheduler's timeline for the log of a GPU wait that takes too long.
+    void SetName(const char* name) {
+        work_semaphore.SetName(name);
+    }
+
     void SetSubmitCallback(SubmitFunc&& on_submit) {
         this->on_submit = std::move(on_submit);
     }

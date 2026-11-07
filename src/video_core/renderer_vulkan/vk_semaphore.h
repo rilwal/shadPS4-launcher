@@ -5,6 +5,7 @@
 
 #include <atomic>
 #include <condition_variable>
+#include <string>
 #include <thread>
 #include <queue>
 #include "common/types.h"
@@ -46,11 +47,20 @@ public:
     /// Waits for a tick to be hit on the GPU
     void Wait(u64 tick);
 
+    /// Names the timeline in the log of a GPU wait that takes too long.
+    void SetName(const char* name_) {
+        name = name_;
+    }
+
+    /// Every timeline's name, the tick the GPU has reached and the last one handed out.
+    static std::string DescribeAll(const Instance& instance);
+
 protected:
     const Instance& instance;
     vk::UniqueSemaphore semaphore;    ///< Timeline semaphore.
     std::atomic<u64> gpu_tick{0};     ///< Current known GPU tick.
     std::atomic<u64> current_tick{1}; ///< Current logical tick.
+    const char* name = "unnamed";
 };
 
 } // namespace Vulkan

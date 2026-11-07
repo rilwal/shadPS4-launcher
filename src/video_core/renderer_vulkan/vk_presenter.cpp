@@ -474,6 +474,9 @@ Presenter::Presenter(Frontend::WindowSDL& window_, AmdGpu::Liverpool* liverpool_
       swapchain{instance, window}, runtime{instance, draw_scheduler},
       rasterizer{std::make_unique<Rasterizer>(instance, draw_scheduler, runtime, liverpool)},
       texture_cache{rasterizer->GetTextureCache()} {
+    draw_scheduler.SetName("draw (GPU thread)");
+    present_scheduler.SetName("present");
+    flip_scheduler.SetName("flip");
     const u32 num_images = swapchain.GetImageCount();
     const vk::Device device = instance.GetDevice();
 
