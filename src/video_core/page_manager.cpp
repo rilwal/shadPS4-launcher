@@ -107,6 +107,9 @@ bool FaultLoadsEnabled() {
 
 std::atomic<u64> write_fault_count{};
 std::atomic<u64> write_fault_ns{};
+/// Handled read faults: all, and those on the GPU thread.
+std::array<std::atomic<u64>, 2> read_fault_count{};
+std::array<std::atomic<u64>, 2> read_fault_ns{};
 std::mutex slow_write_mutex;
 struct SlowWriteTotals {
     u32 count;
@@ -164,6 +167,11 @@ bool RegionLockProfiling() {
 
 std::pair<u64, u64> TakeWriteFaultTotals() {
     return {write_fault_count.exchange(0), write_fault_ns.exchange(0)};
+}
+
+ReadFaultTotals TakeReadFaultTotals() {
+    return {read_fault_count[0].exchange(0), read_fault_ns[0].exchange(0),
+            read_fault_count[1].exchange(0), read_fault_ns[1].exchange(0)};
 }
 
 std::vector<SlowWriteFaultSite> TakeSlowWriteFaultSites() {
@@ -622,7 +630,14 @@ struct SignalImpl : public PageManager::Impl {
             rasterizer->NoteGpuThreadReadFault(Core::FaultInstructionAddress(context), served);
         }
         if (handled) {
-            VideoCore::PerfStats::frames.AddFault(VideoCore::PerfStats::NowNs() - start);
+            const u64 elapsed = VideoCore::PerfStats::NowNs() - start;
+            VideoCore::PerfStats::frames.AddFault(elapsed);
+            read_fault_count[0].fetch_add(1, std::memory_order_relaxed);
+            read_fault_ns[0].fetch_add(elapsed, std::memory_order_relaxed);
+            if (is_gpu_thread) {
+                read_fault_count[1].fetch_add(1, std::memory_order_relaxed);
+                read_fault_ns[1].fetch_add(elapsed, std::memory_order_relaxed);
+            }
         }
         return handled;
     }

@@ -132,6 +132,16 @@ struct SlowWriteFaultSite {
 /// All handled write faults since the last call and their total time, cleared.
 std::pair<u64, u64> TakeWriteFaultTotals();
 
+/// All handled read faults since the last call and their total time, and those on the GPU
+/// thread, cleared.
+struct ReadFaultTotals {
+    u64 count;
+    u64 ns;
+    u64 gpu_thread_count;
+    u64 gpu_thread_ns;
+};
+ReadFaultTotals TakeReadFaultTotals();
+
 /// The slow write fault sites since the last call, cleared. For the readback stats log.
 std::vector<SlowWriteFaultSite> TakeSlowWriteFaultSites();
 
