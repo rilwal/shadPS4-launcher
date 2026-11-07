@@ -240,9 +240,6 @@ private:
     /// Pages the CPU has faulted on to read GPU data, or to write a page holding GPU data. Fenced
     /// readbacks land only these early.
     RangeSet land_early_ranges;
-    /// Whether write faults add their pages to land_early_ranges (SHADPS4_LAND_WRITTEN_PAGES=0
-    /// turns it off, to compare).
-    bool land_written_pages{true};
     /// Ranges taken by async downloads whose data isn't in guest memory yet (GPU thread only).
     RangeSet async_downloads;
     u32 num_async_downloads{};

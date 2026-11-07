@@ -90,9 +90,6 @@ BufferCache::BufferCache(const Vulkan::Instance& instance_, Vulkan::Scheduler& s
     const u32 readbacks_mode = EmulatorSettings.GetReadbacksMode();
     tracks_gpu_pages =
         readbacks_mode == GpuReadbacksMode::Precise || readbacks_mode == GpuReadbacksMode::Fenced;
-    if (const char* env = std::getenv("SHADPS4_LAND_WRITTEN_PAGES"); env && env[0] == '0') {
-        land_written_pages = false;
-    }
     const vk::BufferCreateInfo probe_ci = {
         .flags =
             vk::BufferCreateFlagBits::eSparseBinding | vk::BufferCreateFlagBits::eSparseResidency,
@@ -293,9 +290,7 @@ void BufferCache::ReadMemoryNow(VAddr device_addr, u64 size, bool is_write, bool
         // page lands early from now on too: a CPU filling a ring the GPU also writes would
         // otherwise stall on every page.
         NoteWriteFault(device_addr, size);
-        if (land_written_pages) {
-            land_early_ranges.Add(page_start, page_size);
-        }
+        land_early_ranges.Add(page_start, page_size);
     }
     const u32 first_block = device_addr >> block_shift;
     const u32 last_block = (device_addr + size - 1) >> block_shift;
@@ -711,9 +706,9 @@ void BufferCache::FlushReadbackStats() {
             }
             LOG_INFO(Render,
                      "Write faults on GPU data per second [{}]: {:.1f} ({:.1f} wrote bytes the GPU "
-                     "wrote); written pages land early: {}; {} pages, most faulted: {}",
+                     "wrote); {} pages, most faulted: {}",
                      variant ? variant : "-", faults / seconds, onto_gpu_bytes / seconds,
-                     land_written_pages ? "yes" : "no", pages.size(), top);
+                     pages.size(), top);
         }
         if (auto sites = TakeSlowWriteFaultSites(); !sites.empty()) {
             const size_t shown = std::min<size_t>(sites.size(), 6);
