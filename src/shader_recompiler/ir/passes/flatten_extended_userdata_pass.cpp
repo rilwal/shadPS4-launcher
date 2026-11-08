@@ -619,6 +619,14 @@ static void VisitPointer(const IR::Value& off_dw, IR::Inst* subtree, PassInfo& p
     PassInfo::PtrUserList* use_list = pass_info.GetUsesAsPointer(subtree);
     ASSERT(use_list);
 
+    // A null table pointer reads as zeros for this table and everything under it. Checking here
+    // costs one branch per table; the fault handler below patches the load to read zero for good,
+    // so after one null pointer every later draw with that shader would read zeros too.
+    const u32 first_dst_off_dw = pass_info.dst_off_dw;
+    Xbyak::Label null_table, done;
+    c.test(rdi, rdi);
+    c.jz(null_table, Xbyak::CodeGenerator::T_NEAR);
+
     // First copy all the src data from this tree level
     // That way, all data that was contiguous in the guest SRT is also contiguous in the
     // flattened buffer.
@@ -648,6 +656,14 @@ static void VisitPointer(const IR::Value& off_dw, IR::Inst* subtree, PassInfo& p
             VisitPointer(src_off_dw, use, pass_info, c);
         }
     }
+    c.jmp(done, Xbyak::CodeGenerator::T_NEAR);
+
+    // The table and its children filled a contiguous range of the flattened buffer
+    c.L(null_table);
+    for (u32 off_dw = first_dst_off_dw; off_dw < pass_info.dst_off_dw; ++off_dw) {
+        c.mov(dword[rsi + (off_dw << 2)], 0);
+    }
+    c.L(done);
 
     PopPtr(c);
 }
