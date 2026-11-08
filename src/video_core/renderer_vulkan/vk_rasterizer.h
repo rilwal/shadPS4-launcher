@@ -300,6 +300,8 @@ private:
     bool attachment_feedback_loop{};
     /// The pipeline whose shader objects are bound, while nothing has undone them.
     const GraphicsPipeline* bound_shaders{};
+    /// A copy of what bound_shaders bound (pipelines may go away), to bind only what differs.
+    std::optional<GraphicsPipeline::ShaderObjectState> bound_shader_state;
     bool needs_barrier{};
 };
 

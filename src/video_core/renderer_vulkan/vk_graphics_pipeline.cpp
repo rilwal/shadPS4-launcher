@@ -675,45 +675,83 @@ void GraphicsPipeline::CreateShaderObjects(const Build& b, ShaderObjects& object
     shader_state = std::move(st);
 }
 
-void GraphicsPipeline::BindShaderObjects(vk::CommandBuffer cmdbuf) const {
+void GraphicsPipeline::BindShaderObjects(vk::CommandBuffer cmdbuf,
+                                         std::optional<ShaderObjectState>& bound) const {
     const auto& st = *shader_state;
-    cmdbuf.bindShadersEXT(st.num_stages, st.stages.data(), st.shaders.data());
-
-    cmdbuf.setPrimitiveTopology(st.topology);
-    if (st.tessellation) {
+    const ShaderObjectState* prev = bound ? &*bound : nullptr;
+    if (!prev) {
+        cmdbuf.bindShadersEXT(st.num_stages, st.stages.data(), st.shaders.data());
+    } else {
+        // Every pipeline binds the same stage slots, so only the shaders that differ change.
+        std::array<vk::ShaderStageFlagBits, 5> stages;
+        std::array<vk::ShaderEXT, 5> shaders;
+        u32 count = 0;
+        for (u32 i = 0; i < st.num_stages; ++i) {
+            if (st.shaders[i] != prev->shaders[i]) {
+                stages[count] = st.stages[i];
+                shaders[count++] = st.shaders[i];
+            }
+        }
+        if (count != 0) {
+            cmdbuf.bindShadersEXT(count, stages.data(), shaders.data());
+        }
+    }
+    if (!prev || prev->topology != st.topology) {
+        cmdbuf.setPrimitiveTopology(st.topology);
+    }
+    if (st.tessellation &&
+        (!prev || !prev->tessellation || prev->patch_control_points != st.patch_control_points)) {
         cmdbuf.setPatchControlPointsEXT(st.patch_control_points);
         // What a pipeline without a domain origin state uses.
         cmdbuf.setTessellationDomainOriginEXT(vk::TessellationDomainOrigin::eUpperLeft);
     }
-    cmdbuf.setRasterizationSamplesEXT(st.samples);
-    const std::array<vk::SampleMask, 2> sample_mask = {~0u, ~0u};
-    cmdbuf.setSampleMaskEXT(st.samples, sample_mask.data());
-    cmdbuf.setAlphaToCoverageEnableEXT(false);
-    cmdbuf.setPolygonModeEXT(st.polygon_mode);
-    if (instance.IsDepthClampSupported()) {
+    if (!prev || prev->samples != st.samples) {
+        cmdbuf.setRasterizationSamplesEXT(st.samples);
+        const std::array<vk::SampleMask, 2> sample_mask = {~0u, ~0u};
+        cmdbuf.setSampleMaskEXT(st.samples, sample_mask.data());
+    }
+    if (!prev) {
+        cmdbuf.setAlphaToCoverageEnableEXT(false);
+    }
+    if (!prev || prev->polygon_mode != st.polygon_mode) {
+        cmdbuf.setPolygonModeEXT(st.polygon_mode);
+    }
+    if (instance.IsDepthClampSupported() && (!prev || prev->depth_clamp != st.depth_clamp)) {
         cmdbuf.setDepthClampEnableEXT(st.depth_clamp);
     }
-    if (instance.IsDepthClipEnableSupported()) {
+    if (instance.IsDepthClipEnableSupported() && (!prev || prev->depth_clip != st.depth_clip)) {
         cmdbuf.setDepthClipEnableEXT(st.depth_clip);
     }
-    if (instance.IsProvokingVertexSupported()) {
+    if (instance.IsProvokingVertexSupported() &&
+        (!prev || prev->provoking_vertex != st.provoking_vertex)) {
         cmdbuf.setProvokingVertexModeEXT(st.provoking_vertex);
     }
-    if (instance.IsDepthClipControlSupported()) {
+    if (instance.IsDepthClipControlSupported() &&
+        (!prev || prev->negative_one_to_one != st.negative_one_to_one)) {
         cmdbuf.setDepthClipNegativeOneToOneEXT(st.negative_one_to_one);
     }
     if (instance.IsLogicOpSupported()) {
-        cmdbuf.setLogicOpEnableEXT(st.logic_op_enable);
-        cmdbuf.setLogicOpEXT(st.logic_op);
+        if (!prev || prev->logic_op_enable != st.logic_op_enable) {
+            cmdbuf.setLogicOpEnableEXT(st.logic_op_enable);
+        }
+        if (!prev || prev->logic_op != st.logic_op) {
+            cmdbuf.setLogicOpEXT(st.logic_op);
+        }
     }
-    if (instance.IsNvFramebufferMixedSamplesSupported()) {
+    if (instance.IsNvFramebufferMixedSamplesSupported() && !prev) {
         cmdbuf.setCoverageModulationModeNV(vk::CoverageModulationModeNV::eNone);
         cmdbuf.setCoverageModulationTableEnableNV(false);
     }
-    if (st.num_attachments != 0) {
+    if (st.num_attachments != 0 &&
+        (!prev || prev->num_attachments < st.num_attachments ||
+         !std::equal(st.blend_enables.begin(), st.blend_enables.begin() + st.num_attachments,
+                     prev->blend_enables.begin()) ||
+         !std::equal(st.blend_equations.begin(), st.blend_equations.begin() + st.num_attachments,
+                     prev->blend_equations.begin()))) {
         cmdbuf.setColorBlendEnableEXT(0, st.num_attachments, st.blend_enables.data());
         cmdbuf.setColorBlendEquationEXT(0, st.num_attachments, st.blend_equations.data());
     }
+    bound = st;
 }
 
 GraphicsPipeline::~GraphicsPipeline() {

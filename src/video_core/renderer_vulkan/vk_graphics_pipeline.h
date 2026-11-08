@@ -3,6 +3,8 @@
 
 #pragma once
 
+#include <optional>
+
 #include <boost/container/static_vector.hpp>
 #include <xxhash.h>
 
@@ -113,8 +115,31 @@ public:
         return shader_state != nullptr;
     }
 
-    /// Binds the shader objects and sets the state a pipeline would have baked in.
-    void BindShaderObjects(vk::CommandBuffer cmdbuf) const;
+    /// With shader objects: what BindShaderObjects binds and sets.
+    struct ShaderObjectState {
+        std::array<vk::ShaderStageFlagBits, 5> stages{};
+        std::array<vk::ShaderEXT, 5> shaders{};
+        u32 num_stages{};
+        vk::PrimitiveTopology topology{};
+        u32 patch_control_points{};
+        bool tessellation{};
+        vk::SampleCountFlagBits samples{};
+        vk::PolygonMode polygon_mode{};
+        bool depth_clamp{};
+        bool depth_clip{};
+        vk::ProvokingVertexModeEXT provoking_vertex{};
+        bool negative_one_to_one{};
+        bool logic_op_enable{};
+        vk::LogicOp logic_op{};
+        u32 num_attachments{};
+        std::array<vk::Bool32, AmdGpu::NUM_COLOR_BUFFERS> blend_enables{};
+        std::array<vk::ColorBlendEquationEXT, AmdGpu::NUM_COLOR_BUFFERS> blend_equations{};
+    };
+
+    /// Binds the shader objects and sets the state a pipeline would have baked in. With what
+    /// is bound now (`bound`, null after an invalidation), only the shaders and state that
+    /// differ; then `bound` is set to this pipeline's.
+    void BindShaderObjects(vk::CommandBuffer cmdbuf, std::optional<ShaderObjectState>& bound) const;
 
     /// Gets the attributes and bindings for vertex inputs.
     template <typename Attribute, typename Binding>
@@ -140,26 +165,6 @@ private:
     void CreateShaderObjects(const Build& build, ShaderObjects& objects);
 
 private:
-    /// With shader objects: what BindShaderObjects binds and sets.
-    struct ShaderObjectState {
-        std::array<vk::ShaderStageFlagBits, 5> stages{};
-        std::array<vk::ShaderEXT, 5> shaders{};
-        u32 num_stages{};
-        vk::PrimitiveTopology topology{};
-        u32 patch_control_points{};
-        bool tessellation{};
-        vk::SampleCountFlagBits samples{};
-        vk::PolygonMode polygon_mode{};
-        bool depth_clamp{};
-        bool depth_clip{};
-        vk::ProvokingVertexModeEXT provoking_vertex{};
-        bool negative_one_to_one{};
-        bool logic_op_enable{};
-        vk::LogicOp logic_op{};
-        u32 num_attachments{};
-        std::array<vk::Bool32, AmdGpu::NUM_COLOR_BUFFERS> blend_enables{};
-        std::array<vk::ColorBlendEquationEXT, AmdGpu::NUM_COLOR_BUFFERS> blend_equations{};
-    };
     std::unique_ptr<ShaderObjectState> shader_state;
 
     GraphicsPipelineKey key;

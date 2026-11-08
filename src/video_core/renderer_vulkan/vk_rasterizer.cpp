@@ -1858,8 +1858,11 @@ void Rasterizer::BindGraphics(const GraphicsPipeline* pipeline) {
     }
     // A new command buffer or a helper pass's pipeline undoes what the shaders set.
     const bool invalidated = scheduler.GetDynamicState().TakeShaderObjectsDirty();
+    if (invalidated) {
+        bound_shader_state.reset();
+    }
     if (invalidated || bound_shaders != pipeline) {
-        pipeline->BindShaderObjects(cmdbuf);
+        pipeline->BindShaderObjects(cmdbuf, bound_shader_state);
         bound_shaders = pipeline;
     }
 }

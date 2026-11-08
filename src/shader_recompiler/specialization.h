@@ -98,8 +98,8 @@ struct StageSpecialization {
     Backend::Bindings start{};
 
     StageSpecialization() = default;
-    StageSpecialization(const Info& info_, RuntimeInfo runtime_info_, const Profile& profile_,
-                        Backend::Bindings start_)
+    StageSpecialization(const Info& info_, const RuntimeInfo& runtime_info_,
+                        const Profile& profile_, Backend::Bindings start_)
         : info{&info_}, runtime_info{runtime_info_}, start{start_} {
         if (info_.sw_stage == SwStage::Vertex && Gcn::ParseFetchShader(info_, fetch_shader_data)) {
             // Specialize shader on VS input number types to follow spec.
