@@ -152,6 +152,9 @@ PipelineCache::PipelineCache(const Instance& instance_, Scheduler& scheduler_,
     if (const char* check = std::getenv("SHADPS4_SPEC_MEMO_CHECK")) {
         spec_memo_check = std::string_view{check} == "1";
     }
+    if (const char* prefetch = std::getenv("SHADPS4_PREFETCH_BUFFERS")) {
+        prefetch_buffers = std::string_view{prefetch} != "0";
+    }
     // A quarter of the cores: the game's own threads and the GPU thread need the rest.
     const u32 compile_threads = std::clamp(std::thread::hardware_concurrency() / 4, 1u, 4u);
     compiler = std::make_unique<PipelineCompiler>(compile_threads);
@@ -1044,8 +1047,24 @@ namespace {
 /// specialisations. Base addresses and sizes are left out except where the specialisation reads
 /// them, so the same shader drawing other meshes and textures of the same kind matches.
 /// Keep in step with StageSpecialization::Build: a bit it starts reading has to be kept here.
+/// Starts loading the start of a buffer the draw will copy, so the copies' cache misses (often
+/// to DRAM: the game's CPU threads just wrote it) overlap with the rest of the lookup instead of
+/// stalling one copy after another. Buffers up to the stream threshold are copied whole on
+/// binding. A prefetch never faults, so protected or unmapped addresses are harmless.
+void PrefetchBuffer(VAddr address, u64 size) {
+    constexpr u64 Line = 64;
+    constexpr u64 MaxBytes = 2_KB;
+    if (address == 0 || size == 0 || size > 16_KB) {
+        return;
+    }
+    const VAddr end = address + std::min(size, MaxBytes);
+    for (VAddr line = Common::AlignDown(address, Line); line < end; line += Line) {
+        __builtin_prefetch(reinterpret_cast<const void*>(line), 0, 3);
+    }
+}
+
 void SpecKey(const Shader::Info& info, const Shader::Gcn::FetchShaderData& fetch,
-             boost::container::small_vector<u64, 48>& key) {
+             boost::container::small_vector<u64, 48>& key, bool prefetch) {
     static_assert(sizeof(Shader::Gcn::VertexAttribute) == sizeof(u64));
     // Sized once and written in place: building it is per draw.
     key.resize(1 + fetch.attributes.size() * 3 + info.buffers.size() * 2 + info.images.size() * 4 +
@@ -1073,6 +1092,9 @@ void SpecKey(const Shader::Info& info, const Shader::Gcn::FetchShaderData& fetch
     }
     for (const auto& desc : info.buffers) {
         const auto sharp = desc.GetSharp(info);
+        if (prefetch && !desc.is_written && !desc.IsSpecial()) {
+            PrefetchBuffer(sharp.base_address, sharp.GetSize());
+        }
         put(sharp);
         out[-2] &= ~BufferAddressMask;
         out[-1] = (out[-1] & ~BufferRecordsMask) | u64{sharp.num_records != 0};
@@ -1157,7 +1179,7 @@ PipelineCache::Result PipelineCache::GetProgram(HwStage hw_stage, SwStage sw_sta
             spec_fetch.vertex_offset_sgpr = Shader::Gcn::FetchShaderData{}.vertex_offset_sgpr;
             spec_fetch.instance_offset_sgpr = Shader::Gcn::FetchShaderData{}.instance_offset_sgpr;
         }
-        SpecKey(info, spec_fetch, spec_key);
+        SpecKey(info, spec_fetch, spec_key, prefetch_buffers);
         if (last.module != UINT32_MAX && last.start == binding &&
             last.key.size() == spec_key.size() &&
             std::memcmp(last.key.data(), spec_key.data(), spec_key.size() * sizeof(u64)) == 0 &&

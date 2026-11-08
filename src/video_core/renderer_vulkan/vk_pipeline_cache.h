@@ -345,6 +345,9 @@ private:
     /// the full way on each reuse and logs any difference.
     bool spec_memo = true;
     bool spec_memo_check{};
+    /// Read-only buffers up to the stream threshold are prefetched while the draw's variants
+    /// are looked up, ahead of copying them on binding. SHADPS4_PREFETCH_BUFFERS=0 turns it off.
+    bool prefetch_buffers = true;
     struct {
         u64 hits{};
         u64 misses{};
