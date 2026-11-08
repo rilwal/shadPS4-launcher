@@ -6,6 +6,7 @@
 #include <algorithm>
 #include <concepts>
 #include <iterator>
+#include <type_traits>
 #include <vector>
 
 #include "common/small_vector.h"
@@ -62,6 +63,22 @@ public:
     void Add(IV value) {
         if (value.start >= value.end) [[unlikely]] {
             return;
+        }
+        if constexpr (std::is_same_v<IV, Interval>) {
+            // Plain ranges, recorded per bound buffer per draw: most go at the end (stream
+            // buffer allocations) or are already covered (the same buffer drawn again).
+            if (intervals.empty() || value.start > intervals.back().end) {
+                intervals.push_back(value);
+                return;
+            }
+            if (IV& back = intervals.back(); value.start >= back.start) {
+                back.end = std::max(back.end, value.end);
+                return;
+            }
+            const auto it = std::ranges::upper_bound(intervals, value.start, {}, &IV::end);
+            if (it != intervals.end() && it->start <= value.start && value.end <= it->end) {
+                return;
+            }
         }
 
         IV out[3];
