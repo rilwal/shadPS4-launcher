@@ -44,6 +44,9 @@ public:
     }
 
     /// Returns the Vulkan device
+    /// Logs the driver's VK_EXT_device_fault report; call it once the device is lost.
+    void LogDeviceFault() const;
+
     vk::Device GetDevice() const {
         return *device;
     }
@@ -579,6 +582,7 @@ private:
     bool image_2d_view_of_3d{};
     bool image_view_min_lod{};
     bool shader_clock{};
+    bool device_fault{};
     bool supports_memory_budget{};
     bool supports_block_texel_view{};
     u64 total_memory_budget{};

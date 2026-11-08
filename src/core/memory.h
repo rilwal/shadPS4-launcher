@@ -267,6 +267,8 @@ public:
     /// The last backing writes (of a few thousand) overlapping the range, newest first, for
     /// logging when guest memory turns out wrong.
     static std::string DescribeRecentBackingWrites(VAddr address, u64 size);
+    /// The last backing writes whose first dword was `value`, newest first.
+    static std::string DescribeRecentBackingWritesOfValue(u32 value);
 
     /// Reads guest memory through its backing, which page protection doesn't cover.
     bool TryReadBacking(VAddr address, void* data, u64 size);

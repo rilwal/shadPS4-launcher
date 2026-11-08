@@ -286,6 +286,23 @@ void MemoryManager::NoteWatchedWrite(VAddr address, u64 size, const void* data, 
     }
 }
 
+std::string MemoryManager::DescribeRecentBackingWritesOfValue(u32 value) {
+    const u64 count = backing_write_count.load(std::memory_order_acquire);
+    const u64 now = NowNs();
+    std::string out;
+    u32 shown = 0;
+    for (u64 i = 0; i < std::min<u64>(count, BackingWriteLogSize) && shown < 4; ++i) {
+        const auto& write = backing_write_log[(count - 1 - i) % BackingWriteLogSize];
+        if (write.first_dword == value) {
+            out += fmt::format("{}[{:#x}+{:#x}, {} us ago, from {}, thread {:#x}]",
+                               shown ? " " : "", write.address, write.size, (now - write.ns) / 1000,
+                               DescribeCaller(write.caller), write.thread);
+            ++shown;
+        }
+    }
+    return out.empty() ? "none" : out;
+}
+
 std::string MemoryManager::DescribeRecentBackingWrites(VAddr address, u64 size) {
     const u64 count = backing_write_count.load(std::memory_order_acquire);
     const u64 now = NowNs();

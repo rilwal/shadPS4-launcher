@@ -98,8 +98,8 @@ Instance::Instance(bool enable_validation, bool enable_crash_diagnostic)
 
 Instance::Instance(Frontend::WindowSDL& window, s32 physical_device_index,
                    bool enable_validation /*= false*/, bool enable_crash_diagnostic /*= false*/)
-    : instance{
-          CreateInstance(window.GetWindowInfo().type, enable_validation, enable_crash_diagnostic)},
+    : instance{CreateInstance(window.GetWindowInfo().type, enable_validation,
+                              enable_crash_diagnostic)},
       physical_devices{EnumeratePhysicalDevices(instance)} {
     if (enable_validation) {
         debug_callback = CreateDebugCallback(*instance);
@@ -222,7 +222,8 @@ bool Instance::CreateDevice() {
         vk::PhysicalDevicePrimitiveTopologyListRestartFeaturesEXT,
         vk::PhysicalDeviceShaderAtomicFloat2FeaturesEXT,
         vk::PhysicalDeviceWorkgroupMemoryExplicitLayoutFeaturesKHR,
-        vk::PhysicalDeviceImage2DViewOf3DFeaturesEXT, vk::PhysicalDeviceShaderClockFeaturesKHR>();
+        vk::PhysicalDeviceImage2DViewOf3DFeaturesEXT, vk::PhysicalDeviceShaderClockFeaturesKHR,
+        vk::PhysicalDeviceFaultFeaturesEXT>();
     features = feature_chain.get().features;
 
     const vk::StructureChain properties_chain = physical_device.getProperties2<
@@ -412,6 +413,9 @@ bool Instance::CreateDevice() {
         LOG_INFO(Render_Vulkan, "- shaderSubgroupClock: {}",
                  shader_clock_features.shaderSubgroupClock);
     }
+    // To log what the GPU says went wrong when the device is lost
+    device_fault = feature_chain.get<vk::PhysicalDeviceFaultFeaturesEXT>().deviceFault &&
+                   add_extension(VK_EXT_DEVICE_FAULT_EXTENSION_NAME);
     const bool calibrated_timestamps =
         TRACY_GPU_ENABLED ? add_extension(VK_EXT_CALIBRATED_TIMESTAMPS_EXTENSION_NAME) : false;
     // For the game launcher's quick menu in the game's window, which shares images with the
@@ -605,6 +609,9 @@ bool Instance::CreateDevice() {
         vk::PhysicalDeviceShaderClockFeaturesKHR{
             .shaderSubgroupClock = shader_clock_features.shaderSubgroupClock,
         },
+        vk::PhysicalDeviceFaultFeaturesEXT{
+            .deviceFault = true,
+        },
     };
 
     if (!custom_border_color) {
@@ -664,6 +671,9 @@ bool Instance::CreateDevice() {
     }
     if (!shader_clock) {
         device_chain.unlink<vk::PhysicalDeviceShaderClockFeaturesKHR>();
+    }
+    if (!device_fault) {
+        device_chain.unlink<vk::PhysicalDeviceFaultFeaturesEXT>();
     }
 
     auto [device_result, dev] = physical_device.createDeviceUnique(device_chain.get());
@@ -919,6 +929,42 @@ vk::Format Instance::GetSupportedFormat(const vk::Format format,
         }
     }
     return format;
+}
+
+void Instance::LogDeviceFault() const {
+    if (!device_fault || !VULKAN_HPP_DEFAULT_DISPATCHER.vkGetDeviceFaultInfoEXT) {
+        LOG_CRITICAL(Render_Vulkan, "Device lost; the driver has no VK_EXT_device_fault report");
+        return;
+    }
+    const VkDevice dev = *device;
+    VkDeviceFaultCountsEXT counts{.sType = VK_STRUCTURE_TYPE_DEVICE_FAULT_COUNTS_EXT};
+    if (VULKAN_HPP_DEFAULT_DISPATCHER.vkGetDeviceFaultInfoEXT(dev, &counts, nullptr) !=
+        VK_SUCCESS) {
+        LOG_CRITICAL(Render_Vulkan, "Device lost; vkGetDeviceFaultInfoEXT failed");
+        return;
+    }
+    std::vector<VkDeviceFaultAddressInfoEXT> addresses(counts.addressInfoCount);
+    std::vector<VkDeviceFaultVendorInfoEXT> vendor(counts.vendorInfoCount);
+    counts.vendorBinarySize = 0;
+    VkDeviceFaultInfoEXT info{
+        .sType = VK_STRUCTURE_TYPE_DEVICE_FAULT_INFO_EXT,
+        .pAddressInfos = addresses.data(),
+        .pVendorInfos = vendor.data(),
+    };
+    const VkResult result =
+        VULKAN_HPP_DEFAULT_DISPATCHER.vkGetDeviceFaultInfoEXT(dev, &counts, &info);
+    LOG_CRITICAL(Render_Vulkan, "Device lost: \"{}\" ({}, {} addresses, {} vendor records)",
+                 info.description, vk::to_string(vk::Result{result}), counts.addressInfoCount,
+                 counts.vendorInfoCount);
+    for (u32 i = 0; i < counts.addressInfoCount; ++i) {
+        LOG_CRITICAL(Render_Vulkan, "  address {:#x} (precision {:#x}), {}",
+                     addresses[i].reportedAddress, addresses[i].addressPrecision,
+                     vk::to_string(vk::DeviceFaultAddressTypeEXT{addresses[i].addressType}));
+    }
+    for (u32 i = 0; i < counts.vendorInfoCount; ++i) {
+        LOG_CRITICAL(Render_Vulkan, "  vendor: \"{}\" code {:#x} data {:#x}", vendor[i].description,
+                     vendor[i].vendorFaultCode, vendor[i].vendorFaultData);
+    }
 }
 
 } // namespace Vulkan

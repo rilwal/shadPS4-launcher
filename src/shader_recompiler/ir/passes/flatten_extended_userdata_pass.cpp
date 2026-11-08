@@ -16,6 +16,7 @@
 #include "common/path_util.h"
 #include "common/signal_context.h"
 #include "core/emulator_settings.h"
+#include "core/memory.h"
 #include "core/signals.h"
 #include "shader_recompiler/info.h"
 #include "shader_recompiler/ir/ir_emitter.h"
@@ -123,8 +124,17 @@ static bool SrtWalkerSignalHandler(void* context, void* fault_address) {
     // Fill nops
     memset(code_patch + patch_size, 0x90, len - patch_size);
 
-    LOG_WARNING(Render_Recompiler, "Patched SRT walker at {}, fault address {}", code,
-                fault_address);
+    // Debugging Bloodborne's device losts under Fenced readbacks: the pointer the walker followed
+    // (fault address minus the displacement), and recent backing writes (late fence labels,
+    // landings) of that value, in case one was written over a resource table.
+    const u64 bad_pointer =
+        reinterpret_cast<u64>(fault_address) - static_cast<u64>(operands[1].mem.disp.value);
+    LOG_WARNING(
+        Render_Recompiler,
+        "Patched SRT walker at {}, fault address {} (pointer {:#x}); backing writes of "
+        "that value: {}",
+        code, fault_address, bad_pointer,
+        Core::MemoryManager::DescribeRecentBackingWritesOfValue(static_cast<u32>(bad_pointer)));
 
     return true;
 }
