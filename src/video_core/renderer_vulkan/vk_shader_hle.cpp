@@ -3,6 +3,7 @@
 
 #include <algorithm>
 #include "shader_recompiler/info.h"
+#include "video_core/perf_stats.h"
 #include "video_core/renderer_vulkan/vk_rasterizer.h"
 #include "video_core/renderer_vulkan/vk_runtime.h"
 #include "video_core/renderer_vulkan/vk_shader_hle.h"
@@ -12,6 +13,41 @@ extern std::unique_ptr<AmdGpu::Liverpool> liverpool;
 namespace Vulkan {
 
 static constexpr u64 COPY_SHADER_HASH = 0xfefebf9f;
+
+namespace {
+
+/// What the copy shader moves against what it uploads, logged every 5 seconds: sources are
+/// obtained as spans covering several copies, which upload every CPU-written page in between.
+struct CopyShaderTotals {
+    u64 dispatches{};
+    u64 batches{};
+    u64 copied_bytes{};
+    u64 source_span_bytes{};
+    u64 uploaded_bytes{};
+    u64 last_log_ns{};
+
+    void MaybeLog() {
+        const u64 now = VideoCore::PerfStats::NowNs();
+        if (last_log_ns == 0) {
+            last_log_ns = now;
+            return;
+        }
+        if (now - last_log_ns < 5'000'000'000ULL) {
+            return;
+        }
+        const double seconds = (now - last_log_ns) / 1e9;
+        constexpr double MB = 1024.0 * 1024.0;
+        LOG_INFO(Render_Vulkan,
+                 "Copy shader per second: {:.1f} dispatches, {:.1f} batches, {:.2f} MB copied "
+                 "from {:.2f} MB of source spans, {:.2f} MB of them uploaded",
+                 dispatches / seconds, batches / seconds, copied_bytes / MB / seconds,
+                 source_span_bytes / MB / seconds, uploaded_bytes / MB / seconds);
+        *this = CopyShaderTotals{.last_log_ns = now};
+    }
+};
+CopyShaderTotals copy_shader_totals;
+
+} // namespace
 
 static bool ExecuteCopyShaderHLE(const Shader::Info& info, const AmdGpu::ComputeProgram& cs_program,
                                  Rasterizer& rasterizer) {
@@ -90,8 +126,16 @@ static bool ExecuteCopyShaderHLE(const Shader::Info& info, const AmdGpu::Compute
         }
 
         // Obtain buffers for the total source and destination ranges.
+        const u64 synchronized_before = buffer_cache.SynchronizedBytes();
         const auto [src_buf, src_buf_offset] = buffer_cache.ObtainBuffer(
             src_buf_sharp.base_address + src_offset_min, src_offset_max - src_offset_min);
+        auto& totals = copy_shader_totals;
+        ++totals.batches;
+        totals.source_span_bytes += src_offset_max - src_offset_min;
+        totals.uploaded_bytes += buffer_cache.SynchronizedBytes() - synchronized_before;
+        for (u32 i = batch_start; i < batch_end; ++i) {
+            totals.copied_bytes += copies[i].size;
+        }
         const auto [dst_buf, dst_buf_offset] = buffer_cache.ObtainBuffer(
             dst_buf_sharp.base_address + dst_offset_min, dst_offset_max - dst_offset_min,
             VideoCore::ObtainBufferFlags::IgnoreStreamBuffer);
@@ -132,6 +176,8 @@ static bool ExecuteCopyShaderHLE(const Shader::Info& info, const AmdGpu::Compute
         buffer_cache.MarkRegionAsGpuModified(run_start, run_end - run_start);
     }
 
+    ++copy_shader_totals.dispatches;
+    copy_shader_totals.MaybeLog();
     return true;
 }
 

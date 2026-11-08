@@ -1111,6 +1111,7 @@ bool BufferCache::SynchronizeMemory(const Buffer* arena, VAddr device_addr, u32 
         runtime.CopyBuffer(staging.buffer, arena, copies);
         VideoCore::PerfStats::frames.AddGpuCount(VideoCore::PerfStats::Cost::BufferBytes,
                                                  total_size_bytes);
+        synchronized_bytes += total_size_bytes;
     }
     if (is_texel_buffer && !is_written) {
         return SynchronizeMemoryFromImage(arena, device_addr, size);

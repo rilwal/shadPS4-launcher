@@ -97,6 +97,11 @@ public:
 
     void TickFrame();
 
+    /// Bytes uploaded to arenas from guest memory so far (GPU thread only).
+    u64 SynchronizedBytes() const {
+        return synchronized_bytes;
+    }
+
     /// Invalidates any buffer in the logical page range, and marks [ahead, ahead + ahead_size),
     /// which the guest is about to write, as modified from the CPU ahead of its faults.
     void InvalidateMemory(VAddr device_addr, u64 size, bool assume_locks = false, VAddr ahead = 0,
@@ -380,6 +385,7 @@ private:
 
     std::array<const Buffer*, NUM_ARENA_PAGES> address_space{};
     std::deque<Buffer> arenas;
+    u64 synchronized_bytes{};
     std::vector<ArenaBinds> pending_binds;
     Vulkan::Semaphore memory_semaphore;
 
