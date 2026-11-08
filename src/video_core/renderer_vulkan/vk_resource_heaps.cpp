@@ -371,8 +371,13 @@ void ResourceHeaps::Bind(const HeapDraw& draw, const Shader::PushData& push_data
             if (write.descriptorType == vk::DescriptorType::eSampler) {
                 continue;
             }
+            const bool is_buffer = write.descriptorType == vk::DescriptorType::eStorageBuffer;
             for (u32 j = 0; j < write.descriptorCount; ++j) {
-                const u32 kept = KeptSlot(draw, write, j);
+                // Bound buffers are most of them and never kept (only null ones are).
+                const bool bound_buffer =
+                    is_buffer &&
+                    draw.buffer_addresses[(write.pBufferInfo + j) - draw.buffer_infos.data()] != 0;
+                const u32 kept = bound_buffer ? NoSlot : KeptSlot(draw, write, j);
                 kept_slots.push_back(kept);
                 num_resources += kept == NoSlot ? 1 : 0;
             }

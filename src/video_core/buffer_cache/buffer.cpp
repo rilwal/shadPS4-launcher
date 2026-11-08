@@ -1,6 +1,7 @@
 // SPDX-FileCopyrightText: Copyright 2024 shadPS4 Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+#include <bit>
 #include <numeric>
 
 #include "common/alignment.h"
@@ -204,7 +205,9 @@ bool StreamBuffer::PrepareMap(u64 size, u64 alignment, bool allow_wait) {
     }
 
     if (alignment > 0) {
-        offset = Common::AlignUp(offset, alignment);
+        // Maps happen several times a draw, and alignments are nearly always powers of 2.
+        offset = std::has_single_bit(alignment) ? Common::AlignUpPow2(offset, alignment)
+                                                : Common::AlignUp(offset, alignment);
     }
 
     if (offset + size > this->size_bytes) {

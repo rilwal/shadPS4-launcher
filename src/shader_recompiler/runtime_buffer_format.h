@@ -259,8 +259,12 @@ inline bool UsesRuntimeVertexFormat(bool runtime_vertex_formats, const AmdGpu::B
     if (size == 0) {
         return false;
     }
+    // Every draw asks for each attribute, so no division where the alignment is a power of 2.
     const u32 align = std::min(size, 4u);
-    return buffer.base_address % align == 0 && buffer.GetStride() % align == 0;
+    const auto aligned = [align](u64 value) {
+        return align == 3 ? value % 3 == 0 : (value & (align - 1)) == 0;
+    };
+    return aligned(buffer.base_address) && aligned(buffer.GetStride());
 }
 
 /// With runtime vertex formats, how a vertex shader makes each component of an attribute
