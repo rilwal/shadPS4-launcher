@@ -247,6 +247,11 @@ private:
     /// the deferred values this write replaces.
     void OrderCpWrite(VAddr address, u64 size);
 
+    /// Guest memory may have changed since the last draw: a wait on memory or the guest, a
+    /// memory write of the command processor's, another task's turn, a new submission. Copies
+    /// of it the rasterizer made since can't stand in for later reads.
+    void ForgetStreamCopies();
+
     /// Tests a WAIT_REG_MEM condition. A label whose signal is deferred reads as its new value.
     bool TestWait(const PM4CmdWaitRegMem* wait);
 

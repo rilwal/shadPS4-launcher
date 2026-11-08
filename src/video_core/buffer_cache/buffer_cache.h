@@ -118,6 +118,13 @@ public:
                            u16 mnemonic, u8* data, bool assume_locks);
 
     /// With `assume_locks` (on the GPU thread) runs here instead of on the GPU thread.
+    /// The command processor passed a point where guest memory may have changed (a wait on
+    /// memory, its own memory write, a new submission): copies of guest memory in the stream
+    /// buffer can't stand in for later reads. GPU thread.
+    void ForgetStreamCopies() noexcept {
+        ++stream_copy_epoch;
+    }
+
     /// Whether any byte of the range has GPU data not yet in guest memory. On the GPU thread.
     [[nodiscard]] bool GpuBytesPending(VAddr address, u64 size) const;
 
@@ -245,6 +252,23 @@ private:
     std::unique_ptr<MemoryTracker> memory_tracker;
 
     StreamBuffer stream_buffer;
+    /// Read-only ranges copied into the stream buffer since the command processor last passed a
+    /// point where guest memory may have changed. Draws read the same constants over and over,
+    /// and nothing can change them between those points but the GPU (whose writes keep ranges
+    /// out of the stream buffer) or the guest racing the GPU.
+    struct StreamCopy {
+        VAddr address{};
+        u32 size{};
+        u32 epoch{};
+        u64 tick{};
+        u64 wraps{};
+        u64 offset{};
+    };
+    std::array<StreamCopy, 1024> stream_copies{};
+    u32 stream_copy_epoch{1};
+    bool reuse_stream_copies{true};
+    /// Whether reuse_stream_copies follows the A/B switch (SHADPS4_AB=stream-copies).
+    bool stream_copies_ab{};
     Buffer gds_buffer;
     std::unique_ptr<Buffer> null_index_buffer;
     RangeSet gpu_modified_ranges;

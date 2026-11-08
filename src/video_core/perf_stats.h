@@ -122,28 +122,29 @@ inline const TscClock& Tsc() {
 /// thread's time outside its idle waits, and what the named costs don't explain of it is command
 /// translation itself.
 enum class Cost : u32 {
-    Shaders,      ///< Translating shaders, creating pipelines, waiting for compile workers.
-    Textures,     ///< Creating images, resolving overlaps, uploading and detiling them (and every
-                  ///< lookup, with SHADPS4_DRAW_COSTS=1).
-    Buffers,      ///< Making buffer memory resident and uploading it from the guest (and every
-                  ///< lookup, with SHADPS4_DRAW_COSTS=1).
-    GpuWaits,     ///< Waiting for the host GPU to finish work (scheduler waits).
-    Submits,      ///< Submitting command buffers to the host queue.
-    Presents,     ///< Waiting for the presenter to flip (video out label waits).
-    Flips,        ///< Preparing flipped frames for the presenter (copying, waiting for a frame).
-    Dma,          ///< Buffer copies and fills the guest asked for, and DMA buffer syncs.
-    Busy,         ///< GPU thread time not spent idle or spinning on guest waits.
-    GuestWaits,   ///< Spinning on guest waits (wait reg mem, semaphores, CE/DE counters).
-    Faults,       ///< Handling guest page faults on tracked memory, summed over every thread.
-    NumFaults,    ///< How many of those faults (a count, not time).
-    PagesAhead,   ///< Pages unprotected ahead of guests writing in order (a count).
-    BufferBytes,  ///< Guest memory copied into GPU buffers by the GPU thread (bytes).
-    ImageUploads, ///< Images uploaded from guest memory by the GPU thread (a count).
-    ImageBytes,   ///< Their guest size (bytes).
-    Draws,        ///< Draws recorded (a count).
-    Dispatches,   ///< Dispatches recorded (a count).
-    BoundBuffers, ///< Guest buffers bound to draws and dispatches (a count).
-    BoundImages,  ///< Images bound to draws and dispatches (a count).
+    Shaders,     ///< Translating shaders, creating pipelines, waiting for compile workers.
+    Textures,    ///< Creating images, resolving overlaps, uploading and detiling them (and every
+                 ///< lookup, with SHADPS4_DRAW_COSTS=1).
+    Buffers,     ///< Making buffer memory resident and uploading it from the guest (and every
+                 ///< lookup, with SHADPS4_DRAW_COSTS=1).
+    GpuWaits,    ///< Waiting for the host GPU to finish work (scheduler waits).
+    Submits,     ///< Submitting command buffers to the host queue.
+    Presents,    ///< Waiting for the presenter to flip (video out label waits).
+    Flips,       ///< Preparing flipped frames for the presenter (copying, waiting for a frame).
+    Dma,         ///< Buffer copies and fills the guest asked for, and DMA buffer syncs.
+    Busy,        ///< GPU thread time not spent idle or spinning on guest waits.
+    GuestWaits,  ///< Spinning on guest waits (wait reg mem, semaphores, CE/DE counters).
+    Faults,      ///< Handling guest page faults on tracked memory, summed over every thread.
+    NumFaults,   ///< How many of those faults (a count, not time).
+    PagesAhead,  ///< Pages unprotected ahead of guests writing in order (a count).
+    BufferBytes, ///< Guest memory copied into GPU buffers by the GPU thread (bytes).
+    BufferBytesReused, ///< Reads served by a copy already in the stream buffer (bytes).
+    ImageUploads,      ///< Images uploaded from guest memory by the GPU thread (a count).
+    ImageBytes,        ///< Their guest size (bytes).
+    Draws,             ///< Draws recorded (a count).
+    Dispatches,        ///< Dispatches recorded (a count).
+    BoundBuffers,      ///< Guest buffers bound to draws and dispatches (a count).
+    BoundImages,       ///< Images bound to draws and dispatches (a count).
     // Command translation for draws and dispatches, split only with SHADPS4_DRAW_COSTS=1; the
     // named costs above (shaders, textures, buffers) stay out of these.
     DrawChecks,  ///< Pending GPU operations, draw filters, render state set-up.
@@ -328,7 +329,7 @@ struct Frames {
         return fmt::format(
             "{} draws and {} dispatches binding {} buffers and {} images; "
             "busy {:.1f} ms (shaders {:.1f}, textures {:.1f} for {} images of {:.1f} MB, "
-            "buffers {:.1f} for {:.1f} MB, GPU "
+            "buffers {:.1f} for {:.1f} MB ({:.1f} MB reused), GPU "
             "waits {:.1f}, submits {:.1f}, present waits {:.1f}, flips {:.1f}, DMA {:.1f}{}, "
             "other {:.1f}), "
             "guest waits {:.1f} ms; page faults {} taking {:.1f} ms, {} pages "
@@ -336,8 +337,9 @@ struct Frames {
             c[size_t(Cost::Draws)], c[size_t(Cost::Dispatches)], c[size_t(Cost::BoundBuffers)],
             c[size_t(Cost::BoundImages)], busy / 1e6, ms(Cost::Shaders), ms(Cost::Textures),
             c[size_t(Cost::ImageUploads)], c[size_t(Cost::ImageBytes)] / 1048576.0,
-            ms(Cost::Buffers), c[size_t(Cost::BufferBytes)] / 1048576.0, ms(Cost::GpuWaits),
-            ms(Cost::Submits), ms(Cost::Presents), ms(Cost::Flips), ms(Cost::Dma), steps,
+            ms(Cost::Buffers), c[size_t(Cost::BufferBytes)] / 1048576.0,
+            c[size_t(Cost::BufferBytesReused)] / 1048576.0, ms(Cost::GpuWaits), ms(Cost::Submits),
+            ms(Cost::Presents), ms(Cost::Flips), ms(Cost::Dma), steps,
             busy > named ? (busy - named) / 1e6 : 0.0, ms(Cost::GuestWaits),
             c[size_t(Cost::NumFaults)], ms(Cost::Faults), c[size_t(Cost::PagesAhead)]);
     }

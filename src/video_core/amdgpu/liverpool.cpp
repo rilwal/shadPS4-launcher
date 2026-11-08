@@ -46,7 +46,8 @@ static const char* acb_task_name[] = NAME_ARRAY(ACB_TASK, MAX_NAMES);
 #define YIELD(name)                                                                                \
     FIBER_EXIT;                                                                                    \
     co_yield {};                                                                                   \
-    FIBER_ENTER(name);
+    FIBER_ENTER(name);                                                                             \
+    ForgetStreamCopies();
 
 #define YIELD_CE() YIELD(ccb_task_name)
 #define YIELD_GFX() YIELD(dcb_task_name)
@@ -400,7 +401,14 @@ bool Liverpool::DeferFenceSignal(Common::UniqueFunction<void>&& signal, bool thr
     return true;
 }
 
+void Liverpool::ForgetStreamCopies() {
+    if (rasterizer) {
+        rasterizer->ForgetStreamCopies();
+    }
+}
+
 void Liverpool::OrderCpWrite(VAddr address, u64 size) {
+    ForgetStreamCopies();
     if (size == 0) {
         return;
     }
@@ -560,6 +568,7 @@ Liverpool::Task Liverpool::ProcessCeUpdate(std::span<const u32> ccb) {
             break;
         }
         case PM4ItOpcode::DumpConstRam: {
+            ForgetStreamCopies();
             const auto* dump_const = reinterpret_cast<const PM4DumpConstRam*>(header);
             memcpy(dump_const->Address<void*>(),
                    cblock.constants_heap.data() + dump_const->Offset(), dump_const->Size());
@@ -808,6 +817,7 @@ bool Liverpool::ScanAhead(std::span<const u32> dcb, LookAheadBudget& budget, u32
 
 Liverpool::Task Liverpool::ProcessGraphics(std::span<const u32> dcb) {
     FIBER_ENTER(dcb_task_name);
+    ForgetStreamCopies();
 
     // A new submission starts with no level open, and may look ahead once.
     if (gfx_frames.empty()) {
@@ -1264,6 +1274,7 @@ Liverpool::Task Liverpool::ProcessGraphics(std::span<const u32> dcb) {
                 break;
             }
             case PM4ItOpcode::EventWriteEos: {
+                ForgetStreamCopies();
                 const auto* event_eos = reinterpret_cast<const PM4CmdEventWriteEos*>(header);
                 auto signal = [eos = *event_eos] { eos.SignalFence(WriteFenceLabel); };
                 LabelWrites writes;
@@ -1291,6 +1302,7 @@ Liverpool::Task Liverpool::ProcessGraphics(std::span<const u32> dcb) {
                 break;
             }
             case PM4ItOpcode::EventWriteEop: {
+                ForgetStreamCopies();
                 const auto* event_eop = reinterpret_cast<const PM4CmdEventWriteEop*>(header);
                 auto signal = [eop = *event_eop] {
                     eop.SignalFence(WriteFenceLabel, [] {
@@ -1386,6 +1398,7 @@ Liverpool::Task Liverpool::ProcessGraphics(std::span<const u32> dcb) {
                     OrderCpWrite(mem_semaphore->Address<VAddr>(), sizeof(u64));
                     mem_semaphore->Signal();
                 } else {
+                    ForgetStreamCopies();
                     while (!mem_semaphore->Signaled()) {
                         WAIT_YIELD(YIELD_GFX());
                     }
@@ -1398,6 +1411,7 @@ Liverpool::Task Liverpool::ProcessGraphics(std::span<const u32> dcb) {
                 break;
             }
             case PM4ItOpcode::Rewind: {
+                ForgetStreamCopies();
                 if (!rasterizer) {
                     break;
                 }
@@ -1408,6 +1422,7 @@ Liverpool::Task Liverpool::ProcessGraphics(std::span<const u32> dcb) {
                 break;
             }
             case PM4ItOpcode::WaitRegMem: {
+                ForgetStreamCopies();
                 const auto* wait_reg_mem = reinterpret_cast<const PM4CmdWaitRegMem*>(header);
                 // ASSERT(wait_reg_mem->engine.Value() == PM4CmdWaitRegMem::Engine::Me);
                 // Optimization: VO label waits are special because the emulator
@@ -1454,6 +1469,7 @@ Liverpool::Task Liverpool::ProcessGraphics(std::span<const u32> dcb) {
                 break;
             }
             case PM4ItOpcode::WaitOnCeCounter: {
+                ForgetStreamCopies();
                 while (cblock.ce_count <= cblock.de_count) {
                     WAIT_YIELD(YIELD_GFX());
                 }
@@ -1539,6 +1555,7 @@ Liverpool::Task Liverpool::ProcessGraphics(std::span<const u32> dcb) {
 template <bool is_indirect>
 Liverpool::Task Liverpool::ProcessCompute(std::span<const u32> acb, u32 vqid) {
     FIBER_ENTER(acb_task_name[vqid]);
+    ForgetStreamCopies();
     auto& queue = asc_queues[{vqid}];
 
     struct IndirectPatch {
@@ -1774,6 +1791,7 @@ Liverpool::Task Liverpool::ProcessCompute(std::span<const u32> acb, u32 vqid) {
                 OrderCpWrite(mem_semaphore->Address<VAddr>(), sizeof(u64));
                 mem_semaphore->Signal();
             } else {
+                ForgetStreamCopies();
                 while (!mem_semaphore->Signaled()) {
                     WAIT_YIELD(YIELD_ASC(vqid));
                 }
@@ -1782,6 +1800,7 @@ Liverpool::Task Liverpool::ProcessCompute(std::span<const u32> acb, u32 vqid) {
             break;
         }
         case PM4ItOpcode::WaitRegMem: {
+            ForgetStreamCopies();
             const auto* wait_reg_mem = reinterpret_cast<const PM4CmdWaitRegMem*>(header);
             ASSERT(wait_reg_mem->engine.Value() == PM4CmdWaitRegMem::Engine::Me);
             while (!TestWait(wait_reg_mem)) {
@@ -1790,6 +1809,7 @@ Liverpool::Task Liverpool::ProcessCompute(std::span<const u32> acb, u32 vqid) {
             break;
         }
         case PM4ItOpcode::ReleaseMem: {
+            ForgetStreamCopies();
             const auto* release_mem = reinterpret_cast<const PM4CmdReleaseMem*>(header);
             const auto signal_irq = [pipe_id = queue.pipe_id] {
                 Platform::IrqC::Instance()->Signal(static_cast<Platform::InterruptId>(pipe_id));

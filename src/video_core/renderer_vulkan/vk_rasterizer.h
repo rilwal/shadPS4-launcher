@@ -119,6 +119,11 @@ public:
     /// right away instead. Returns false (without signaling) when readbacks aren't Fenced.
     bool DeferFenceSignal(Common::UniqueFunction<void>&& signal, bool throttle);
 
+    /// See BufferCache::ForgetStreamCopies.
+    void ForgetStreamCopies() noexcept {
+        buffer_cache.ForgetStreamCopies();
+    }
+
     /// Bytes a deferred signal will write: GPU data recorded for them is no longer current.
     void ForgetGpuWrites(VAddr address, u64 size) {
         buffer_cache.ForgetGpuWrites(address, size);

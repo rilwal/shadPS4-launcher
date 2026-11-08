@@ -88,6 +88,14 @@ BufferCache::BufferCache(const Vulkan::Instance& instance_, Vulkan::Scheduler& s
       gds_buffer{instance, 0, GDS_BUFFER_SIZE, MemoryType::Stream, "GDS Buffer"},
       memory_semaphore{instance} {
     memory_semaphore.SetName("sparse binds");
+    if (const char* env = std::getenv("SHADPS4_REUSE_STREAM_COPIES")) {
+        reuse_stream_copies = env[0] != '0';
+    }
+    if (const char* env = std::getenv("SHADPS4_AB");
+        env && std::string_view{env} == "stream-copies") {
+        stream_copies_ab = Common::AbSwitch::Register("Copy every read", "Reuse stream copies",
+                                                      reuse_stream_copies);
+    }
     const u32 readbacks_mode = EmulatorSettings.GetReadbacksMode();
     tracks_gpu_pages =
         readbacks_mode == GpuReadbacksMode::Precise || readbacks_mode == GpuReadbacksMode::Fenced;
@@ -810,10 +818,31 @@ std::pair<const Buffer*, u64> BufferCache::ObtainBuffer(VAddr device_addr, u32 s
     // For read-only buffers use device local stream buffer to reduce renderpass breaks.
     if (!is_written && !skip_stream_buffer && size <= STREAM_THRESHOLD &&
         !IsRegionGpuModified(device_addr, size)) {
+        // Only within one command buffer: the stream buffer frees regions by the tick they
+        // were copied in, so a later tick reading an old region could see it overwritten.
+        const u64 tick = scheduler.CurrentTick();
+        auto& copy =
+            stream_copies[((device_addr >> 4) ^ (device_addr >> 14) ^ size) % stream_copies.size()];
+        const bool reuse = stream_copies_ab ? Common::AbSwitch::IsB() : reuse_stream_copies;
+        if (reuse && copy.address == device_addr && copy.size == size &&
+            copy.epoch == stream_copy_epoch && copy.tick == tick &&
+            copy.wraps == stream_buffer.Wraps()) {
+            VideoCore::PerfStats::frames.AddGpuCount(VideoCore::PerfStats::Cost::BufferBytesReused,
+                                                     size);
+            return {&stream_buffer, copy.offset};
+        }
         const auto [data, offset] = stream_buffer.Map(size, instance.UniformMinAlignment());
         memory->CopySparseMemory(device_addr, data, size);
         stream_buffer.Commit();
         VideoCore::PerfStats::frames.AddGpuCount(VideoCore::PerfStats::Cost::BufferBytes, size);
+        copy = StreamCopy{
+            .address = device_addr,
+            .size = size,
+            .epoch = stream_copy_epoch,
+            .tick = tick,
+            .wraps = stream_buffer.Wraps(),
+            .offset = offset,
+        };
         return {&stream_buffer, offset};
     }
     const u64 first_block = device_addr >> block_shift;
