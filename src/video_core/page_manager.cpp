@@ -107,6 +107,39 @@ bool FaultLoadsEnabled() {
 
 std::atomic<u64> write_fault_count{};
 std::atomic<u64> write_fault_ns{};
+/// WriteFaultPhases summed over every handled write fault, and over the unprotecting ahead.
+struct AtomicPhases {
+    std::atomic<u64> region_lock_ns{};
+    std::atomic<u64> page_lock_ns{};
+    std::atomic<u64> protect_ns{};
+    std::atomic<u64> texture_ns{};
+    std::atomic<u64> protect_calls{};
+    std::atomic<u64> protect_pages{};
+
+    void Add(const WriteFaultPhases& p) {
+        region_lock_ns.fetch_add(p.region_lock_ns, std::memory_order_relaxed);
+        page_lock_ns.fetch_add(p.page_lock_ns, std::memory_order_relaxed);
+        protect_ns.fetch_add(p.protect_ns, std::memory_order_relaxed);
+        texture_ns.fetch_add(p.texture_ns, std::memory_order_relaxed);
+        protect_calls.fetch_add(p.protect_calls, std::memory_order_relaxed);
+        protect_pages.fetch_add(p.protect_pages, std::memory_order_relaxed);
+    }
+
+    WriteFaultPhases Take() {
+        return {
+            .region_lock_ns = region_lock_ns.exchange(0),
+            .page_lock_ns = page_lock_ns.exchange(0),
+            .protect_ns = protect_ns.exchange(0),
+            .texture_ns = texture_ns.exchange(0),
+            .protect_calls = protect_calls.exchange(0),
+            .protect_pages = protect_pages.exchange(0),
+        };
+    }
+};
+AtomicPhases write_fault_phase_totals;
+AtomicPhases ahead_phase_totals;
+std::atomic<u64> ahead_count{};
+std::atomic<u64> ahead_ns{};
 /// Handled read faults: all, and those on the GPU thread.
 std::array<std::atomic<u64>, 2> read_fault_count{};
 std::array<std::atomic<u64>, 2> read_fault_ns{};
@@ -139,9 +172,18 @@ bool HandleWriteFault(Vulkan::Rasterizer* rasterizer, VAddr addr, u64 size, bool
         site.phases.protect_ns += phases.protect_ns;
         site.phases.texture_ns += phases.texture_ns;
     }
+    if (handled) {
+        write_fault_phase_totals.Add(phases);
+    }
     if (handled && !is_gpu_thread) {
         if (const auto [ahead, ahead_size] = fault_ahead.Next(addr); ahead_size != 0) {
+            const u64 ahead_start = PerfStats::NowNs();
+            write_fault_phases = WriteFaultPhases{.active = true};
             rasterizer->InvalidateMemoryAhead(ahead, ahead_size);
+            ahead_phase_totals.Add(write_fault_phases);
+            write_fault_phases.active = false;
+            ahead_count.fetch_add(1, std::memory_order_relaxed);
+            ahead_ns.fetch_add(PerfStats::NowNs() - ahead_start, std::memory_order_relaxed);
             PerfStats::frames.AddCost(PerfStats::Cost::PagesAhead,
                                       ahead_size / PageManager::GetPageSize());
         }
@@ -165,8 +207,15 @@ bool RegionLockProfiling() {
     return enabled;
 }
 
-std::pair<u64, u64> TakeWriteFaultTotals() {
-    return {write_fault_count.exchange(0), write_fault_ns.exchange(0)};
+WriteFaultTotals TakeWriteFaultTotals() {
+    return {
+        .count = write_fault_count.exchange(0),
+        .ns = write_fault_ns.exchange(0),
+        .phases = write_fault_phase_totals.Take(),
+        .ahead_count = ahead_count.exchange(0),
+        .ahead_ns = ahead_ns.exchange(0),
+        .ahead_phases = ahead_phase_totals.Take(),
+    };
 }
 
 ReadFaultTotals TakeReadFaultTotals() {
@@ -584,6 +633,8 @@ struct SignalImpl : public PageManager::Impl {
             thread_protect_ns += elapsed;
             if (write_fault_phases.active) {
                 write_fault_phases.protect_ns += elapsed;
+                ++write_fault_phases.protect_calls;
+                write_fault_phases.protect_pages += size / PageManager::GetPageSize();
             }
         }
     }

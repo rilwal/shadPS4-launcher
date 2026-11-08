@@ -37,6 +37,8 @@ struct WriteFaultPhases {
     u64 page_lock_ns{};
     u64 protect_ns{};
     u64 texture_ns{};
+    u64 protect_calls{};
+    u64 protect_pages{};
 };
 inline thread_local WriteFaultPhases write_fault_phases;
 
@@ -129,8 +131,17 @@ struct SlowWriteFaultSite {
     WriteFaultPhases phases;
 };
 
-/// All handled write faults since the last call and their total time, cleared.
-std::pair<u64, u64> TakeWriteFaultTotals();
+/// All handled write faults since the last call, cleared: how many, their total time and its
+/// parts, and the unprotecting ahead of in-order writers that follows some of them.
+struct WriteFaultTotals {
+    u64 count;
+    u64 ns;
+    WriteFaultPhases phases;
+    u64 ahead_count;
+    u64 ahead_ns;
+    WriteFaultPhases ahead_phases;
+};
+WriteFaultTotals TakeWriteFaultTotals();
 
 /// All handled read faults since the last call and their total time, and those on the GPU
 /// thread, cleared.
