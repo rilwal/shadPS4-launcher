@@ -236,8 +236,13 @@ std::vector<SlowWriteFaultSite> TakeSlowWriteFaultSites() {
 
 struct PageManager::Impl {
     struct PageState {
-        u8 num_write_watchers;
-        u8 num_read_watchers;
+        /// Signed: region trackers change protection after releasing their locks, so a change
+        /// can land before an earlier one it undoes, taking a count below zero for a moment.
+        /// Adds and removes commute, and a count that isn't zero protects the page: below zero
+        /// a track is still on its way, and until it lands writes fault and retry (the bits
+        /// already say what they do), which is safe where unprotecting wouldn't be.
+        s16 num_write_watchers;
+        s16 num_read_watchers;
 
         Core::MemoryPermission WritePerm() const noexcept {
             return num_write_watchers == 0 ? Core::MemoryPermission::Write
@@ -254,7 +259,7 @@ struct PageManager::Impl {
         }
 
         template <bool is_read>
-        u8 GetPage() const {
+        s16 GetPage() const {
             if constexpr (is_read) {
                 return num_read_watchers;
             } else {
@@ -265,21 +270,17 @@ struct PageManager::Impl {
         constexpr Core::MemoryPermission Update(PageOp write_op, bool update_write = true,
                                                 PageOp read_op = PageOp::None,
                                                 bool update_read = false) {
+            // Only a few changes can be in flight for a page at once.
+            constexpr s16 Limit = 1024;
             if (update_read) {
-                if (read_op == PageOp::Track) {
-                    ASSERT_MSG(num_read_watchers == 0, "Too many watchers");
-                } else if (read_op == PageOp::Untrack) {
-                    ASSERT_MSG(num_read_watchers > 0, "Not enough watchers");
-                }
                 num_read_watchers += std::to_underlying(read_op);
+                ASSERT_MSG(num_read_watchers > -Limit && num_read_watchers < Limit,
+                           "Read watchers out of range: {}", num_read_watchers);
             }
             if (update_write) {
-                if (write_op == PageOp::Track) {
-                    ASSERT_MSG(num_write_watchers < 255, "Too many watchers");
-                } else if (write_op == PageOp::Untrack) {
-                    ASSERT_MSG(num_write_watchers > 0, "Not enough watchers");
-                }
                 num_write_watchers += std::to_underlying(write_op);
+                ASSERT_MSG(num_write_watchers > -Limit && num_write_watchers < Limit,
+                           "Write watchers out of range: {}", num_write_watchers);
             }
             return Perms();
         }
