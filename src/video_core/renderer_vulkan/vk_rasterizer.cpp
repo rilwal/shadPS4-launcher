@@ -883,10 +883,16 @@ void Rasterizer::BindVertexBuffers(const GraphicsPipeline* pipeline) {
         }
     };
 
+    // A V# with an invalid format reads zeros, as from a null binding.
+    const auto has_data = [](const AmdGpu::Buffer& buffer) {
+        return buffer.base_address != 0 && buffer.GetSize() > 0 &&
+               buffer.GetDataFmt() != AmdGpu::DataFormat::FormatInvalid;
+    };
+
     // Build list of ranges covering the requested buffers
     VertexInputs<BufferRange> ranges{};
     for (const auto& buffer : guest_buffers) {
-        if (buffer.base_address != 0 && buffer.GetSize() > 0) {
+        if (has_data(buffer)) {
             ranges.emplace_back(buffer.base_address, buffer.base_address + buffer.GetSize());
         }
     }
@@ -923,7 +929,7 @@ void Rasterizer::BindVertexBuffers(const GraphicsPipeline* pipeline) {
     VertexInputs<vk::DeviceSize> host_sizes;
     VertexInputs<vk::DeviceSize> host_strides;
     for (const auto& buffer : guest_buffers) {
-        if (buffer.base_address != 0 && buffer.GetSize() > 0) {
+        if (has_data(buffer)) {
             const auto host_buffer_info =
                 std::ranges::find_if(ranges_merged, [&](const BufferRange& range) {
                     return buffer.base_address >= range.base_address &&

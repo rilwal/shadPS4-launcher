@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 #include <algorithm>
+#include <atomic>
 #include <utility>
 #include <boost/container/small_vector.hpp>
 
@@ -797,7 +798,31 @@ void GraphicsPipeline::Probe(const Build& b, u64 optimized_ns,
 
 vk::Format GraphicsPipeline::VertexInputFormat(const AmdGpu::Buffer& buffer) const {
     if (!Shader::UsesRuntimeVertexFormat(profile.runtime_vertex_formats, buffer)) {
-        return LiverpoolToVK::SurfaceFormat(buffer.GetDataFmt(), buffer.GetNumberFmt());
+        const auto format =
+            LiverpoolToVK::SurfaceFormat(buffer.GetDataFmt(), buffer.GetNumberFmt());
+        if (format != vk::Format::eUndefined) {
+            return format;
+        }
+        // An invalid V# (a null table reads as zeros) has no format, and an undefined one
+        // makes NVIDIA lose the device setting up the attribute (Xid 69 at the vertex
+        // attribute method). Its binding is null, so it reads zeros as the hardware does, in
+        // the class of the shader's input.
+        static std::atomic_flag reported;
+        if (!reported.test_and_set()) {
+            LOG_WARNING(Render_Vulkan,
+                        "Vertex attribute with no Vulkan format (data {}, number {}, address "
+                        "{:#x}), reading zeros",
+                        AmdGpu::NameOf(buffer.GetDataFmt()), AmdGpu::NameOf(buffer.GetNumberFmt()),
+                        buffer.base_address);
+        }
+        switch (AmdGpu::GetNumberClass(buffer.GetNumberFmt())) {
+        case AmdGpu::NumberClass::Sint:
+            return vk::Format::eR32Sint;
+        case AmdGpu::NumberClass::Uint:
+            return vk::Format::eR32Uint;
+        default:
+            return vk::Format::eR32Sfloat;
+        }
     }
     // The element's raw bits, which the shader converts by the format in its stage table.
     switch (Shader::RuntimeFormatElementSize(*Shader::DescribeRuntimeBufferFormat(buffer))) {
