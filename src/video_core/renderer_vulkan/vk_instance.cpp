@@ -742,7 +742,7 @@ void Instance::CreateAllocator() {
     const VkResult result = vmaCreateAllocator(&allocator_info, &allocator);
     if (result != VK_SUCCESS) {
         UNREACHABLE_MSG("Failed to initialize VMA with error {}",
-                        vk::to_string(vk::Result{result}));
+                        vk::to_string(static_cast<vk::Result>(result)));
     }
 }
 
@@ -954,12 +954,13 @@ void Instance::LogDeviceFault() const {
     const VkResult result =
         VULKAN_HPP_DEFAULT_DISPATCHER.vkGetDeviceFaultInfoEXT(dev, &counts, &info);
     LOG_CRITICAL(Render_Vulkan, "Device lost: \"{}\" ({}, {} addresses, {} vendor records)",
-                 info.description, vk::to_string(vk::Result{result}), counts.addressInfoCount,
-                 counts.vendorInfoCount);
+                 info.description, vk::to_string(static_cast<vk::Result>(result)),
+                 counts.addressInfoCount, counts.vendorInfoCount);
     for (u32 i = 0; i < counts.addressInfoCount; ++i) {
-        LOG_CRITICAL(Render_Vulkan, "  address {:#x} (precision {:#x}), {}",
-                     addresses[i].reportedAddress, addresses[i].addressPrecision,
-                     vk::to_string(vk::DeviceFaultAddressTypeEXT{addresses[i].addressType}));
+        LOG_CRITICAL(
+            Render_Vulkan, "  address {:#x} (precision {:#x}), {}", addresses[i].reportedAddress,
+            addresses[i].addressPrecision,
+            vk::to_string(static_cast<vk::DeviceFaultAddressTypeEXT>(addresses[i].addressType)));
     }
     for (u32 i = 0; i < counts.vendorInfoCount; ++i) {
         LOG_CRITICAL(Render_Vulkan, "  vendor: \"{}\" code {:#x} data {:#x}", vendor[i].description,
