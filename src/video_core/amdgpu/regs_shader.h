@@ -228,23 +228,31 @@ struct ComputeProgram {
     }
 };
 
-static constexpr const BinaryInfo& SearchBinaryInfo(const u32* code) {
+/// The binary info after a shader's code, or null if there's none where it should be.
+static constexpr const BinaryInfo* FindBinaryInfo(const u32* code) {
     constexpr u32 token_mov_vcchi = 0xBEEB03FF;
     if (code[0] == token_mov_vcchi) {
         const auto* info = std::bit_cast<const BinaryInfo*>(code + (code[1] + 1) * 2);
         if (info->Valid()) {
-            return *info;
+            return info;
         }
     }
-    constexpr u32 signature_size = sizeof(BinaryInfo::signature_ref) / sizeof(u8);
     constexpr u32 search_limit = 0x4000;
     const u32* end = code + search_limit;
     for (const u32* it = code; it < end; ++it) {
         if (const BinaryInfo* info = std::bit_cast<const BinaryInfo*>(it); info->Valid()) {
-            return *info;
+            return info;
         }
     }
-    UNREACHABLE_MSG("Shader binary info not found.");
+    return nullptr;
+}
+
+static constexpr const BinaryInfo& SearchBinaryInfo(const u32* code) {
+    const BinaryInfo* info = FindBinaryInfo(code);
+    if (!info) {
+        UNREACHABLE_MSG("Shader binary info not found for code at {}", fmt::ptr(code));
+    }
+    return *info;
 }
 
 static constexpr Shader::ShaderParams GetParams(const auto& sh) {

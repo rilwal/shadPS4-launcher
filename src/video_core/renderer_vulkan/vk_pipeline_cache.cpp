@@ -522,6 +522,9 @@ bool PipelineCache::PrefetchGraphicsPipeline() {
     if (mode != AsyncMode::Skip && mode != AsyncMode::SkipAll) {
         return false;
     }
+    if (!GraphicsProgramsLoaded()) {
+        return false;
+    }
     const size_t before = graphics_pipelines.size();
     LookUpGraphicsPipeline({}, true);
     return graphics_pipelines.size() != before;
@@ -611,6 +614,10 @@ const ComputePipeline* PipelineCache::GetComputePipeline() {
 bool PipelineCache::PrefetchComputePipeline() {
     const auto mode = GetAsyncMode();
     if (mode != AsyncMode::Skip && mode != AsyncMode::SkipAll) {
+        return false;
+    }
+    const auto& cs_pgm = liverpool->GetCsRegs();
+    if (!cs_pgm.Address<u32*>() || !TryProgramParams(cs_pgm)) {
         return false;
     }
     const size_t before = compute_pipelines.size();
@@ -745,6 +752,27 @@ bool PipelineCache::RefreshGraphicsKey() {
 
 template <typename Program>
 Shader::ShaderParams PipelineCache::ProgramParams(const Program& pgm) const {
+    if (const auto params = TryProgramParams(pgm)) {
+        return *params;
+    }
+    // Reports the missing header.
+    return AmdGpu::GetParams(pgm);
+}
+
+bool PipelineCache::GraphicsProgramsLoaded() const {
+    const auto& regs = liverpool->regs;
+    for (u32 stage = 0; stage < 6; ++stage) {
+        const auto* pgm = regs.ProgramForStage(stage);
+        if (regs.stage_enable.IsStageEnabled(stage) && pgm && pgm->Address<u32*>() &&
+            !TryProgramParams(*pgm)) {
+            return false;
+        }
+    }
+    return true;
+}
+
+template <typename Program>
+std::optional<Shader::ShaderParams> PipelineCache::TryProgramParams(const Program& pgm) const {
     // Every draw reads its shaders' headers. A header on a page that also holds GPU-written
     // bytes is read-protected under precise and fenced readbacks, and read directly it faulted
     // on every draw, each fault a readback (Bloodborne: ~160 a second, 10 ms of every frame).
@@ -761,14 +789,22 @@ Shader::ShaderParams PipelineCache::ProgramParams(const Program& pgm) const {
         const VAddr info_address = address + (u64{head[1]} + 1) * 8;
         if (!gpu_bytes_pending(info_address, sizeof(info)) &&
             memory->ReadBackingPages(info_address, &info, sizeof(info)) && info.Valid()) {
-            return {
+            return Shader::ShaderParams{
                 .user_data = pgm.user_data,
                 .code = std::span{code, info.length / sizeof(u32)},
                 .hash = info.shader_hash,
             };
         }
     }
-    return AmdGpu::GetParams(pgm);
+    const auto* found = AmdGpu::FindBinaryInfo(code);
+    if (!found) {
+        return std::nullopt;
+    }
+    return Shader::ShaderParams{
+        .user_data = pgm.user_data,
+        .code = std::span{code, found->length / sizeof(u32)},
+        .hash = found->shader_hash,
+    };
 }
 
 std::span<const u32> PipelineCache::BackingCode(std::span<const u32> code) {

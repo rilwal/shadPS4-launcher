@@ -140,6 +140,12 @@ private:
     /// shader's header through guest memory's backing where no GPU bytes are pending there.
     template <typename Program>
     Shader::ShaderParams ProgramParams(const Program& pgm) const;
+    /// The same, empty where the program has no binary info.
+    template <typename Program>
+    std::optional<Shader::ShaderParams> TryProgramParams(const Program& pgm) const;
+    /// Whether every program the graphics registers enable has its binary info. Look-ahead
+    /// reads registers set past waits, whose shaders the game may not have loaded yet.
+    bool GraphicsProgramsLoaded() const;
 
 public:
     /// Whether any byte of a range has GPU data not yet in guest memory (the buffer cache's).
