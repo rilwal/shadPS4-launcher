@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 #include <algorithm>
+#include "common/alignment.h"
 #include "shader_recompiler/info.h"
 #include "video_core/perf_stats.h"
 #include "video_core/renderer_vulkan/vk_rasterizer.h"
@@ -125,10 +126,33 @@ static bool ExecuteCopyShaderHLE(const Shader::Info& info, const AmdGpu::Compute
             dst_offset_max = new_dst_offset_max;
         }
 
-        // Obtain buffers for the total source and destination ranges.
+        // Obtain buffers for the total source and destination ranges. The copies read a small
+        // part of the source span (about 1% in Bloodborne), so only the pages they read are
+        // uploaded: uploading the span's CPU-written pages moved four times what was copied.
+        static std::vector<std::pair<VAddr, u64>> src_ranges;
+        src_ranges.clear();
+        for (u32 i = batch_start; i < batch_end; ++i) {
+            src_ranges.emplace_back(src_buf_sharp.base_address + copies[i].srcOffset,
+                                    copies[i].size);
+        }
+        std::ranges::sort(src_ranges);
+        size_t num_ranges = 0;
+        constexpr u64 PageSize = 4_KB;
+        for (const auto& [addr, size] : src_ranges) {
+            if (num_ranges != 0) {
+                auto& last = src_ranges[num_ranges - 1];
+                // Ranges on the same tracked page or touching it upload that page once anyway.
+                if (addr <= Common::AlignUp(last.first + last.second, PageSize)) {
+                    last.second = std::max(last.first + last.second, addr + size) - last.first;
+                    continue;
+                }
+            }
+            src_ranges[num_ranges++] = {addr, size};
+        }
         const u64 synchronized_before = buffer_cache.SynchronizedBytes();
-        const auto [src_buf, src_buf_offset] = buffer_cache.ObtainBuffer(
-            src_buf_sharp.base_address + src_offset_min, src_offset_max - src_offset_min);
+        const auto [src_buf, src_buf_offset] = buffer_cache.ObtainBufferForRanges(
+            src_buf_sharp.base_address + src_offset_min, src_offset_max - src_offset_min,
+            std::span{src_ranges}.first(num_ranges));
         auto& totals = copy_shader_totals;
         ++totals.batches;
         totals.source_span_bytes += src_offset_max - src_offset_min;

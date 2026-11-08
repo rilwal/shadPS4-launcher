@@ -1091,14 +1091,42 @@ void BufferCache::EnsureResident(const Buffer* arena, u64 first_block, u64 last_
     }
 }
 
+std::pair<const Buffer*, u64> BufferCache::ObtainBufferForRanges(
+    VAddr device_addr, u32 size, std::span<const std::pair<VAddr, u64>> ranges) {
+    if (size <= STREAM_THRESHOLD) {
+        // Small regions go through the stream buffer whole, as ObtainBuffer does.
+        return ObtainBuffer(device_addr, size);
+    }
+    const u64 first_block = device_addr >> block_shift;
+    const u64 last_block = (device_addr + size - 1) >> block_shift;
+    const auto* arena = GetArena(first_block, last_block);
+    EnsureResident(arena, first_block, last_block);
+    UploadCpuModified(arena, ranges, false);
+    return {arena, arena->Offset(device_addr)};
+}
+
 bool BufferCache::SynchronizeMemory(const Buffer* arena, VAddr device_addr, u32 size,
                                     bool is_written, bool is_texel_buffer) {
+    const std::pair<VAddr, u64> range{device_addr, size};
+    UploadCpuModified(arena, std::span{&range, 1}, is_written);
+    if (is_texel_buffer && !is_written) {
+        return SynchronizeMemoryFromImage(arena, device_addr, size);
+    }
+    return false;
+}
+
+void BufferCache::UploadCpuModified(const Buffer* arena,
+                                    std::span<const std::pair<VAddr, u64>> ranges,
+                                    bool is_written) {
     boost::container::small_vector<vk::BufferCopy, 4> copies;
     size_t total_size_bytes{};
-    memory_tracker->ForEachUploadRange(device_addr, size, is_written, [&](u64 addr, u64 size) {
-        copies.emplace_back(total_size_bytes, addr, size);
-        total_size_bytes += size;
-    });
+    for (const auto& [range_addr, range_size] : ranges) {
+        memory_tracker->ForEachUploadRange(range_addr, range_size, is_written,
+                                           [&](u64 addr, u64 size) {
+                                               copies.emplace_back(total_size_bytes, addr, size);
+                                               total_size_bytes += size;
+                                           });
+    }
     if (!copies.empty()) {
         const VideoCore::PerfStats::ScopedCost cost{VideoCore::PerfStats::Cost::Buffers};
         const auto staging = staging_pool.Request(total_size_bytes, MemoryType::HostUncached);
@@ -1113,10 +1141,6 @@ bool BufferCache::SynchronizeMemory(const Buffer* arena, VAddr device_addr, u32 
                                                  total_size_bytes);
         synchronized_bytes += total_size_bytes;
     }
-    if (is_texel_buffer && !is_written) {
-        return SynchronizeMemoryFromImage(arena, device_addr, size);
-    }
-    return false;
 }
 
 bool BufferCache::SynchronizeMemoryFromImage(const Buffer* arena, VAddr device_addr, u32 size) {

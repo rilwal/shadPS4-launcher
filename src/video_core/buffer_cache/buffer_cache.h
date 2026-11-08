@@ -9,6 +9,7 @@
 #include <atomic>
 #include <deque>
 #include <memory>
+#include <span>
 #include <unordered_map>
 #include <boost/container/small_vector.hpp>
 
@@ -167,6 +168,11 @@ public:
     [[nodiscard]] std::pair<const Buffer*, u64> ObtainBuffer(
         VAddr device_addr, u32 size, ObtainBufferFlags flags = ObtainBufferFlags::None);
 
+    /// ObtainBuffer for a read-only region of which only `ranges` (sorted, inside it) are read:
+    /// only the CPU-written pages of those are uploaded, and the rest stay CPU-written.
+    [[nodiscard]] std::pair<const Buffer*, u64> ObtainBufferForRanges(
+        VAddr device_addr, u32 size, std::span<const std::pair<VAddr, u64>> ranges);
+
     /// Attempts to obtain a buffer without modifying the cache contents.
     /// Returns a buffer holding the guest memory of an image. With device_local, memory that
     /// only the CPU wrote is copied into device memory first, so that a shader reading it in a
@@ -243,6 +249,10 @@ private:
 
     bool SynchronizeMemory(const Buffer* arena, VAddr device_addr, u32 size, bool is_written,
                            bool is_texel_buffer);
+
+    /// Uploads the CPU-written pages of each range into the arena, in one staging copy.
+    void UploadCpuModified(const Buffer* arena, std::span<const std::pair<VAddr, u64>> ranges,
+                           bool is_written);
 
     bool SynchronizeMemoryFromImage(const Buffer* arena, VAddr device_addr, u32 size);
 
