@@ -51,7 +51,7 @@ namespace {
 /// many pages after it as the last, up to SHADPS4_FAULT_AHEAD_PAGES (0 turns it off). The pages
 /// are only marked as written early, which costs an upload of data that didn't change at worst.
 /// Runs that start where one started before (the same buffer refilled every frame) unprotect
-/// as far as that one reached on their first fault (SHADPS4_FAULT_AHEAD_HISTORY=0 turns it off).
+/// as far as that one wrote on their first fault (SHADPS4_FAULT_AHEAD_HISTORY=0 turns it off).
 class FaultAhead {
 public:
     /// The range to unprotect after a write fault at `addr`, empty if it isn't in a run.
@@ -75,20 +75,20 @@ public:
             if (!HistoryEnabled() || seen.start != page || seen.pages <= 1) {
                 return {};
             }
-            // Ahead as far as the last run from here went, after this page. Its next fault
-            // carries on doubling from the most a fault takes.
+            // Ahead to the last page the last run from here wrote. If this one goes further,
+            // its next fault starts doubling again.
             predicted = true;
-            run->pages = max_pages;
             run->end = page + seen.pages * PageManager::GetPageSize();
             return {start, run->end - start};
         }
         run->pages = std::clamp<u64>(run->pages * 2, 1, max_pages);
         run->last_use = tick;
         run->end = start + run->pages * PageManager::GetPageSize();
+        // The run has written up to this page; the pages unprotected after it may not be.
         History& entry = history[HistoryIndex(run->start)];
         entry.start = run->start;
         entry.pages = static_cast<u32>(
-            std::min<u64>((run->end - run->start) / PageManager::GetPageSize(), MaxHistoryPages));
+            std::min<u64>((start - run->start) / PageManager::GetPageSize(), MaxHistoryPages));
         return {start, run->end - start};
     }
 
@@ -122,8 +122,8 @@ private:
         u64 pages{};
         u64 last_use{};
     };
-    /// How far the last run from a page reached, in pages from it (capped: unprotecting more
-    /// than a run writes costs uploads of unchanged pages).
+    /// How far the last run from a page wrote, in pages from it up to its last fault's page
+    /// (capped: unprotecting more than a run writes costs uploads of unchanged pages).
     struct History {
         VAddr start{};
         u32 pages{};
