@@ -260,16 +260,6 @@ public:
 
     bool TryWriteBacking(void* address, const void* data, u64 size);
 
-    /// Debugging Fenced readbacks: with SHADPS4_WATCH_ADDR=<hex>, logs each emulator write
-    /// covering that address (what wrote it, the dword written, the thread). The backing writes
-    /// log themselves; other writers call this.
-    static void NoteWatchedWrite(VAddr address, u64 size, const void* data, const char* what);
-    /// The last backing writes (of a few thousand) overlapping the range, newest first, for
-    /// logging when guest memory turns out wrong.
-    static std::string DescribeRecentBackingWrites(VAddr address, u64 size);
-    /// The last backing writes whose first dword was `value`, newest first.
-    static std::string DescribeRecentBackingWritesOfValue(u32 value);
-
     /// Reads guest memory through its backing, which page protection doesn't cover.
     bool TryReadBacking(VAddr address, void* data, u64 size);
 

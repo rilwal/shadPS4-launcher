@@ -265,23 +265,6 @@ std::string DescribeCodeAddress(u64 address) {
 }
 } // namespace
 
-std::string BufferCache::DescribeMemoryState(VAddr address, u64 size) const {
-    std::string landing_info;
-    for (const auto& landing : landings) {
-        if (landing->ranges.Intersects(address, size)) {
-            landing_info += fmt::format(" landing tick {} done {}", landing->tick,
-                                        landing->done.load(std::memory_order_acquire));
-        }
-    }
-    return fmt::format(
-        "CPU-modified pages {}, GPU-modified pages {}, GPU-written ranges {}, "
-        "async downloads {}, lands early {}, landings:{}",
-        memory_tracker->IsRegionCpuModified(address, size),
-        memory_tracker->IsRegionGpuModified(address, size),
-        gpu_modified_ranges.Intersects(address, size), async_downloads.Intersects(address, size),
-        land_early_ranges.Intersects(address, size), landing_info.empty() ? " none" : landing_info);
-}
-
 bool BufferCache::GpuBytesPending(VAddr address, u64 size) const {
     // Pending bytes keep their pages marked GPU-modified until they land or are read back, so
     // an unmarked page (most shader code) answers with a bit test instead of range lookups.

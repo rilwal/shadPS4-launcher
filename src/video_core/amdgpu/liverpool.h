@@ -232,8 +232,6 @@ private:
     static void WriteFenceLabel(void* address, u64 data, u32 num_bytes);
     /// The label writes of the deferred signal running on this thread, with expected values.
     static thread_local const LabelWrites* running_label_writes;
-    /// Logs a packet of an unknown type, the backing writes over it and its tracking state.
-    void LogBadPacket(const u32* packet, size_t remaining_dwords);
 
     /// Hands a fence signal to the rasterizer to run later (fenced readbacks). Returns false
     /// if it must run now. `writes` are the label values the signal will write.
@@ -246,9 +244,8 @@ private:
     /// this waits for it if the write overlaps one, or follows a wait that read a deferred
     /// value: otherwise the late label write lands over this one (TLG's compute stall), or
     /// the guest learns of progress before the label it waited behind is written. Then drops
-    /// the deferred values this write replaces. `data` (may be null) and `what` are for the
-    /// SHADPS4_WATCH_ADDR log.
-    void OrderCpWrite(VAddr address, u64 size, const void* data, const char* what);
+    /// the deferred values this write replaces.
+    void OrderCpWrite(VAddr address, u64 size);
 
     /// Tests a WAIT_REG_MEM condition. A label whose signal is deferred reads as its new value.
     bool TestWait(const PM4CmdWaitRegMem* wait);

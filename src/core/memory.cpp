@@ -1,16 +1,8 @@
 // SPDX-FileCopyrightText: Copyright 2025-2026 shadPS4 Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
-#include <array>
-#include <atomic>
-#include <chrono>
-#include <cstdlib>
 #include <cstring>
-#include <thread>
 #include <vector>
-#ifndef _WIN32
-#include <dlfcn.h>
-#endif
 #include <boost/container/small_vector.hpp>
 #include "common/alignment.h"
 #include "common/assert.h"
@@ -213,127 +205,7 @@ bool MemoryManager::WriteBackingPages(VAddr address, const void* data, u64 size)
     });
 }
 
-namespace {
-struct BackingWrite {
-    VAddr address;
-    u64 size;
-    u64 caller;
-    u64 ns;
-    u32 first_dword;
-    u32 thread;
-};
-constexpr size_t BackingWriteLogSize = 4096;
-std::array<BackingWrite, BackingWriteLogSize> backing_write_log{};
-std::atomic<u64> backing_write_count{};
-
-/// SHADPS4_WATCH_ADDR: hex addresses, comma-separated.
-const std::vector<VAddr>& WatchedAddresses() {
-    static const std::vector<VAddr> addresses = [] {
-        std::vector<VAddr> list;
-        const char* env = std::getenv("SHADPS4_WATCH_ADDR");
-        while (env != nullptr && *env != '\0') {
-            char* end = nullptr;
-            const VAddr address = std::strtoull(env, &end, 16);
-            if (end == env) {
-                break;
-            }
-            list.push_back(address);
-            env = *end == ',' ? end + 1 : nullptr;
-        }
-        return list;
-    }();
-    return addresses;
-}
-
-u64 NowNs() {
-    return std::chrono::duration_cast<std::chrono::nanoseconds>(
-               std::chrono::steady_clock::now().time_since_epoch())
-        .count();
-}
-
-u32 ThreadTag() {
-    return static_cast<u32>(std::hash<std::thread::id>{}(std::this_thread::get_id()));
-}
-
-std::string DescribeCaller(u64 address) {
-#ifndef _WIN32
-    Dl_info info{};
-    if (dladdr(reinterpret_cast<void*>(address), &info) != 0 && info.dli_sname != nullptr) {
-        return fmt::format("{}+{:#x}", info.dli_sname,
-                           address - reinterpret_cast<u64>(info.dli_saddr));
-    }
-#endif
-    return fmt::format("{:#x}", address);
-}
-} // namespace
-
-void MemoryManager::NoteWatchedWrite(VAddr address, u64 size, const void* data, const char* what) {
-    for (const VAddr watched : WatchedAddresses()) {
-        if (watched < address || watched >= address + size) {
-            continue;
-        }
-        if (!data) {
-            LOG_INFO(Core, "Watched {:#x}: {} wrote it ({} bytes at {:#x}) on thread {:#x}",
-                     watched, what, size, address, ThreadTag());
-            continue;
-        }
-        u32 dword = 0;
-        const u64 offset = Common::AlignDown(watched - address, 4);
-        std::memcpy(&dword, static_cast<const u8*>(data) + offset,
-                    std::min<u64>(sizeof(dword), size - offset));
-        LOG_INFO(Core, "Watched {:#x}: {} wrote {:#x} ({} bytes at {:#x}) on thread {:#x}", watched,
-                 what, dword, size, address, ThreadTag());
-    }
-}
-
-std::string MemoryManager::DescribeRecentBackingWritesOfValue(u32 value) {
-    const u64 count = backing_write_count.load(std::memory_order_acquire);
-    const u64 now = NowNs();
-    std::string out;
-    u32 shown = 0;
-    for (u64 i = 0; i < std::min<u64>(count, BackingWriteLogSize) && shown < 4; ++i) {
-        const auto& write = backing_write_log[(count - 1 - i) % BackingWriteLogSize];
-        if (write.first_dword == value) {
-            out += fmt::format("{}[{:#x}+{:#x}, {} us ago, from {}, thread {:#x}]",
-                               shown ? " " : "", write.address, write.size, (now - write.ns) / 1000,
-                               DescribeCaller(write.caller), write.thread);
-            ++shown;
-        }
-    }
-    return out.empty() ? "none" : out;
-}
-
-std::string MemoryManager::DescribeRecentBackingWrites(VAddr address, u64 size) {
-    const u64 count = backing_write_count.load(std::memory_order_acquire);
-    const u64 now = NowNs();
-    std::string out;
-    u32 shown = 0;
-    for (u64 i = 0; i < std::min<u64>(count, BackingWriteLogSize) && shown < 8; ++i) {
-        const auto& write = backing_write_log[(count - 1 - i) % BackingWriteLogSize];
-        if (write.address < address + size && address < write.address + write.size) {
-            out += fmt::format("{}[{:#x}+{:#x} first dword {:#x}, {} us ago, from {}, thread "
-                               "{:#x}]",
-                               shown ? " " : "", write.address, write.size, write.first_dword,
-                               (now - write.ns) / 1000, DescribeCaller(write.caller), write.thread);
-            ++shown;
-        }
-    }
-    return out.empty() ? "none" : out;
-}
-
 bool MemoryManager::TryWriteBacking(void* address, const void* data, u64 size) {
-    {
-        const u64 index = backing_write_count.fetch_add(1, std::memory_order_acq_rel);
-        auto& entry = backing_write_log[index % BackingWriteLogSize];
-        entry.address = std::bit_cast<VAddr>(address);
-        entry.size = size;
-        entry.caller = reinterpret_cast<u64>(__builtin_return_address(0));
-        entry.ns = NowNs();
-        entry.first_dword = 0;
-        std::memcpy(&entry.first_dword, data, std::min<u64>(size, sizeof(u32)));
-        entry.thread = ThreadTag();
-        NoteWatchedWrite(std::bit_cast<VAddr>(address), size, data, "backing write");
-    }
     return ForEachBacking(std::bit_cast<VAddr>(address), size,
                           [data](u8* backing, u64 offset, u64 length) {
                               memcpy(backing, static_cast<const u8*>(data) + offset, length);
@@ -353,20 +225,6 @@ MemoryManager::BackingCas MemoryManager::CompareWriteBacking(VAddr address, u32 
     };
     if (!ForEachBackingPage(impl, address, sizeof(u32), cas)) {
         ForEachBacking(address, sizeof(u32), cas);
-    }
-    if (result == BackingCas::Written) {
-        const u64 index = backing_write_count.fetch_add(1, std::memory_order_acq_rel);
-        auto& entry = backing_write_log[index % BackingWriteLogSize];
-        entry.address = address;
-        entry.size = sizeof(u32);
-        entry.caller = reinterpret_cast<u64>(__builtin_return_address(0));
-        entry.ns = NowNs();
-        entry.first_dword = value;
-        entry.thread = ThreadTag();
-        NoteWatchedWrite(address, sizeof(u32), &value, "a deferred fence label");
-    } else if (result == BackingCas::Changed) {
-        NoteWatchedWrite(address, sizeof(u32), &found,
-                         "(skipped a late fence label: memory was rewritten to this)");
     }
     return result;
 }

@@ -302,37 +302,8 @@ void Liverpool::Process(std::stop_token stoken) {
     }
 }
 
-/// What a DMA_DATA writes to memory, for the SHADPS4_WATCH_ADDR log: its source when that is
-/// memory, null otherwise (a fill's value is in the packet, but only once).
-static const void* DmaDataForWatch(const PM4DmaData* dma_data) {
-    if (dma_data->src_sel == DmaDataSrc::Memory || dma_data->src_sel == DmaDataSrc::MemoryUsingL2) {
-        return dma_data->SrcAddress<const void*>();
-    }
-    return dma_data->src_sel == DmaDataSrc::Data && dma_data->NumBytes() <= sizeof(u32)
-               ? &dma_data->data
-               : nullptr;
-}
-
-void Liverpool::LogBadPacket(const u32* packet, size_t remaining_dwords) {
-    const auto address = std::bit_cast<VAddr>(packet);
-    std::string words;
-    for (size_t i = 0; i < std::min<size_t>(remaining_dwords, 16); ++i) {
-        words += fmt::format("{}{:08x}", i ? " " : "", packet[i]);
-    }
-    LOG_CRITICAL(Render, "Bad PM4 packet at {:#x} ({} dwords left): {}", address, remaining_dwords,
-                 words);
-    LOG_CRITICAL(Render, "Recent backing writes over it: {}",
-                 Core::Memory::Instance()->DescribeRecentBackingWrites(address, 64));
-    if (rasterizer) {
-        LOG_CRITICAL(Render, "Its buffer cache state: {}",
-                     rasterizer->DescribeMemoryState(address, 64));
-    }
-}
-
 void Liverpool::RecordLabelWrite(LabelWrites& writes, void* address, u64 data, u32 num_bytes) {
     const auto addr = std::bit_cast<VAddr>(address);
-    Core::MemoryManager::NoteWatchedWrite(addr, num_bytes, &data,
-                                          "a fence signal (recorded; written when it runs)");
     writes.push_back({.address = addr, .value = static_cast<u32>(data)});
     if (num_bytes == sizeof(u64)) {
         writes.push_back({.address = addr + sizeof(u32), .value = static_cast<u32>(data >> 32)});
@@ -429,8 +400,7 @@ bool Liverpool::DeferFenceSignal(Common::UniqueFunction<void>&& signal, bool thr
     return true;
 }
 
-void Liverpool::OrderCpWrite(VAddr address, u64 size, const void* data, const char* what) {
-    Core::MemoryManager::NoteWatchedWrite(address, size, data, what);
+void Liverpool::OrderCpWrite(VAddr address, u64 size) {
     if (size == 0) {
         return;
     }
@@ -855,9 +825,6 @@ Liverpool::Task Liverpool::ProcessGraphics(std::span<const u32> dcb) {
         const auto* header = reinterpret_cast<const PM4Header*>(dcb.data());
         const u32 type = header->type;
 
-        if (type != 2 && type != 3) {
-            LogBadPacket(dcb.data(), dcb.size());
-        }
         switch (type) {
         default:
             UNREACHABLE_MSG("Wrong PM4 type {}", type);
@@ -1287,8 +1254,7 @@ Liverpool::Task Liverpool::ProcessGraphics(std::span<const u32> dcb) {
                         static constexpr u64 OcclusionCounterValidMask = 0x8000000000000000ULL;
                         static constexpr u64 OcclusionCounterStep = 0x2FFFFFFULL;
                         u64* results = event->Address<u64*>();
-                        OrderCpWrite(event->Address<VAddr>(), num_counter_pairs * 16, nullptr,
-                                     "a pixel counter dump");
+                        OrderCpWrite(event->Address<VAddr>(), num_counter_pairs * 16);
                         for (s32 i = 0; i < num_counter_pairs; ++i, results += 2) {
                             *results = pixel_counter | OcclusionCounterValidMask;
                         }
@@ -1318,8 +1284,7 @@ Liverpool::Task Liverpool::ProcessGraphics(std::span<const u32> dcb) {
                     if (rasterizer) {
                         rasterizer->Finish();
                         const u32 value = rasterizer->ReadDataFromGds(event_eos->gds_index);
-                        OrderCpWrite(std::bit_cast<VAddr>(event_eos->Address()), sizeof(value),
-                                     &value, "an EOS GDS store");
+                        OrderCpWrite(std::bit_cast<VAddr>(event_eos->Address()), sizeof(value));
                         *event_eos->Address() = value;
                     }
                 }
@@ -1356,8 +1321,7 @@ Liverpool::Task Liverpool::ProcessGraphics(std::span<const u32> dcb) {
                 ASSERT(dma_data->command.das == 0);
                 if (dma_data->dst_sel == DmaDataDst::Memory ||
                     dma_data->dst_sel == DmaDataDst::MemoryUsingL2) {
-                    OrderCpWrite(dma_data->DstAddress<VAddr>(), dma_data->NumBytes(),
-                                 DmaDataForWatch(dma_data), "a DMA_DATA");
+                    OrderCpWrite(dma_data->DstAddress<VAddr>(), dma_data->NumBytes());
                 }
                 if (dma_data->src_sel == DmaDataSrc::Data && dma_data->dst_sel == DmaDataDst::Gds) {
                     rasterizer->FillBuffer(dma_data->dst_addr_lo, dma_data->NumBytes(),
@@ -1399,8 +1363,7 @@ Liverpool::Task Liverpool::ProcessGraphics(std::span<const u32> dcb) {
                     if (rasterizer) {
                         rasterizer->OnFence();
                     }
-                    OrderCpWrite(std::bit_cast<VAddr>(address), data_size, write_data->data,
-                                 "a WRITE_DATA");
+                    OrderCpWrite(std::bit_cast<VAddr>(address), data_size);
                     std::memcpy(address, write_data->data, data_size);
                 } else {
                     UNREACHABLE();
@@ -1420,8 +1383,7 @@ Liverpool::Task Liverpool::ProcessGraphics(std::span<const u32> dcb) {
             case PM4ItOpcode::MemSemaphore: {
                 const auto* mem_semaphore = reinterpret_cast<const PM4CmdMemSemaphore*>(header);
                 if (mem_semaphore->IsSignaling()) {
-                    OrderCpWrite(mem_semaphore->Address<VAddr>(), sizeof(u64), nullptr,
-                                 "a semaphore signal");
+                    OrderCpWrite(mem_semaphore->Address<VAddr>(), sizeof(u64));
                     mem_semaphore->Signal();
                 } else {
                     while (!mem_semaphore->Signaled()) {
@@ -1626,7 +1588,6 @@ Liverpool::Task Liverpool::ProcessCompute(std::span<const u32> acb, u32 vqid) {
 
         if (header->type != 3) {
             // No other types of packets were spotted so far
-            LogBadPacket(acb.data(), acb.size());
             UNREACHABLE_MSG("Invalid PM4 type {}", header->type.Value());
         }
 
@@ -1670,8 +1631,7 @@ Liverpool::Task Liverpool::ProcessCompute(std::span<const u32> acb, u32 vqid) {
             ASSERT(dma_data->command.das == 0);
             if (dma_data->dst_sel == DmaDataDst::Memory ||
                 dma_data->dst_sel == DmaDataDst::MemoryUsingL2) {
-                OrderCpWrite(dma_data->DstAddress<VAddr>(), dma_data->NumBytes(),
-                             DmaDataForWatch(dma_data), "a DMA_DATA");
+                OrderCpWrite(dma_data->DstAddress<VAddr>(), dma_data->NumBytes());
             }
             if (dma_data->src_sel == DmaDataSrc::Data && dma_data->dst_sel == DmaDataDst::Gds) {
                 rasterizer->FillBuffer(dma_data->dst_addr_lo, dma_data->NumBytes(), dma_data->data,
@@ -1801,8 +1761,7 @@ Liverpool::Task Liverpool::ProcessCompute(std::span<const u32> acb, u32 vqid) {
                 if (rasterizer) {
                     rasterizer->OnFence();
                 }
-                OrderCpWrite(write_data->Address<VAddr>(), data_size, write_data->data,
-                             "a WRITE_DATA");
+                OrderCpWrite(write_data->Address<VAddr>(), data_size);
                 std::memcpy(write_data->Address<void*>(), write_data->data, data_size);
             } else {
                 UNREACHABLE();
@@ -1812,8 +1771,7 @@ Liverpool::Task Liverpool::ProcessCompute(std::span<const u32> acb, u32 vqid) {
         case PM4ItOpcode::MemSemaphore: {
             const auto* mem_semaphore = reinterpret_cast<const PM4CmdMemSemaphore*>(header);
             if (mem_semaphore->IsSignaling()) {
-                OrderCpWrite(mem_semaphore->Address<VAddr>(), sizeof(u64), nullptr,
-                             "a semaphore signal");
+                OrderCpWrite(mem_semaphore->Address<VAddr>(), sizeof(u64));
                 mem_semaphore->Signal();
             } else {
                 while (!mem_semaphore->Signaled()) {
@@ -1863,9 +1821,6 @@ Liverpool::Task Liverpool::ProcessCompute(std::span<const u32> acb, u32 vqid) {
                 }
                 release_mem->SignalFence(
                     [](void* address, u64 data, u32 num_bytes) {
-                        Core::MemoryManager::NoteWatchedWrite(std::bit_cast<VAddr>(address),
-                                                              num_bytes, &data,
-                                                              "an immediate RELEASE_MEM");
                         std::memcpy(address, &data, num_bytes);
                     },
                     signal_irq,
