@@ -1748,21 +1748,19 @@ bool Rasterizer::InvalidateMemory(VAddr addr, u64 size, bool assume_locks) {
         // Not GPU mapped memory, can skip invalidation logic entirely.
         return false;
     }
-    buffer_cache.InvalidateMemory(addr, size, assume_locks);
+    InvalidateFaultedMemory(addr, size, assume_locks, 0, 0);
+    return true;
+}
+
+void Rasterizer::InvalidateFaultedMemory(VAddr addr, u64 size, bool assume_locks, VAddr ahead,
+                                         u64 ahead_size) {
+    // Images untrack all of themselves on their first fault, so only buffers look ahead.
+    buffer_cache.InvalidateMemory(addr, size, assume_locks, ahead, ahead_size);
     const u64 start = VideoCore::write_fault_phases.active ? VideoCore::WriteFaultClockNs() : 0;
     texture_cache.InvalidateMemory(addr, size);
     if (VideoCore::write_fault_phases.active) {
         VideoCore::write_fault_phases.texture_ns += VideoCore::WriteFaultClockNs() - start;
     }
-    return true;
-}
-
-void Rasterizer::InvalidateMemoryAhead(VAddr addr, u64 size) {
-    if (!IsMapped(addr, size)) {
-        return;
-    }
-    // Images untrack all of themselves on their first fault, so only buffers need this.
-    buffer_cache.InvalidateMemoryAhead(addr, size);
 }
 
 bool Rasterizer::ReadMemory(VAddr addr, u64 size, bool assume_locks) {

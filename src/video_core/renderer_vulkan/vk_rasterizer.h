@@ -85,8 +85,11 @@ public:
     void CopyBuffer(VAddr dst, VAddr src, u32 num_bytes, bool dst_gds, bool src_gds);
     u32 ReadDataFromGds(u32 gsd_offset);
     bool InvalidateMemory(VAddr addr, u64 size, bool assume_locks = false);
-    /// Removes buffer write traps ahead of a guest that's writing memory in order.
-    void InvalidateMemoryAhead(VAddr addr, u64 size);
+    /// InvalidateMemory for a write fault on mapped memory, which also removes the buffer write
+    /// traps on [ahead, ahead + ahead_size) (starting at or before the faulting range's last
+    /// page's end) for a guest writing in order, in one protection change where it can.
+    void InvalidateFaultedMemory(VAddr addr, u64 size, bool assume_locks, VAddr ahead,
+                                 u64 ahead_size);
     bool ReadMemory(VAddr addr, u64 size, bool assume_locks = false);
     /// ReadMemory for a read fault whose load the handler decoded (BufferCache::ReadMemoryForLoad).
     /// `served` says the load's bytes were copied to `data` instead of read back.

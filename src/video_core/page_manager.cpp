@@ -137,9 +137,8 @@ struct AtomicPhases {
     }
 };
 AtomicPhases write_fault_phase_totals;
-AtomicPhases ahead_phase_totals;
 std::atomic<u64> ahead_count{};
-std::atomic<u64> ahead_ns{};
+std::atomic<u64> ahead_pages{};
 /// Handled read faults: all, and those on the GPU thread.
 std::array<std::atomic<u64>, 2> read_fault_count{};
 std::array<std::atomic<u64>, 2> read_fault_ns{};
@@ -151,18 +150,25 @@ struct SlowWriteTotals {
 };
 std::map<std::pair<u64, bool>, SlowWriteTotals> slow_write_sites;
 
-/// Handles a write fault on tracked memory, then unprotects ahead of it if the guest is
-/// writing in order. Not on the GPU thread, which may hold the trackers' locks.
+/// Handles a write fault on tracked memory, unprotecting ahead of it too if the guest is
+/// writing in order (not on the GPU thread, which may hold the trackers' locks).
 bool HandleWriteFault(Vulkan::Rasterizer* rasterizer, VAddr addr, u64 size, bool is_gpu_thread,
                       void* context) {
+    if (!rasterizer->IsMapped(addr, size)) {
+        return false;
+    }
     const u64 start = PerfStats::NowNs();
+    auto [ahead, ahead_size] = is_gpu_thread ? std::pair<VAddr, u64>{} : fault_ahead.Next(addr);
+    if (ahead_size != 0 && !rasterizer->IsMapped(ahead, ahead_size)) {
+        ahead_size = 0;
+    }
     write_fault_phases = WriteFaultPhases{.active = true};
-    const bool handled = rasterizer->InvalidateMemory(addr, size, is_gpu_thread);
+    rasterizer->InvalidateFaultedMemory(addr, size, is_gpu_thread, ahead, ahead_size);
     const WriteFaultPhases phases = write_fault_phases;
     write_fault_phases.active = false;
     // A plain write fault takes a few microseconds; one that read the page back took far more.
     constexpr u64 SlowNs = 50'000;
-    if (const u64 elapsed = PerfStats::NowNs() - start; handled && elapsed > SlowNs) {
+    if (const u64 elapsed = PerfStats::NowNs() - start; elapsed > SlowNs) {
         std::scoped_lock lock{slow_write_mutex};
         auto& site = slow_write_sites[{Core::FaultInstructionAddress(context), is_gpu_thread}];
         ++site.count;
@@ -172,29 +178,18 @@ bool HandleWriteFault(Vulkan::Rasterizer* rasterizer, VAddr addr, u64 size, bool
         site.phases.protect_ns += phases.protect_ns;
         site.phases.texture_ns += phases.texture_ns;
     }
-    if (handled) {
-        write_fault_phase_totals.Add(phases);
+    write_fault_phase_totals.Add(phases);
+    if (ahead_size != 0) {
+        const u64 pages = ahead_size / PageManager::GetPageSize();
+        ahead_count.fetch_add(1, std::memory_order_relaxed);
+        ahead_pages.fetch_add(pages, std::memory_order_relaxed);
+        PerfStats::frames.AddCost(PerfStats::Cost::PagesAhead, pages);
     }
-    if (handled && !is_gpu_thread) {
-        if (const auto [ahead, ahead_size] = fault_ahead.Next(addr); ahead_size != 0) {
-            const u64 ahead_start = PerfStats::NowNs();
-            write_fault_phases = WriteFaultPhases{.active = true};
-            rasterizer->InvalidateMemoryAhead(ahead, ahead_size);
-            ahead_phase_totals.Add(write_fault_phases);
-            write_fault_phases.active = false;
-            ahead_count.fetch_add(1, std::memory_order_relaxed);
-            ahead_ns.fetch_add(PerfStats::NowNs() - ahead_start, std::memory_order_relaxed);
-            PerfStats::frames.AddCost(PerfStats::Cost::PagesAhead,
-                                      ahead_size / PageManager::GetPageSize());
-        }
-    }
-    if (handled) {
-        const u64 elapsed = PerfStats::NowNs() - start;
-        PerfStats::frames.AddFault(elapsed);
-        write_fault_count.fetch_add(1, std::memory_order_relaxed);
-        write_fault_ns.fetch_add(elapsed, std::memory_order_relaxed);
-    }
-    return handled;
+    const u64 elapsed = PerfStats::NowNs() - start;
+    PerfStats::frames.AddFault(elapsed);
+    write_fault_count.fetch_add(1, std::memory_order_relaxed);
+    write_fault_ns.fetch_add(elapsed, std::memory_order_relaxed);
+    return true;
 }
 
 } // namespace
@@ -213,8 +208,7 @@ WriteFaultTotals TakeWriteFaultTotals() {
         .ns = write_fault_ns.exchange(0),
         .phases = write_fault_phase_totals.Take(),
         .ahead_count = ahead_count.exchange(0),
-        .ahead_ns = ahead_ns.exchange(0),
-        .ahead_phases = ahead_phase_totals.Take(),
+        .ahead_pages = ahead_pages.exchange(0),
     };
 }
 

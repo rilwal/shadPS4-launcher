@@ -97,11 +97,10 @@ public:
 
     void TickFrame();
 
-    /// Invalidates any buffer in the logical page range.
-    void InvalidateMemory(VAddr device_addr, u64 size, bool assume_locks = false);
-
-    /// Marks memory the guest is about to write as modified from the CPU, ahead of its faults.
-    void InvalidateMemoryAhead(VAddr device_addr, u64 size);
+    /// Invalidates any buffer in the logical page range, and marks [ahead, ahead + ahead_size),
+    /// which the guest is about to write, as modified from the CPU ahead of its faults.
+    void InvalidateMemory(VAddr device_addr, u64 size, bool assume_locks = false, VAddr ahead = 0,
+                          u64 ahead_size = 0);
 
     /// Unmark a region as modified from the GPU.
     void UnmarkRegionAsGpuModified(VAddr device_addr, u64 size, bool is_write = false);

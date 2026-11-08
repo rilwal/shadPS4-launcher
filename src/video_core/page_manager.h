@@ -137,9 +137,9 @@ struct WriteFaultTotals {
     u64 count;
     u64 ns;
     WriteFaultPhases phases;
+    /// Faults that also unprotected pages ahead, and those pages.
     u64 ahead_count;
-    u64 ahead_ns;
-    WriteFaultPhases ahead_phases;
+    u64 ahead_pages;
 };
 WriteFaultTotals TakeWriteFaultTotals();
 

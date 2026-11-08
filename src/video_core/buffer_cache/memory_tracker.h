@@ -78,10 +78,38 @@ public:
         });
     }
 
-    /// Removes all protection from a page and ensures GPU data has been flushed if requested
-    void InvalidateRegion(VAddr cpu_addr, u64 size, auto&& on_flush) noexcept {
+    /// Removes all protection from a page and ensures GPU data has been flushed if requested,
+    /// then marks [ahead, ahead + ahead_size) as MarkRegionAsCpuModifiedAhead does. The pages
+    /// ahead start at or before the end of the faulting range's last page, so where the GPU
+    /// modified none of it the whole span changes together, in one mprotect per region instead
+    /// of two: they serialize on the kernel's memory map lock.
+    void InvalidateRegion(VAddr cpu_addr, u64 size, VAddr ahead, u64 ahead_size,
+                          auto&& on_flush) noexcept {
+        const VAddr end = std::max(cpu_addr + size, ahead + ahead_size);
         if (readbacks_mode == GpuReadbacksMode::Disabled) {
-            return MarkRegionAsCpuModified(cpu_addr, size);
+            return MarkRegionAsCpuModified(cpu_addr, end - cpu_addr);
+        }
+        if (ahead_size != 0) {
+            bool gpu_modified = false;
+            IteratePages(
+                cpu_addr, end - cpu_addr,
+                [&gpu_modified](RegionManager* manager, u64 offset, u64 size) {
+                    const auto bounds = manager->GetBounds(offset, size);
+                    manager->Lock(bounds);
+                    if (manager->template IsRegionModified<Type::GPU>(offset, size)) {
+                        gpu_modified = true;
+                    } else {
+                        manager->template ChangeRegionState<StateOp::Set, StateOp::None, false>(
+                            offset, size);
+                    }
+                    manager->Unlock(bounds);
+                });
+            if (!gpu_modified) {
+                return;
+            }
+            // The GPU wrote some of it: each part on its own (setting a part done again is a
+            // no-op).
+            MarkRegionAsCpuModifiedAhead(ahead, ahead_size);
         }
         bool should_flush = false;
         IteratePages(cpu_addr, size, [&should_flush](RegionManager* manager, u64 offset, u64 size) {
