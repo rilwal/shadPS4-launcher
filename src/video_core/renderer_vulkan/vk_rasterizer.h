@@ -227,6 +227,13 @@ private:
         std::optional<Shader::RuntimeBufferFormat> format;
     };
     std::array<BufferFormatEntry, 64> buffer_formats{};
+    /// Shader::DescribeRuntimeVertexFormat, cached the same way.
+    const Shader::RuntimeVertexFormat& DescribeVertexFormat(const AmdGpu::Buffer& vsharp);
+    struct VertexFormatEntry {
+        u32 key{};
+        Shader::RuntimeVertexFormat format;
+    };
+    std::array<VertexFormatEntry, 64> vertex_formats{};
     u64 noted_frame{};
 
     const Instance& instance;

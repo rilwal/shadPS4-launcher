@@ -43,9 +43,9 @@ struct RuntimeBufferFormat {
 };
 static_assert(sizeof(RuntimeBufferFormat) == 16);
 
-/// Describes a buffer's format for reading at run time, if it can be. Null buffers describe as
-/// all zero, which reads zeros like the null path does.
-inline std::optional<RuntimeBufferFormat> DescribeRuntimeBufferFormat(
+namespace Detail {
+/// DescribeRuntimeBufferFormat worked out from the sharp's fields.
+inline std::optional<RuntimeBufferFormat> DescribeRuntimeBufferFormatSlow(
     const AmdGpu::Buffer& buffer) {
     using AmdGpu::DataFormat;
     using AmdGpu::NumberFormat;
@@ -157,6 +157,77 @@ inline std::optional<RuntimeBufferFormat> DescribeRuntimeBufferFormat(
     for (u32 i = 0; i < 4; ++i) {
         format.kind_swizzle |= (static_cast<u32>(dst_select.array[i]) & 7)
                                << (RuntimeBufferFormat::SwizzleShift + i * 3);
+    }
+    return format;
+}
+
+struct RuntimeFormatEntry {
+    /// Pairs the conversion lookup asserts on (SnormNz on wide formats) aren't worked out.
+    bool computed{};
+    bool supported{};
+    /// FormatInvalid: all zero, swizzle included.
+    bool null{};
+    /// With a zero destination select.
+    RuntimeBufferFormat format{};
+};
+
+/// The description of each number and data format pair (7 bits of the sharp), worked out once.
+inline const std::array<RuntimeFormatEntry, 128>& RuntimeFormatTable() {
+    static const auto table = [] {
+        std::array<RuntimeFormatEntry, 128> entries{};
+        for (u32 i = 0; i < entries.size(); ++i) {
+            AmdGpu::Buffer buffer{};
+            buffer.num_format = i & 7;
+            buffer.data_format = i >> 3;
+            if (AmdGpu::NumberFormat(buffer.num_format) == AmdGpu::NumberFormat::SnormNz) {
+                switch (AmdGpu::DataFormat(buffer.data_format)) {
+                case AmdGpu::DataFormat::Format8:
+                case AmdGpu::DataFormat::Format8_8:
+                case AmdGpu::DataFormat::Format8_8_8_8:
+                case AmdGpu::DataFormat::Format16:
+                case AmdGpu::DataFormat::Format16_16:
+                case AmdGpu::DataFormat::Format16_16_16_16:
+                    break;
+                default:
+                    continue;
+                }
+            }
+            entries[i].computed = true;
+            if (const auto format = DescribeRuntimeBufferFormatSlow(buffer)) {
+                entries[i] = {
+                    .computed = true,
+                    .supported = true,
+                    .null = buffer.GetDataFmt() == AmdGpu::DataFormat::FormatInvalid,
+                    .format = *format,
+                };
+            }
+        }
+        return entries;
+    }();
+    return table;
+}
+} // namespace Detail
+
+/// Describes a buffer's format for reading at run time, if it can be. Null buffers describe as
+/// all zero, which reads zeros like the null path does. Called for every buffer of every draw,
+/// so it looks the formats up and adds the destination select.
+inline std::optional<RuntimeBufferFormat> DescribeRuntimeBufferFormat(
+    const AmdGpu::Buffer& buffer) {
+    const auto& entry =
+        Detail::RuntimeFormatTable()[buffer.num_format | (u32(buffer.data_format) << 3)];
+    if (!entry.computed) [[unlikely]] {
+        return Detail::DescribeRuntimeBufferFormatSlow(buffer);
+    }
+    if (!entry.supported) {
+        return std::nullopt;
+    }
+    RuntimeBufferFormat format = entry.format;
+    if (!entry.null) {
+        const auto dst_select = buffer.DstSelect();
+        for (u32 i = 0; i < 4; ++i) {
+            format.kind_swizzle |= (static_cast<u32>(dst_select.array[i]) & 7)
+                                   << (RuntimeBufferFormat::SwizzleShift + i * 3);
+        }
     }
     return format;
 }

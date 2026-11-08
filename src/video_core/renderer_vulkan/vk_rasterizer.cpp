@@ -797,10 +797,9 @@ bool Rasterizer::BindResources(const Pipeline* pipeline) {
                                                 u32(stage_writes.vertex_formats.size()));
                 for (u32 i = 0; i < count; ++i) {
                     const auto buffer = fetch.attributes[i].GetSharp(*stage);
-                    stage_writes.vertex_formats[i] =
-                        Shader::UsesRuntimeVertexFormat(true, buffer)
-                            ? Shader::DescribeRuntimeVertexFormat(buffer)
-                            : Shader::RuntimeVertexFormat{};
+                    stage_writes.vertex_formats[i] = Shader::UsesRuntimeVertexFormat(true, buffer)
+                                                         ? DescribeVertexFormat(buffer)
+                                                         : Shader::RuntimeVertexFormat{};
                 }
                 stage_writes.num_vertex_formats = count;
             }
@@ -1176,6 +1175,18 @@ std::optional<Shader::RuntimeBufferFormat> Rasterizer::DescribeBufferFormat(
     if (entry.key != key) {
         entry.key = key;
         entry.format = Shader::DescribeRuntimeBufferFormat(vsharp);
+    }
+    return entry.format;
+}
+
+const Shader::RuntimeVertexFormat& Rasterizer::DescribeVertexFormat(const AmdGpu::Buffer& vsharp) {
+    u32 dword3;
+    std::memcpy(&dword3, reinterpret_cast<const u8*>(&vsharp) + 12, sizeof(dword3));
+    const u32 key = (dword3 & FormatKeyMask) | FormatKeyValid;
+    auto& entry = vertex_formats[(key ^ (key >> 9)) % vertex_formats.size()];
+    if (entry.key != key) {
+        entry.key = key;
+        entry.format = Shader::DescribeRuntimeVertexFormat(vsharp);
     }
     return entry.format;
 }
