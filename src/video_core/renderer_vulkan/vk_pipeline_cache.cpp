@@ -146,6 +146,12 @@ PipelineCache::PipelineCache(const Instance& instance_, Scheduler& scheduler_,
         .depth_clip_control = instance.IsDepthClipControlSupported(),
         .vertex_input_dynamic_state = instance.IsVertexInputDynamicState(),
     };
+    if (const char* memo = std::getenv("SHADPS4_SPEC_MEMO")) {
+        spec_memo = std::string_view{memo} != "0";
+    }
+    if (const char* check = std::getenv("SHADPS4_SPEC_MEMO_CHECK")) {
+        spec_memo_check = std::string_view{check} == "1";
+    }
     // A quarter of the cores: the game's own threads and the GPU thread need the rest.
     const u32 compile_threads = std::clamp(std::thread::hardware_concurrency() / 4, 1u, 4u);
     compiler = std::make_unique<PipelineCompiler>(compile_threads);
@@ -262,6 +268,17 @@ void PipelineCache::FlushCompileStats(u64 now_ns) {
             }
             LOG_INFO(Render, "GPU thread per frame over {:.1f} s: {}", seconds,
                      VideoCore::PerfStats::Frames::DescribeCosts(per_frame));
+            if (auto& memo = spec_memo_stats; memo.hits + memo.misses != 0) {
+                LOG_INFO(Render_Vulkan,
+                         "Variant lookups over {:.1f} s: {} reused the last draw's, {} looked up "
+                         "in full{}",
+                         seconds, memo.hits, memo.misses,
+                         spec_memo_check ? fmt::format(", {} reuses differed from the full "
+                                                       "lookup",
+                                                       memo.mismatches)
+                                         : std::string{});
+                memo = {};
+            }
             if (const auto sites = scheduler.TakeWaitSites(); !sites.empty()) {
                 LOG_INFO(Render, "GPU thread waited for the GPU over {:.1f} s at: {}", seconds,
                          fmt::join(sites, "; "));
@@ -1021,6 +1038,52 @@ std::pair<vk::ShaderModule, u64> PipelineCache::CompileModule(Shader::Info& info
     return {module, hash};
 }
 
+namespace {
+/// The bits of a draw's sharps that its specialisation is made from, with the bits it doesn't
+/// read cleared: equal keys (with equal runtime info, bindings and fetch shader) make equal
+/// specialisations. Base addresses and sizes are left out except where the specialisation reads
+/// them, so the same shader drawing other meshes and textures of the same kind matches.
+/// Keep in step with StageSpecialization::Build: a bit it starts reading has to be kept here.
+void SpecKey(const Shader::Info& info, const Shader::Gcn::FetchShaderData& fetch,
+             boost::container::small_vector<u64, 48>& key) {
+    key.clear();
+    const auto add = [&key](const auto& sharp) {
+        std::array<u64, sizeof(sharp) / sizeof(u64)> words;
+        std::memcpy(words.data(), &sharp, sizeof(sharp));
+        key.insert(key.end(), words.begin(), words.end());
+        return key.end() - words.size();
+    };
+    constexpr u64 BufferAddressMask = (u64{1} << 40) - 1;
+    constexpr u64 BufferRecordsMask = 0xffffffffULL;
+    for (const auto& attrib : fetch.attributes) {
+        // Bound or not, and whether the runtime format applies: that needs the address aligned
+        // to 1, 2, 4 or 3 bytes, which its remainder by 12 decides.
+        const auto sharp = attrib.GetSharp(info);
+        const auto words = add(sharp);
+        words[0] = (words[0] & ~BufferAddressMask) | (sharp.base_address % 12);
+        words[1] = (words[1] & ~BufferRecordsMask) | u64{sharp.num_records != 0};
+    }
+    for (const auto& desc : info.buffers) {
+        const auto sharp = desc.GetSharp(info);
+        const auto words = add(sharp);
+        words[0] &= ~BufferAddressMask;
+        words[1] = (words[1] & ~BufferRecordsMask) | u64{sharp.num_records != 0};
+    }
+    constexpr u64 ImageAddressMask = (u64{1} << 38) - 1;
+    for (const auto& desc : info.images) {
+        const auto sharp = desc.GetSharp(info);
+        const auto words = add(sharp);
+        words[0] = (words[0] & ~ImageAddressMask) | u64{sharp.base_address != 0};
+    }
+    for (const auto& desc : info.fmasks) {
+        add(desc.GetSharp(info));
+    }
+    for (const auto& desc : info.samplers) {
+        add(desc.GetSharp(info));
+    }
+}
+} // namespace
+
 PipelineCache::Result PipelineCache::GetProgram(HwStage hw_stage, SwStage sw_stage,
                                                 const Shader::ShaderParams& params,
                                                 Shader::Backend::Bindings& binding) {
@@ -1068,9 +1131,39 @@ PipelineCache::Result PipelineCache::GetProgram(HwStage hw_stage, SwStage sw_sta
 
     auto& program = it_pgm.value();
     auto& info = program->info;
+    const auto start_binding = binding;
     info.pgm_base = params.Base(); // Needs to be actualized for inline cbuffer address fixup
     info.user_data = params.user_data;
     info.RefreshFlatBuf();
+
+    // Tessellation stages also read a constant buffer into the specialisation, and a prepared
+    // program's first use is counted, so those always look up the full way.
+    auto& last = program->last_lookup;
+    const bool memo = spec_memo && !program->prepared && !info.replay && !info.guess_state &&
+                      sw_stage != SwStage::TessellationControl &&
+                      sw_stage != SwStage::TessellationEval;
+    std::optional<u32> memo_module;
+    if (memo) {
+        if (!Shader::Gcn::ParseFetchShader(info, spec_fetch)) {
+            spec_fetch = {};
+        }
+        SpecKey(info, spec_fetch, spec_key);
+        if (last.module != UINT32_MAX && last.start == binding && last.fetch == spec_fetch &&
+            last.fetch.size == spec_fetch.size && last.key == spec_key &&
+            last.runtime_info == runtime_info) {
+            memo_module = last.module;
+        }
+    }
+    if (memo_module && !spec_memo_check) {
+        ++spec_memo_stats.hits;
+        info.AddBindings(binding);
+        auto& m = program->modules[*memo_module];
+        if (!m.spec.fetch_shader_data.Empty()) {
+            fetch_shader = &m.spec.fetch_shader_data;
+        }
+        return std::make_tuple(&program->info, m.module, m.hash);
+    }
+
     auto& spec = draw_specs[u32(sw_stage)];
     spec.Build(info, runtime_info, profile, binding);
 
@@ -1080,6 +1173,23 @@ PipelineCache::Result PipelineCache::GetProgram(HwStage hw_stage, SwStage sw_sta
     vk::ShaderModule module{};
 
     const auto it = std::ranges::find(program->modules, spec, &Program::Module::spec);
+    if (memo_module) {
+        ++spec_memo_stats.hits;
+        const auto found = static_cast<u32>(std::distance(program->modules.begin(), it));
+        if (found != *memo_module) {
+            ++spec_memo_stats.mismatches;
+            LOG_ERROR(Render_Vulkan,
+                      "Variant reuse check: {} shader {:#x} reused variant {}, the full lookup "
+                      "found {}",
+                      hw_stage, params.hash, *memo_module, found);
+        }
+    } else if (memo) {
+        ++spec_memo_stats.misses;
+    }
+    if (memo) {
+        // Updated below once the variant is known.
+        last.module = UINT32_MAX;
+    }
     if (program->prepared) {
         NotePreparedUse(*program, params.hash, it != program->modules.end(), spec,
                         it != program->modules.end() ? it->hash : 0);
@@ -1141,6 +1251,13 @@ PipelineCache::Result PipelineCache::GetProgram(HwStage hw_stage, SwStage sw_sta
         module = it->module;
         perm_idx = std::distance(program->modules.begin(), it);
         perm_hash = it->hash;
+    }
+    if (memo) {
+        last.module = static_cast<u32>(perm_idx);
+        last.start = start_binding;
+        last.runtime_info = runtime_info;
+        last.fetch = spec_fetch;
+        last.key = spec_key;
     }
     if (auto& fetch = program->modules[perm_idx].spec.fetch_shader_data; !fetch.Empty()) {
         fetch_shader = &fetch;

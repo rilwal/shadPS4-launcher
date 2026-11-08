@@ -70,6 +70,17 @@ struct Program {
     /// one.
     std::vector<std::pair<u64, std::vector<u32>>> prepared_spv;
 
+    /// The inputs of the last draw's variant lookup, so a draw whose inputs match skips building
+    /// and comparing the specialisation (see SpecKey).
+    struct LastLookup {
+        u32 module = UINT32_MAX;
+        Shader::Backend::Bindings start{};
+        Shader::RuntimeInfo runtime_info{};
+        Shader::Gcn::FetchShaderData fetch{};
+        boost::container::small_vector<u64, 48> key;
+    };
+    LastLookup last_lookup;
+
     Program() = default;
     Program(Shader::HwStage stage, Shader::SwStage l_stage, Shader::ShaderParams params)
         : info{stage, l_stage, params} {}
@@ -329,6 +340,19 @@ private:
     u32 semantic_min_right{};
     u32 semantic_min_wrong{};
     bool guess_check{};
+    /// Draws whose variant lookup inputs match the program's last draw reuse its variant.
+    /// SHADPS4_SPEC_MEMO=0 turns that off; SHADPS4_SPEC_MEMO_CHECK=1 also looks the variant up
+    /// the full way on each reuse and logs any difference.
+    bool spec_memo = true;
+    bool spec_memo_check{};
+    struct {
+        u64 hits{};
+        u64 misses{};
+        u64 mismatches{};
+    } spec_memo_stats;
+    /// The draw's key and fetch shader, built for the comparison.
+    boost::container::small_vector<u64, 48> spec_key;
+    Shader::Gcn::FetchShaderData spec_fetch;
     /// Each checked program's guessed SPIR-V hashes that missed the first variant, to see if a
     /// later variant matches them. Zero once matched.
     struct GuessedHashes {
