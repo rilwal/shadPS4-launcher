@@ -1407,6 +1407,9 @@ Liverpool::Task Liverpool::ProcessGraphics(std::span<const u32> dcb) {
                 break;
             }
             case PM4ItOpcode::AcquireMem: {
+                // On hardware this invalidates the GPU's caches, so later reads see memory as
+                // it is now.
+                ForgetStreamCopies();
                 // const auto* acquire_mem = reinterpret_cast<PM4CmdAcquireMem*>(header);
                 break;
             }
@@ -1691,6 +1694,7 @@ Liverpool::Task Liverpool::ProcessCompute(std::span<const u32> acb, u32 vqid) {
             break;
         }
         case PM4ItOpcode::AcquireMem: {
+            ForgetStreamCopies();
             break;
         }
         case PM4ItOpcode::Rewind: {
