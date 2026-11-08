@@ -155,6 +155,9 @@ PipelineCache::PipelineCache(const Instance& instance_, Scheduler& scheduler_,
     if (const char* prefetch = std::getenv("SHADPS4_PREFETCH_BUFFERS")) {
         prefetch_buffers = std::string_view{prefetch} != "0";
     }
+    if (const char* prefetch = std::getenv("SHADPS4_PREFETCH_TABLES")) {
+        prefetch_tables = std::string_view{prefetch} != "0";
+    }
     // A quarter of the cores: the game's own threads and the GPU thread need the rest.
     const u32 compile_threads = std::clamp(std::thread::hardware_concurrency() / 4, 1u, 4u);
     compiler = std::make_unique<PipelineCompiler>(compile_threads);
@@ -846,10 +849,41 @@ std::span<const u32> PipelineCache::BackingCode(std::span<const u32> code) {
     return backing_code;
 }
 
+/// Starts loading the tables the stages' user data points at. Each stage's lookup walks them
+/// (the flattened user data, then the sharps), and they are often in DRAM: the game's CPU
+/// threads just wrote them. Started for all stages first, the later stages' misses overlap
+/// with the earlier stages' lookups. Pointers in user data are even register pairs (scalar
+/// loads take their address from one) holding a guest address; a value that only looks like
+/// one costs a wasted prefetch, which never faults.
+static void PrefetchUserDataTables(std::span<const u32> user_data) {
+    constexpr u64 MinAddress = 0x400000;
+    constexpr u64 MaxAddress = (u64{1} << 48) - 1;
+    for (u32 i = 0; i + 1 < user_data.size(); i += 2) {
+        const u64 address = u64{user_data[i]} | u64{user_data[i + 1]} << 32;
+        if (address < MinAddress || address > MaxAddress || (address & 3) != 0) {
+            continue;
+        }
+        __builtin_prefetch(reinterpret_cast<const void*>(address), 0, 3);
+        __builtin_prefetch(reinterpret_cast<const void*>(address + 64), 0, 3);
+    }
+}
+
+static void PrefetchUserDataTables(const AmdGpu::Regs& regs) {
+    for (u32 stage = 0; stage < 6; ++stage) {
+        const auto* pgm = regs.ProgramForStage(stage);
+        if (regs.stage_enable.IsStageEnabled(stage) && pgm && pgm->Address<u32*>()) {
+            PrefetchUserDataTables(pgm->user_data);
+        }
+    }
+}
+
 bool PipelineCache::RefreshGraphicsStages() {
     const auto& regs = liverpool->regs;
     auto& key = graphics_key;
     fetch_shader = nullptr;
+    if (prefetch_tables) {
+        PrefetchUserDataTables(regs);
+    }
 
     Shader::Backend::Bindings binding{};
     const auto bind_stage = [&](HwStage stage_in, SwStage stage_out) -> bool {
@@ -972,6 +1006,9 @@ bool PipelineCache::RefreshGraphicsStages() {
 bool PipelineCache::RefreshComputeKey() {
     Shader::Backend::Bindings binding{};
     const auto& cs_pgm = liverpool->GetCsRegs();
+    if (prefetch_tables) {
+        PrefetchUserDataTables(cs_pgm.user_data);
+    }
     const auto cs_params = ProgramParams(cs_pgm);
     std::tie(infos[0], modules[0], compute_key.value) =
         GetProgram(HwStage::Compute, SwStage::Compute, cs_params, binding);
