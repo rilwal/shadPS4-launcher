@@ -1071,7 +1071,8 @@ PipelineCache::Result PipelineCache::GetProgram(HwStage hw_stage, SwStage sw_sta
     info.pgm_base = params.Base(); // Needs to be actualized for inline cbuffer address fixup
     info.user_data = params.user_data;
     info.RefreshFlatBuf();
-    auto spec = Shader::StageSpecialization(info, runtime_info, profile, binding);
+    auto& spec = draw_specs[u32(sw_stage)];
+    spec.Build(info, runtime_info, profile, binding);
 
     size_t perm_idx = program->modules.size();
     u64 perm_hash{};
@@ -1134,7 +1135,7 @@ PipelineCache::Result PipelineCache::GetProgram(HwStage hw_stage, SwStage sw_sta
         }
 
         RegisterShaderMeta(info, spec.fetch_shader_data, spec, perm_hash, perm_idx);
-        program->AddPermut(module, std::move(spec), perm_hash);
+        program->AddPermut(module, Shader::StageSpecialization{spec}, perm_hash);
     } else {
         info.AddBindings(binding);
         module = it->module;

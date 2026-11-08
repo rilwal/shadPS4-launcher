@@ -90,7 +90,11 @@ EmulatorSettingsImpl::EmulatorSettingsImpl() = default;
 EmulatorSettingsImpl::~EmulatorSettingsImpl() = default;
 
 std::shared_ptr<EmulatorSettingsImpl> EmulatorSettingsImpl::GetInstance() {
-    static const auto instance = std::make_shared<EmulatorSettingsImpl>();
+    static const auto instance = [] {
+        auto created = std::make_shared<EmulatorSettingsImpl>();
+        s_current.store(created.get(), std::memory_order_release);
+        return created;
+    }();
     return instance;
 }
 

@@ -379,6 +379,8 @@ private:
     tsl::robin_map<ComputePipelineKey, std::unique_ptr<ComputePipeline>> compute_pipelines;
     tsl::robin_map<GraphicsPipelineKey, std::unique_ptr<GraphicsPipeline>> graphics_pipelines;
     std::array<Shader::RuntimeInfo, MaxShaderStages> runtime_infos{};
+    /// Each stage's specialisation for the draw being looked up, refilled per draw.
+    std::array<Shader::StageSpecialization, MaxShaderStages> draw_specs{};
     std::array<const Shader::Info*, MaxShaderStages> infos{};
     std::array<vk::ShaderModule, MaxShaderStages> modules{};
     Shader::Gcn::FetchShaderData* fetch_shader{};

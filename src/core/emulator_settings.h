@@ -15,7 +15,7 @@
 #include "common/logging/log.h"
 #include "common/types.h"
 
-#define EmulatorSettings (*EmulatorSettingsImpl::GetInstance())
+#define EmulatorSettings (*EmulatorSettingsImpl::Instance())
 
 enum HideCursorState : int {
     Never,
@@ -593,6 +593,16 @@ public:
     static std::shared_ptr<EmulatorSettingsImpl> GetInstance();
     static void SetInstance(std::shared_ptr<EmulatorSettingsImpl> instance);
 
+    /// The current instance without a lock or a reference count: the GPU thread reads settings
+    /// on every draw, and GetInstance's mutex and shared_ptr copy cost about 1% of it. Stays
+    /// valid while s_instance holds it.
+    static EmulatorSettingsImpl* Instance() {
+        if (auto* current = s_current.load(std::memory_order_acquire)) {
+            return current;
+        }
+        return GetInstance().get();
+    }
+
     bool Save(const std::string& serial = "");
     bool Load(const std::string& serial = "");
     void SetDefaultValues();
@@ -647,6 +657,7 @@ private:
     std::atomic<bool> m_shadnet_session_disabled{false};
 
     static std::shared_ptr<EmulatorSettingsImpl> s_instance;
+    static inline std::atomic<EmulatorSettingsImpl*> s_current{};
     static std::mutex s_mutex;
 
     /// Apply overrideable fields from groupJson into group.game_specific_value.

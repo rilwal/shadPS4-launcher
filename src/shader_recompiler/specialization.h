@@ -99,8 +99,27 @@ struct StageSpecialization {
 
     StageSpecialization() = default;
     StageSpecialization(const Info& info_, const RuntimeInfo& runtime_info_,
-                        const Profile& profile_, Backend::Bindings start_)
-        : info{&info_}, runtime_info{runtime_info_}, start{start_} {
+                        const Profile& profile_, Backend::Bindings start_) {
+        Build(info_, runtime_info_, profile_, start_);
+    }
+
+    /// Fills it for a draw, as constructing would. Each draw's lookup refills one kept per stage
+    /// instead of building a new one: constructing the ~1.5 KB object was half the cost.
+    void Build(const Info& info_, const RuntimeInfo& runtime_info_, const Profile& profile_,
+               Backend::Bindings start_) {
+        info = &info_;
+        runtime_info = runtime_info_;
+        start = start_;
+        bitset.reset();
+        fetch_shader_data.size = 0;
+        fetch_shader_data.attributes.clear();
+        fetch_shader_data.vertex_offset_sgpr = Gcn::FetchShaderData{}.vertex_offset_sgpr;
+        fetch_shader_data.instance_offset_sgpr = Gcn::FetchShaderData{}.instance_offset_sgpr;
+        vs_attribs.clear();
+        buffers.clear();
+        images.clear();
+        fmasks.clear();
+        samplers.clear();
         if (info_.sw_stage == SwStage::Vertex && Gcn::ParseFetchShader(info_, fetch_shader_data)) {
             // Specialize shader on VS input number types to follow spec.
             // The divisor isn't in the code (the vertex input applies it), so with fewer
@@ -193,26 +212,28 @@ struct StageSpecialization {
     }
 
     void ForEachSharp(auto& spec_list, auto& desc_list, auto&& func) {
+        spec_list.resize(desc_list.size());
+        auto* spec = spec_list.data();
         for (const auto& desc : desc_list) {
-            auto& spec = spec_list.emplace_back();
             const auto sharp = desc.GetSharp(*info);
-            if (!sharp) {
-                continue;
+            if (sharp) {
+                func(*spec, desc, sharp);
             }
-            func(spec, desc, sharp);
+            ++spec;
         }
     }
 
     void ForEachSharp(u32& binding, auto& spec_list, auto& desc_list, auto&& func) {
+        spec_list.resize(desc_list.size());
+        auto* spec = spec_list.data();
         for (const auto& desc : desc_list) {
-            auto& spec = spec_list.emplace_back();
             const auto sharp = desc.GetSharp(*info);
-            if (!sharp) {
-                binding++;
-                continue;
+            if (sharp) {
+                bitset[binding] = true;
+                func(*spec, desc, sharp);
             }
-            bitset[binding++] = true;
-            func(spec, desc, sharp);
+            ++binding;
+            ++spec;
         }
     }
 

@@ -104,14 +104,17 @@ EmulatorSettingsImpl::~EmulatorSettingsImpl() {}
 
 std::shared_ptr<EmulatorSettingsImpl> EmulatorSettingsImpl::GetInstance() {
     std::lock_guard lock(s_mutex);
-    if (!s_instance)
+    if (!s_instance) {
         s_instance = std::make_shared<EmulatorSettingsImpl>();
+        s_current.store(s_instance.get(), std::memory_order_release);
+    }
     return s_instance;
 }
 
 void EmulatorSettingsImpl::SetInstance(std::shared_ptr<EmulatorSettingsImpl> instance) {
     std::lock_guard lock(s_mutex);
     s_instance = std::move(instance);
+    s_current.store(s_instance.get(), std::memory_order_release);
 }
 
 // --------------------
