@@ -81,26 +81,44 @@ bool ParseFetchShader(const Shader::Info& info, FetchShaderData& out_fetch_data)
     // Parsed from a copy where the reader can make one; past the copy's end, from the guest.
     // Shorter copies are tried when a long one fails, since GPU data pending or an unmapped page
     // a little past a short fetch shader shouldn't send the whole parse to the guest.
+    // Every draw parses its fetch shader, and most are a few dozen dwords, so the first copy is
+    // short; a parse that runs past it starts again from a full-size one.
     const auto* code = GetFetchShaderCode(info, info.fetch_shader_sgpr_base);
     std::array<u32, 128> copy;
     const u32* begin = code;
     const u32* end = nullptr;
-    if (guest_code_reader) {
-        for (u64 dwords = copy.size(); dwords >= 16; dwords /= 2) {
+    const auto read_copy = [&](u64 first_dwords) {
+        if (!guest_code_reader) {
+            return false;
+        }
+        for (u64 dwords = first_dwords; dwords >= 16; dwords /= 2) {
             if (guest_code_reader(std::bit_cast<VAddr>(code), copy.data(), dwords * 4)) {
                 begin = copy.data();
                 end = copy.data() + dwords;
-                break;
+                return true;
             }
         }
+        return false;
+    };
+    constexpr u64 FirstCopyDwords = 32;
+    if (!read_copy(FirstCopyDwords)) {
+        read_copy(copy.size());
     }
     const u32* ptr = begin;
     while (true) {
         if (end != nullptr && end - ptr < 2) {
             out_fetch_data.attributes.clear();
-            begin = code;
-            end = nullptr;
-            ptr = code;
+            out_fetch_data.vertex_offset_sgpr = FetchShaderData{}.vertex_offset_sgpr;
+            out_fetch_data.instance_offset_sgpr = FetchShaderData{}.instance_offset_sgpr;
+            loads = {};
+            const u64 had = static_cast<u64>(end - begin);
+            if (had >= copy.size() || !read_copy(copy.size()) ||
+                static_cast<u64>(end - begin) <= had) {
+                begin = code;
+                end = nullptr;
+            }
+            ptr = begin;
+            continue;
         }
         const u32 word0 = *(ptr++);
         const auto encoding = GetInstructionEncoding(word0);

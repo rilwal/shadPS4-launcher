@@ -190,7 +190,11 @@ ResourceHeaps::~ResourceHeaps() = default;
 u32 ResourceHeaps::AllocateResources(u32 count) {
     ASSERT_MSG(count <= resource_slots, "Draw needs {} descriptors, the heap has {}", count,
                resource_slots);
-    while (!resource_segments.empty() && scheduler.IsFree(resource_segments.front().tick)) {
+    // Dropping finished segments only keeps the list short, so it goes by the GPU tick already
+    // known: asking the driver (Scheduler::IsFree) cost a semaphore query on every draw while
+    // the GPU was a frame behind. The waits below ask where they have to.
+    const auto* semaphore = scheduler.GetWorkSemaphore();
+    while (!resource_segments.empty() && semaphore->IsFree(resource_segments.front().tick)) {
         resource_segments.pop_front();
     }
     if (resource_cursor + count > resource_slots) {
@@ -407,11 +411,15 @@ void ResourceHeaps::Bind(const HeapDraw& draw, const Shader::PushData& push_data
         std::memcpy(table + Shader::StageTable::VertexFormatsOffset, stage.vertex_formats.data(),
                     stage.num_vertex_formats * sizeof(Shader::RuntimeVertexFormat));
         u32* indices = reinterpret_cast<u32*>(table + Shader::StageTable::IndicesOffset);
-        resource_infos.resize(num_resources);
-        resource_ranges.resize(num_resources);
-        address_ranges.resize(num_resources);
-        image_descs.resize(num_resources);
-        view_infos.resize(num_resources);
+        // Only grown: every element used is written below, and shrinking then growing again
+        // value-initialised them on most draws.
+        if (resource_infos.size() < num_resources) {
+            resource_infos.resize(num_resources);
+            resource_ranges.resize(num_resources);
+            address_ranges.resize(num_resources);
+            image_descs.resize(num_resources);
+            view_infos.resize(num_resources);
+        }
 
         u32 next = 0;
         size_t next_kept = 0;
