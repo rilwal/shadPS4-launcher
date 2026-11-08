@@ -76,7 +76,7 @@ struct Program {
         u32 module = UINT32_MAX;
         Shader::Backend::Bindings start{};
         Shader::RuntimeInfo runtime_info{};
-        Shader::Gcn::FetchShaderData fetch{};
+        /// The fetch shader and the masked sharps (see SpecKey).
         boost::container::small_vector<u64, 48> key;
     };
     LastLookup last_lookup;

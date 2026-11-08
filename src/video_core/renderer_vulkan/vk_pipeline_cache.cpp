@@ -1046,40 +1046,48 @@ namespace {
 /// Keep in step with StageSpecialization::Build: a bit it starts reading has to be kept here.
 void SpecKey(const Shader::Info& info, const Shader::Gcn::FetchShaderData& fetch,
              boost::container::small_vector<u64, 48>& key) {
-    key.clear();
-    const auto add = [&key](const auto& sharp) {
-        std::array<u64, sizeof(sharp) / sizeof(u64)> words;
-        std::memcpy(words.data(), &sharp, sizeof(sharp));
-        key.insert(key.end(), words.begin(), words.end());
-        return key.end() - words.size();
+    static_assert(sizeof(Shader::Gcn::VertexAttribute) == sizeof(u64));
+    // Sized once and written in place: building it is per draw.
+    key.resize(1 + fetch.attributes.size() * 3 + info.buffers.size() * 2 + info.images.size() * 4 +
+                   info.fmasks.size() * 4 + info.samplers.size() * 2,
+               boost::container::default_init);
+    u64* out = key.data();
+    const auto put = [&out](const auto& value) {
+        std::memcpy(out, &value, sizeof(value));
+        out += sizeof(value) / sizeof(u64);
     };
+    // The fetch shader, which the specialisation keeps whole.
+    *out++ = u64{static_cast<u8>(fetch.vertex_offset_sgpr)} |
+             u64{static_cast<u8>(fetch.instance_offset_sgpr)} << 8 |
+             u64{fetch.attributes.size()} << 16;
     constexpr u64 BufferAddressMask = (u64{1} << 40) - 1;
     constexpr u64 BufferRecordsMask = 0xffffffffULL;
     for (const auto& attrib : fetch.attributes) {
+        put(attrib);
         // Bound or not, and whether the runtime format applies: that needs the address aligned
         // to 1, 2, 4 or 3 bytes, which its remainder by 12 decides.
         const auto sharp = attrib.GetSharp(info);
-        const auto words = add(sharp);
-        words[0] = (words[0] & ~BufferAddressMask) | (sharp.base_address % 12);
-        words[1] = (words[1] & ~BufferRecordsMask) | u64{sharp.num_records != 0};
+        put(sharp);
+        out[-2] = (out[-2] & ~BufferAddressMask) | (sharp.base_address % 12);
+        out[-1] = (out[-1] & ~BufferRecordsMask) | u64{sharp.num_records != 0};
     }
     for (const auto& desc : info.buffers) {
         const auto sharp = desc.GetSharp(info);
-        const auto words = add(sharp);
-        words[0] &= ~BufferAddressMask;
-        words[1] = (words[1] & ~BufferRecordsMask) | u64{sharp.num_records != 0};
+        put(sharp);
+        out[-2] &= ~BufferAddressMask;
+        out[-1] = (out[-1] & ~BufferRecordsMask) | u64{sharp.num_records != 0};
     }
     constexpr u64 ImageAddressMask = (u64{1} << 38) - 1;
     for (const auto& desc : info.images) {
         const auto sharp = desc.GetSharp(info);
-        const auto words = add(sharp);
-        words[0] = (words[0] & ~ImageAddressMask) | u64{sharp.base_address != 0};
+        put(sharp);
+        out[-4] = (out[-4] & ~ImageAddressMask) | u64{sharp.base_address != 0};
     }
     for (const auto& desc : info.fmasks) {
-        add(desc.GetSharp(info));
+        put(desc.GetSharp(info));
     }
     for (const auto& desc : info.samplers) {
-        add(desc.GetSharp(info));
+        put(desc.GetSharp(info));
     }
 }
 } // namespace
@@ -1145,11 +1153,14 @@ PipelineCache::Result PipelineCache::GetProgram(HwStage hw_stage, SwStage sw_sta
     std::optional<u32> memo_module;
     if (memo) {
         if (!Shader::Gcn::ParseFetchShader(info, spec_fetch)) {
-            spec_fetch = {};
+            spec_fetch.attributes.clear();
+            spec_fetch.vertex_offset_sgpr = Shader::Gcn::FetchShaderData{}.vertex_offset_sgpr;
+            spec_fetch.instance_offset_sgpr = Shader::Gcn::FetchShaderData{}.instance_offset_sgpr;
         }
         SpecKey(info, spec_fetch, spec_key);
-        if (last.module != UINT32_MAX && last.start == binding && last.fetch == spec_fetch &&
-            last.fetch.size == spec_fetch.size && last.key == spec_key &&
+        if (last.module != UINT32_MAX && last.start == binding &&
+            last.key.size() == spec_key.size() &&
+            std::memcmp(last.key.data(), spec_key.data(), spec_key.size() * sizeof(u64)) == 0 &&
             last.runtime_info == runtime_info) {
             memo_module = last.module;
         }
@@ -1256,7 +1267,6 @@ PipelineCache::Result PipelineCache::GetProgram(HwStage hw_stage, SwStage sw_sta
         last.module = static_cast<u32>(perm_idx);
         last.start = start_binding;
         last.runtime_info = runtime_info;
-        last.fetch = spec_fetch;
         last.key = spec_key;
     }
     if (auto& fetch = program->modules[perm_idx].spec.fetch_shader_data; !fetch.Empty()) {
