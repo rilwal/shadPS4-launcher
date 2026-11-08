@@ -140,6 +140,8 @@ struct WriteFaultTotals {
     /// Faults that also unprotected pages ahead, and those pages.
     u64 ahead_count;
     u64 ahead_pages;
+    /// Of those, the faults that started a run and went as far as the last run from there.
+    u64 ahead_predicted;
 };
 WriteFaultTotals TakeWriteFaultTotals();
 

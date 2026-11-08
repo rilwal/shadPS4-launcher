@@ -743,17 +743,19 @@ void BufferCache::FlushReadbackStats() {
             const auto& p = w.phases;
             const u64 named = p.region_lock_ns + p.page_lock_ns + p.protect_ns + p.texture_ns;
             const auto us = [&](u64 ns) { return ns / 1e3 / w.count; };
-            LOG_INFO(Render,
-                     "Write faults per second [{}]: {:.1f}, {:.2f} ms ({:.1f} us each: region lock "
-                     "{:.2f}, page locks {:.2f}, mprotect {:.2f} in {:.2f} calls of {:.1f} pages, "
-                     "textures {:.2f}, rest {:.2f}); {:.1f} also unprotected {:.1f} pages ahead",
-                     variant ? variant : "-", w.count / seconds, w.ns / 1e6 / seconds,
-                     w.ns / 1e3 / w.count, us(p.region_lock_ns), us(p.page_lock_ns),
-                     us(p.protect_ns), double(p.protect_calls) / w.count,
-                     p.protect_calls ? double(p.protect_pages) / p.protect_calls : 0.0,
-                     us(p.texture_ns), w.ns > named ? us(w.ns - named) : 0.0,
-                     w.ahead_count / seconds,
-                     w.ahead_count ? double(w.ahead_pages) / w.ahead_count : 0.0);
+            LOG_INFO(
+                Render,
+                "Write faults per second [{}]: {:.1f}, {:.2f} ms ({:.1f} us each: region lock "
+                "{:.2f}, page locks {:.2f}, mprotect {:.2f} in {:.2f} calls of {:.1f} pages, "
+                "textures {:.2f}, rest {:.2f}); {:.1f} also unprotected {:.1f} pages ahead ({:.1f} "
+                "from an earlier run's length)",
+                variant ? variant : "-", w.count / seconds, w.ns / 1e6 / seconds,
+                w.ns / 1e3 / w.count, us(p.region_lock_ns), us(p.page_lock_ns), us(p.protect_ns),
+                double(p.protect_calls) / w.count,
+                p.protect_calls ? double(p.protect_pages) / p.protect_calls : 0.0, us(p.texture_ns),
+                w.ns > named ? us(w.ns - named) : 0.0, w.ahead_count / seconds,
+                w.ahead_count ? double(w.ahead_pages) / w.ahead_count : 0.0,
+                w.ahead_predicted / seconds);
         }
         if (auto sites = TakeSlowWriteFaultSites(); !sites.empty()) {
             const size_t shown = std::min<size_t>(sites.size(), 6);

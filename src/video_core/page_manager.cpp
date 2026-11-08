@@ -50,30 +50,46 @@ namespace {
 /// their write traps can be removed ahead of them: each fault in such a run unprotects twice as
 /// many pages after it as the last, up to SHADPS4_FAULT_AHEAD_PAGES (0 turns it off). The pages
 /// are only marked as written early, which costs an upload of data that didn't change at worst.
+/// Runs that start where one started before (the same buffer refilled every frame) unprotect
+/// as far as that one reached on their first fault (SHADPS4_FAULT_AHEAD_HISTORY=0 turns it off).
 class FaultAhead {
 public:
     /// The range to unprotect after a write fault at `addr`, empty if it isn't in a run.
-    std::pair<VAddr, u64> Next(VAddr addr) {
+    /// `predicted` says it came from an earlier run's length.
+    std::pair<VAddr, u64> Next(VAddr addr, bool& predicted) {
+        predicted = false;
         const u64 max_pages = MaxPages();
         if (max_pages == 0) {
             return {};
         }
         const VAddr page = PageManager::GetPageAddr(addr);
+        const VAddr start = page + PageManager::GetPageSize();
         std::scoped_lock lock{mutex};
         ++tick;
         Run* run = std::ranges::find(runs, page, &Run::end);
         if (run == runs.end()) {
             // A new run, replacing the one used longest ago.
             run = std::ranges::min_element(runs, {}, &Run::last_use);
-            *run = Run{.end = page + PageManager::GetPageSize(), .pages = 0, .last_use = tick};
-            return {};
+            *run = Run{.start = page, .end = start, .pages = 0, .last_use = tick};
+            const History& seen = history[HistoryIndex(page)];
+            if (!HistoryEnabled() || seen.start != page || seen.pages <= 1) {
+                return {};
+            }
+            // Ahead as far as the last run from here went, after this page. Its next fault
+            // carries on doubling from the most a fault takes.
+            predicted = true;
+            run->pages = max_pages;
+            run->end = page + seen.pages * PageManager::GetPageSize();
+            return {start, run->end - start};
         }
         run->pages = std::clamp<u64>(run->pages * 2, 1, max_pages);
         run->last_use = tick;
-        const VAddr start = page + PageManager::GetPageSize();
-        const u64 size = run->pages * PageManager::GetPageSize();
-        run->end = start + size;
-        return {start, size};
+        run->end = start + run->pages * PageManager::GetPageSize();
+        History& entry = history[HistoryIndex(run->start)];
+        entry.start = run->start;
+        entry.pages = static_cast<u32>(
+            std::min<u64>((run->end - run->start) / PageManager::GetPageSize(), MaxHistoryPages));
+        return {start, run->end - start};
     }
 
 private:
@@ -85,14 +101,38 @@ private:
         return pages;
     }
 
+    static bool HistoryEnabled() {
+        static const bool enabled = [] {
+            const char* env = std::getenv("SHADPS4_FAULT_AHEAD_HISTORY");
+            return env == nullptr || env[0] != '0';
+        }();
+        return enabled;
+    }
+
+    static size_t HistoryIndex(VAddr page) {
+        const u64 n = page / PageManager::GetPageSize();
+        return (n ^ (n >> 12)) & (NumHistory - 1);
+    }
+
     struct Run {
+        /// Its first page, the one whose fault started it.
+        VAddr start{};
         /// The first page the run hasn't unprotected yet, where its next fault lands.
         VAddr end{};
         u64 pages{};
         u64 last_use{};
     };
+    /// How far the last run from a page reached, in pages from it (capped: unprotecting more
+    /// than a run writes costs uploads of unchanged pages).
+    struct History {
+        VAddr start{};
+        u32 pages{};
+    };
+    static constexpr u64 MaxHistoryPages = 256;
+    static constexpr size_t NumHistory = 4096;
     std::mutex mutex;
     std::array<Run, 8> runs{};
+    std::array<History, NumHistory> history{};
     u64 tick{};
 };
 
@@ -139,6 +179,7 @@ struct AtomicPhases {
 AtomicPhases write_fault_phase_totals;
 std::atomic<u64> ahead_count{};
 std::atomic<u64> ahead_pages{};
+std::atomic<u64> ahead_predicted{};
 /// Handled read faults: all, and those on the GPU thread.
 std::array<std::atomic<u64>, 2> read_fault_count{};
 std::array<std::atomic<u64>, 2> read_fault_ns{};
@@ -158,7 +199,9 @@ bool HandleWriteFault(Vulkan::Rasterizer* rasterizer, VAddr addr, u64 size, bool
         return false;
     }
     const u64 start = PerfStats::NowNs();
-    auto [ahead, ahead_size] = is_gpu_thread ? std::pair<VAddr, u64>{} : fault_ahead.Next(addr);
+    bool predicted = false;
+    auto [ahead, ahead_size] =
+        is_gpu_thread ? std::pair<VAddr, u64>{} : fault_ahead.Next(addr, predicted);
     if (ahead_size != 0 && !rasterizer->IsMapped(ahead, ahead_size)) {
         ahead_size = 0;
     }
@@ -183,6 +226,7 @@ bool HandleWriteFault(Vulkan::Rasterizer* rasterizer, VAddr addr, u64 size, bool
         const u64 pages = ahead_size / PageManager::GetPageSize();
         ahead_count.fetch_add(1, std::memory_order_relaxed);
         ahead_pages.fetch_add(pages, std::memory_order_relaxed);
+        ahead_predicted.fetch_add(predicted ? 1 : 0, std::memory_order_relaxed);
         PerfStats::frames.AddCost(PerfStats::Cost::PagesAhead, pages);
     }
     const u64 elapsed = PerfStats::NowNs() - start;
@@ -209,6 +253,7 @@ WriteFaultTotals TakeWriteFaultTotals() {
         .phases = write_fault_phase_totals.Take(),
         .ahead_count = ahead_count.exchange(0),
         .ahead_pages = ahead_pages.exchange(0),
+        .ahead_predicted = ahead_predicted.exchange(0),
     };
 }
 
