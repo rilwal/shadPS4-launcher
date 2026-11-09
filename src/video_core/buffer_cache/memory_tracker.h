@@ -65,12 +65,14 @@ public:
     /// Marks pages the guest is about to write as modified from the CPU, removing their
     /// protection, except where the GPU modified them: those keep their traps, so a write still
     /// flushes the GPU's data first.
+    /// In every readbacks mode: with readbacks off, guest memory never gets the GPU's data
+    /// back, so marking a GPU-written page the guest doesn't write would upload stale guest
+    /// memory over it.
     void MarkRegionAsCpuModifiedAhead(VAddr cpu_addr, u64 size) noexcept {
-        const bool keep_gpu = readbacks_mode != GpuReadbacksMode::Disabled;
-        IteratePages(cpu_addr, size, [keep_gpu](RegionManager* manager, u64 offset, u64 size) {
+        IteratePages(cpu_addr, size, [](RegionManager* manager, u64 offset, u64 size) {
             const auto bounds = manager->GetBounds(offset, size);
             manager->Lock(bounds);
-            if (!keep_gpu || !manager->template IsRegionModified<Type::GPU>(offset, size)) {
+            if (!manager->template IsRegionModified<Type::GPU>(offset, size)) {
                 manager->template ChangeRegionState<StateOp::Set, StateOp::None, false>(offset,
                                                                                         size);
             }
@@ -87,7 +89,12 @@ public:
                           auto&& on_flush) noexcept {
         const VAddr end = std::max(cpu_addr + size, ahead + ahead_size);
         if (readbacks_mode == GpuReadbacksMode::Disabled) {
-            return MarkRegionAsCpuModified(cpu_addr, end - cpu_addr);
+            // The faulting range as upstream does; the pages ahead only where the GPU wrote none.
+            MarkRegionAsCpuModified(cpu_addr, size);
+            if (ahead_size != 0) {
+                MarkRegionAsCpuModifiedAhead(ahead, ahead_size);
+            }
+            return;
         }
         if (ahead_size != 0) {
             bool gpu_modified = false;
