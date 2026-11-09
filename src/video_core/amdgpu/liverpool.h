@@ -6,8 +6,8 @@
 #include <atomic>
 #include <condition_variable>
 #include <coroutine>
+#include <deque>
 #include <exception>
-#include <memory>
 #include <mutex>
 #include <semaphore>
 #include <span>
@@ -223,27 +223,18 @@ private:
     struct LabelWrite {
         VAddr address;
         u32 value;
-        /// What the label should hold when a deferred signal writes it. If the guest may
-        /// already know the work is done, anything else means it reused the memory since, and
-        /// the signal leaves it.
-        u32 expected{};
-        /// Set when an earlier deferred signal to this label was still to land when this one
-        /// was recorded: `expected` is then what that one left in memory, read when this runs.
-        std::shared_ptr<std::atomic<u32>[]> after_previous{};
-        u32 previous_index{};
     };
     using LabelWrites = boost::container::small_vector<LabelWrite, 2>;
     static void RecordLabelWrite(LabelWrites& writes, void* address, u64 data, u32 num_bytes);
-    /// Writes a fence signal's label. Run deferred for a signal the guest may already know
-    /// landed, it skips dwords that no longer hold the value expected when it was recorded.
+    /// Writes a fence signal's label, unless it's a deferred signal whose label WriteLabelsEarly
+    /// already wrote.
     static void WriteFenceLabel(void* address, u64 data, u32 num_bytes);
-    /// The label writes of the deferred signal running on this thread, with expected values,
-    /// if a queue wait passed on it (or on a signal after it) before it ran.
-    static thread_local const LabelWrites* running_label_writes;
-    /// All label writes of the deferred signal running on this thread, and where it notes what
-    /// it left in each.
-    static thread_local const LabelWrites* running_label_after_writes;
-    static thread_local std::atomic<u32>* running_label_after;
+    /// The Liverpool and sequence number of the deferred signal running on this thread.
+    static thread_local Liverpool* running_label_owner;
+    static thread_local u64 running_label_seq;
+    /// A queue wait passed on deferred signal `seq`: writes the labels of it and the signals
+    /// before it that haven't landed, as hardware would have them in memory by then.
+    void WriteLabelsEarly(u64 seq);
 
     /// Hands a fence signal to the rasterizer to run later (fenced readbacks). Returns false
     /// if it must run now. `writes` are the label values the signal will write.
@@ -318,9 +309,6 @@ private:
     struct DeferredLabel {
         u32 value;
         u64 seq;
-        /// What the signal left in the label once it ran (its value, or what it left there).
-        std::shared_ptr<std::atomic<u32>[]> after;
-        u32 index;
     };
     std::unordered_map<VAddr, DeferredLabel> deferred_labels;
     size_t deferred_labels_cleanup_at{256};
@@ -329,10 +317,19 @@ private:
     /// The newest deferred signal a queue wait passed on: the command processor's own memory
     /// writes after that wait must land after it.
     u64 cp_order_seq{};
-    /// The newest deferred signal a queue wait passed on before it landed. A later command
-    /// processor write may have told the guest its work was done, so the guest may reuse the
-    /// label memory of it and the signals before it before they land.
-    std::atomic<u64> passed_label_seq{};
+    /// Deferred label writes not yet landed, in signal order, for WriteLabelsEarly. The newest
+    /// signal a queue wait passed on (its labels and those before it are in memory), and the
+    /// newest one whose label writes ran. All under label_mutex, which orders a signal's late
+    /// write against an early one.
+    struct PendingLabel {
+        u64 seq;
+        VAddr address;
+        u32 value;
+    };
+    std::mutex label_mutex;
+    std::deque<PendingLabel> pending_labels;
+    u64 passed_label_seq{};
+    u64 labels_written_seq{};
     struct WaitStats {
         u64 failed_polls{};
         u64 deferred_label_hits{};

@@ -212,26 +212,6 @@ bool MemoryManager::TryWriteBacking(void* address, const void* data, u64 size) {
                           });
 }
 
-MemoryManager::BackingCas MemoryManager::CompareWriteBacking(VAddr address, u32 expected, u32 value,
-                                                             u32* left) {
-    ASSERT(address % sizeof(u32) == 0);
-    BackingCas result = BackingCas::NoBacking;
-    u32 found = expected;
-    const auto cas = [&](u8* backing, u64, u64) {
-        result = __atomic_compare_exchange_n(reinterpret_cast<u32*>(backing), &found, value, false,
-                                             __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE)
-                     ? BackingCas::Written
-                     : BackingCas::Changed;
-    };
-    if (!ForEachBackingPage(impl, address, sizeof(u32), cas)) {
-        ForEachBacking(address, sizeof(u32), cas);
-    }
-    if (left) {
-        *left = result == BackingCas::Written ? value : found;
-    }
-    return result;
-}
-
 bool MemoryManager::TryReadBacking(VAddr address, void* data, u64 size) {
     return ForEachBacking(address, size, [data](u8* backing, u64 offset, u64 length) {
         memcpy(static_cast<u8*>(data) + offset, backing, length);
