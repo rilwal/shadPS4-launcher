@@ -398,7 +398,7 @@ const std::vector<Entry>& Entries() {
         e.push_back(Toggle(
             "fault-load-emulation", "Finish reads without readbacks", "Accuracy",
             "With Precise or Fenced readbacks, finish a game read that touches none of the GPU's "
-            "data from memory instead of waiting for the GPU. Turn off to compare.",
+            "data from memory instead of waiting for the GPU. Experimental; off by default.",
             [] { return EmulatorSettings.IsFaultLoadEmulation(); },
             [](bool v) { EmulatorSettings.SetFaultLoadEmulation(v, G); }));
         // A/B testing: flip between two variants of an experiment while the game runs
