@@ -584,11 +584,10 @@ const std::vector<Entry>& Entries() {
             "Japanese-style buttons: Circle confirms and Cross cancels, in games that ask.",
             [] { return EmulatorSettings.IsCircleEnter(); },
             [](bool v) { EmulatorSettings.SetCircleEnter(v, G); }));
-        e.push_back(Toggle(
-            "motion-controls", "Motion controls", "Controls",
-            "Pass the controller's gyro and accelerometer to games.",
-            [] { return EmulatorSettings.IsMotionControlsEnabled(); },
-            [](bool v) { EmulatorSettings.SetMotionControlsEnabled(v, G); }));
+        e.push_back(Toggle("motion-controls", "Motion controls", "Controls",
+                           "Pass the controller's gyro and accelerometer to games.",
+                           [] { return EmulatorSettings.IsMotionControlsEnabled(); },
+                           [](bool v) { EmulatorSettings.SetMotionControlsEnabled(v, G); }));
         e.push_back(Live(Toggle(
                              "background-input", "Input in the background", "Controls",
                              "Keep reading the controller while the game window isn't focused.",
