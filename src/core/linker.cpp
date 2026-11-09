@@ -13,6 +13,7 @@
 #include "common/thread.h"
 #include "core/aerolib/aerolib.h"
 #include "core/aerolib/stubs.h"
+#include "core/alloc_trace.h"
 #include "core/devtools/widget/module_list.h"
 #include "core/emulator_settings.h"
 #include "core/file_sys/backends/host_fs.h"
@@ -435,6 +436,13 @@ bool Linker::Resolve(const std::string& name, Loader::SymbolType sym_type, Modul
         record = mod->export_sym.FindSymbol(sr);
         if (record) {
             *return_info = *record;
+            if (mod.get() != m && sym_type == Loader::SymbolType::Function &&
+                mod->name.starts_with("libc")) {
+                if (const auto* nid = AeroLib::FindByNid(sr.name.c_str())) {
+                    return_info->virtual_address =
+                        AllocTrace::Interpose(nid->name, record->virtual_address);
+                }
+            }
             return true;
         }
     }

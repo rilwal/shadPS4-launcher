@@ -1003,6 +1003,8 @@ set(CORE src/core/aerolib/stubs.cpp
          src/core/fault_load.cpp
          src/core/fault_load.h
          src/core/linker.cpp
+         src/core/alloc_trace.cpp
+         src/core/alloc_trace.h
          src/core/linker.h
          src/core/memory.cpp
          src/core/memory.h
