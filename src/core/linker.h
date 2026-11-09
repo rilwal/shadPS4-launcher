@@ -150,6 +150,15 @@ public:
 
     void* TlsGetAddr(u64 module_index, u64 offset);
     void* AllocateTlsForThread(bool is_primary);
+    /// The game's libc heap: bytes in use and bytes taken from the system, now and at most.
+    /// False if the game has no heap API. Call it on a guest thread.
+    struct GameHeapStats {
+        u64 in_use;
+        u64 max_in_use;
+        u64 system;
+        u64 max_system;
+    };
+    bool GetGameHeapStats(GameHeapStats& stats);
     void FreeTlsForNonPrimaryThread(void* pointer);
 
     s32 LoadModule(const std::filesystem::path& elf_name, bool is_dynamic = false);

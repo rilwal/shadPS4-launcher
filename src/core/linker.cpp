@@ -565,6 +565,31 @@ void* Linker::AllocateTlsForThread(bool is_primary) {
     return addr_out;
 }
 
+bool Linker::GetGameHeapStats(GameHeapStats& stats) {
+    if (!heap_api || !heap_api->heap_malloc_stats_fast) {
+        return false;
+    }
+    // SceLibcMallocManagedSize.
+    struct {
+        u16 size;
+        u16 version;
+        u32 reserved;
+        u64 max_system_size;
+        u64 current_system_size;
+        u64 max_inuse_size;
+        u64 current_inuse_size;
+    } managed{.size = 40, .version = 1};
+    static_assert(sizeof(managed) == 40);
+    if (heap_api->heap_malloc_stats_fast(&managed) != 0) {
+        return false;
+    }
+    stats = {.in_use = managed.current_inuse_size,
+             .max_in_use = managed.max_inuse_size,
+             .system = managed.current_system_size,
+             .max_system = managed.max_system_size};
+    return true;
+}
+
 void Linker::FreeTlsForNonPrimaryThread(void* pointer) {
     {
         std::scoped_lock lk{mutex};

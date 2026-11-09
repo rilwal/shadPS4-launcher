@@ -1,6 +1,8 @@
 // SPDX-FileCopyrightText: Copyright 2024-2026 shadPS4 Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+#include <chrono>
+
 #include "gnm_error.h"
 #include "gnmdriver.h"
 
@@ -8,6 +10,7 @@
 #include "common/debug.h"
 #include "common/elf_info.h"
 #include "common/logging/log.h"
+#include "common/singleton.h"
 #include "common/slot_vector.h"
 #include "core/address_space.h"
 #include "core/debug_state.h"
@@ -18,6 +21,7 @@
 #include "core/libraries/kernel/process.h"
 #include "core/libraries/libs.h"
 #include "core/libraries/videoout/video_out.h"
+#include "core/linker.h"
 #include "core/memory.h"
 #include "core/platform.h"
 #include "video_core/amdgpu/liverpool.h"
@@ -2489,9 +2493,35 @@ s32 PS4_SYSV_ABI sceGnmSubmitCommandBuffers(u32 count, const u32* dcb_gpu_addrs[
                                                  ccb_gpu_addrs, ccb_sizes_in_bytes);
 }
 
+// The game's own heap, every 5 s from the thread that ends its frames: games that run out of
+// it end with their own out-of-memory error, which the emulator's logs don't otherwise show.
+static void LogGameHeap() {
+    static u64 last_ns = 0;
+    static u64 last_frames = 0;
+    const u64 now = std::chrono::duration_cast<std::chrono::nanoseconds>(
+                        std::chrono::steady_clock::now().time_since_epoch())
+                        .count();
+    if (last_ns != 0 && now - last_ns < 5'000'000'000ULL) {
+        return;
+    }
+    Core::Linker::GameHeapStats stats;
+    if (Common::Singleton<Core::Linker>::Instance()->GetGameHeapStats(stats)) {
+        constexpr double MiB = 1024.0 * 1024.0;
+        LOG_INFO(Lib_GnmDriver,
+                 "Game heap at frame {} (+{}): {:.1f} MiB in use (most {:.1f}), {:.1f} MiB from "
+                 "the system (most {:.1f})",
+                 frames_submitted, frames_submitted - last_frames, stats.in_use / MiB,
+                 stats.max_in_use / MiB, stats.system / MiB, stats.max_system / MiB);
+    }
+    last_ns = now;
+    last_frames = frames_submitted;
+}
+
 s32 PS4_SYSV_ABI sceGnmSubmitDone() {
     HLE_TRACE;
     LOG_DEBUG(Lib_GnmDriver, "called");
+    // Before taking the submit lock: the game's heap takes locks of its own.
+    LogGameHeap();
     std::scoped_lock lk{m_submit_lock};
     WaitGpuIdle();
     LockSubmissionsUntilIdle();
