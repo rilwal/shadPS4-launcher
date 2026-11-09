@@ -1,6 +1,14 @@
 // SPDX-FileCopyrightText: Copyright 2024-2026 shadPS4 Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+#include <algorithm>
+#include <chrono>
+#include <cstdlib>
+#include <cstring>
+#include <thread>
+#if defined(__x86_64__) || defined(_M_X64)
+#include <immintrin.h>
+#endif
 #include <boost/preprocessor/stringize.hpp>
 
 #include "common/ab_switch.h"
@@ -17,6 +25,7 @@
 #include "core/platform.h"
 #include "video_core/amdgpu/liverpool.h"
 #include "video_core/amdgpu/pm4_cmds.h"
+#include "video_core/perf_stats.h"
 #include "video_core/renderdoc.h"
 #include "video_core/renderer_vulkan/vk_rasterizer.h"
 
@@ -36,11 +45,19 @@ static const char* acb_task_name[] = NAME_ARRAY(ACB_TASK, MAX_NAMES);
 #define YIELD(name)                                                                                \
     FIBER_EXIT;                                                                                    \
     co_yield {};                                                                                   \
-    FIBER_ENTER(name);
+    FIBER_ENTER(name);                                                                             \
+    ForgetStreamCopies();
 
 #define YIELD_CE() YIELD(ccb_task_name)
 #define YIELD_GFX() YIELD(dcb_task_name)
 #define YIELD_ASC(id) YIELD(acb_task_name[id])
+
+/// Set when a task yields because it's waiting on the guest (every yield is), so the processing
+/// loop can tell short resumes that only checked a wait from real work.
+static thread_local bool yielded_waiting = false;
+#define WAIT_YIELD(yield)                                                                          \
+    yielded_waiting = true;                                                                        \
+    yield
 
 #define RESUME(task, name)                                                                         \
     FIBER_EXIT;                                                                                    \
@@ -87,13 +104,13 @@ Liverpool::~Liverpool() {
     }
 }
 
-void Liverpool::ProcessCeQueue() {
+bool Liverpool::ProcessCeQueue() {
     auto& queue = mapped_queues[GfxQueueId];
     Task::Handle task{};
     {
         std::scoped_lock lock{queue.m_access};
         if (ce_submits.empty()) {
-            return;
+            return false;
         }
         task = ce_submits.front();
     }
@@ -106,7 +123,40 @@ void Liverpool::ProcessCeQueue() {
         std::scoped_lock lock2{submit_mutex};
         submit_cv.notify_all();
     }
+    return true;
 }
+
+namespace {
+
+/// Tells the CPU this core is spinning, so it can save power and let a sibling thread run.
+inline void CpuRelax() {
+#if defined(__x86_64__) || defined(_M_X64)
+    _mm_pause();
+#elif defined(__aarch64__)
+    asm volatile("yield");
+#endif
+}
+
+/// How the GPU thread waits while every queue is empty or blocked on the guest. Upstream spins
+/// at full speed; with the backoff it pauses, and after 1 ms idle sleeps in short steps
+/// (SHADPS4_GPU_IDLE_SLEEP_US, default 50; 0 only pauses).
+/// Yielding instead doesn't free the core when others are spare (TLG measured 97% of a core
+/// either way, 11% with 50 us sleeps, with the same frame times).
+struct IdleBackoff {
+    bool enabled;
+    u64 sleep_ns;
+
+    static IdleBackoff FromEnv() {
+        const char* backoff = std::getenv("SHADPS4_GPU_IDLE_BACKOFF");
+        const char* sleep = std::getenv("SHADPS4_GPU_IDLE_SLEEP_US");
+        return {
+            .enabled = backoff == nullptr || backoff[0] != '0',
+            .sleep_ns = (sleep ? std::strtoull(sleep, nullptr, 10) : 50) * 1000,
+        };
+    }
+};
+
+} // Anonymous namespace
 
 void Liverpool::ProcessCommands() {
     // Process incoming commands with high priority
@@ -125,6 +175,9 @@ void Liverpool::ProcessCommands() {
 void Liverpool::Process(std::stop_token stoken) {
     Common::SetCurrentThreadName("shadPS4:GpuCommandProcessor");
     gpu_id = std::this_thread::get_id();
+    VideoCore::PerfStats::is_gpu_thread = true;
+    const bool costs = VideoCore::PerfStats::CostsEnabled();
+    const auto idle_backoff = IdleBackoff::FromEnv();
 #ifdef __linux__
     gpu_tid = gettid();
 #endif
@@ -142,10 +195,54 @@ void Liverpool::Process(std::stop_token stoken) {
         VideoCore::StartCapture();
 
         curr_qid = -1;
+        // Passes in a row that only checked waits or found the queue empty, and when they began.
+        u32 idle_passes = 0;
+        u64 idle_since = 0;
 
         while ((num_submits || num_commands) && !stoken.stop_requested()) {
-            ProcessCommands();
-            ProcessCeQueue();
+            // A pass that ran nothing, or a short one that ended on a wait, was only checking:
+            // count it as waiting, and everything else as busy.
+            const u64 pass_start = costs ? VideoCore::PerfStats::NowNs() : 0;
+            yielded_waiting = false;
+            bool ran = false;
+            SCOPE_EXIT {
+                constexpr u64 CheckNs = 20'000;
+                const u64 now = costs ? VideoCore::PerfStats::NowNs() : 0;
+                const bool waiting =
+                    !ran || (yielded_waiting && (!costs || now - pass_start < CheckNs));
+                if (costs) {
+                    VideoCore::PerfStats::frames.AddCost(
+                        waiting ? VideoCore::PerfStats::Cost::GuestWaits
+                                : VideoCore::PerfStats::Cost::Busy,
+                        now - pass_start);
+                    VideoCore::PerfStats::frames.FlushLocalCosts();
+                }
+                if (!waiting || !idle_backoff.enabled) {
+                    idle_passes = 0;
+                    return;
+                }
+                // Spin for a wait that ends soon, then give the core away in short sleeps.
+                constexpr u32 SpinPasses = 64;
+                constexpr u64 SleepAfterNs = 1'000'000;
+                if (++idle_passes < SpinPasses) {
+                    CpuRelax();
+                    return;
+                }
+                const u64 idle_now = VideoCore::PerfStats::NowNs();
+                if (idle_passes == SpinPasses) {
+                    idle_since = idle_now;
+                }
+                if (idle_backoff.sleep_ns != 0 && idle_now - idle_since >= SleepAfterNs) {
+                    std::this_thread::sleep_for(std::chrono::nanoseconds{idle_backoff.sleep_ns});
+                } else {
+                    CpuRelax();
+                }
+            };
+            if (num_commands) {
+                ran = true;
+                ProcessCommands();
+            }
+            ran |= ProcessCeQueue();
 
             curr_qid = (curr_qid + 1) % num_mapped_queues;
 
@@ -159,6 +256,7 @@ void Liverpool::Process(std::stop_token stoken) {
                 }
                 task = queue.submits.front();
             }
+            ran = true;
             task.resume();
 
             if (!task.done() && rasterizer) {
@@ -177,14 +275,24 @@ void Liverpool::Process(std::stop_token stoken) {
             }
         }
 
-        if (submit_done) {
+        // Cleared before the flush: a SubmitDone during it then gets a pass, and a GPU-idle
+        // interrupt, of its own instead of being cleared with this one.
+        if (submit_done.exchange(false)) {
+            const u64 flush_start = costs ? VideoCore::PerfStats::NowNs() : 0;
+            SCOPE_EXIT {
+                if (costs) {
+                    VideoCore::PerfStats::frames.AddCost(VideoCore::PerfStats::Cost::Busy,
+                                                         VideoCore::PerfStats::NowNs() -
+                                                             flush_start);
+                    VideoCore::PerfStats::frames.FlushLocalCosts();
+                }
+            };
             VideoCore::EndCapture();
             if (rasterizer) {
                 rasterizer->OnSubmit();
                 rasterizer->Flush();
             }
             LogWaitStats();
-            submit_done = false;
         } else if (rasterizer) {
             // Going idle: the guest may be waiting on a deferred fence signal.
             rasterizer->FlushFenceSignals();
@@ -196,9 +304,58 @@ void Liverpool::Process(std::stop_token stoken) {
 
 void Liverpool::RecordLabelWrite(LabelWrites& writes, void* address, u64 data, u32 num_bytes) {
     const auto addr = std::bit_cast<VAddr>(address);
-    writes.emplace_back(addr, static_cast<u32>(data));
+    writes.push_back({.address = addr, .value = static_cast<u32>(data)});
     if (num_bytes == sizeof(u64)) {
-        writes.emplace_back(addr + sizeof(u32), static_cast<u32>(data >> 32));
+        writes.push_back({.address = addr + sizeof(u32), .value = static_cast<u32>(data >> 32)});
+    }
+}
+
+thread_local Liverpool* Liverpool::running_label_owner = nullptr;
+thread_local u64 Liverpool::running_label_seq = 0;
+
+namespace {
+std::atomic<u64> early_label_writes{};
+} // namespace
+
+void Liverpool::WriteFenceLabel(void* address, u64 data, u32 num_bytes) {
+    auto* memory = Core::Memory::Instance();
+    Liverpool* owner = running_label_owner;
+    if (!owner) {
+        ASSERT(memory->TryWriteBacking(address, &data, num_bytes));
+        return;
+    }
+    std::scoped_lock lk{owner->label_mutex};
+    // A queue wait passed on this signal (or a later one) before it landed, and WriteLabelsEarly
+    // put its label in memory then, where hardware had it. What the label holds now the guest (or
+    // the command processor) wrote since: leave it.
+    if (running_label_seq > owner->passed_label_seq) {
+        ASSERT(memory->TryWriteBacking(address, &data, num_bytes));
+    }
+    owner->labels_written_seq = running_label_seq;
+}
+
+void Liverpool::WriteLabelsEarly(u64 seq) {
+    std::scoped_lock lk{label_mutex};
+    if (seq <= passed_label_seq) {
+        return;
+    }
+    passed_label_seq = seq;
+    auto* memory = Core::Memory::Instance();
+    // Hardware wrote every label up to this signal before the wait passed, in order.
+    while (!pending_labels.empty() && pending_labels.front().seq <= seq) {
+        const PendingLabel label = pending_labels.front();
+        pending_labels.pop_front();
+        if (label.seq <= labels_written_seq) {
+            continue;
+        }
+        ASSERT(memory->TryWriteBacking(std::bit_cast<void*>(label.address), &label.value,
+                                       sizeof(label.value)));
+        early_label_writes.fetch_add(1, std::memory_order_relaxed);
+        // The command processor's own waits now read it from memory.
+        if (const auto it = deferred_labels.find(label.address);
+            it != deferred_labels.end() && it->second.seq == label.seq) {
+            deferred_labels.erase(it);
+        }
     }
 }
 
@@ -210,41 +367,111 @@ bool Liverpool::DeferFenceSignal(Common::UniqueFunction<void>&& signal, bool thr
     const u64 seq = ++deferred_label_seq;
     const bool deferred = rasterizer->DeferFenceSignal(
         [this, seq, signal = std::move(signal)] {
+            running_label_owner = this;
+            running_label_seq = seq;
             signal();
+            running_label_owner = nullptr;
+            running_label_seq = 0;
             // Deferred signals run in order, so this one landing means all before it have.
             landed_label_seq.store(seq, std::memory_order_release);
+            landed_label_seq.notify_all();
         },
         throttle);
-    if (!deferred || landed_label_seq.load(std::memory_order_acquire) >= seq) {
-        return deferred;
+    if (!deferred) {
+        return false;
     }
-    for (const auto& [address, value] : writes) {
-        deferred_labels.insert_or_assign(address, DeferredLabel{value, seq});
+    // The signal writes guest memory directly, after the GPU work before it. A later readback
+    // of GPU data recorded for these bytes would put an older value back over it.
+    for (const auto& write : writes) {
+        rasterizer->ForgetGpuWrites(write.address, sizeof(u32));
     }
-    // A label normally lives at a fixed address, so this rarely grows. Drop landed ones if not.
-    if (deferred_labels.size() > 256) {
+    if (landed_label_seq.load(std::memory_order_acquire) >= seq) {
+        return true;
+    }
+    {
+        std::scoped_lock lk{label_mutex};
+        while (!pending_labels.empty() && pending_labels.front().seq <= labels_written_seq) {
+            pending_labels.pop_front();
+        }
+        for (const auto& write : writes) {
+            pending_labels.push_back({.seq = seq, .address = write.address, .value = write.value});
+        }
+    }
+    for (const auto& write : writes) {
+        deferred_labels.insert_or_assign(write.address, DeferredLabel{write.value, seq});
+    }
+    // Labels at many addresses (rings of them) grow the map: drop the landed ones now and then.
+    // Not on every signal once it's past the limit, or each would walk the whole map.
+    if (deferred_labels.size() > deferred_labels_cleanup_at) {
         const u64 landed = landed_label_seq.load(std::memory_order_acquire);
         std::erase_if(deferred_labels,
                       [landed](const auto& entry) { return entry.second.seq <= landed; });
+        deferred_labels_cleanup_at = std::max<size_t>(256, deferred_labels.size() * 2);
     }
     return true;
 }
 
-void Liverpool::ForgetDeferredLabels(VAddr address, u64 size) {
-    if (deferred_labels.empty() || size == 0) {
+void Liverpool::ForgetStreamCopies() {
+    if (rasterizer) {
+        rasterizer->ForgetStreamCopies();
+    }
+}
+
+void Liverpool::OrderCpWrite(VAddr address, u64 size) {
+    ForgetStreamCopies();
+    if (size == 0) {
         return;
     }
-    // The command processor wrote here itself, after the deferred signals: its own waits must
-    // now read this value from memory, as they would without deferral.
+    const u64 landed = landed_label_seq.load(std::memory_order_acquire);
+    u64 need = cp_order_seq;
     const VAddr end = address + size;
-    if (size / sizeof(u32) <= deferred_labels.size()) {
-        for (VAddr dword = Common::AlignDown(address, sizeof(u32)); dword < end;
-             dword += sizeof(u32)) {
+    const VAddr first_dword = Common::AlignDown(address, sizeof(u32));
+    const bool walk_dwords = (end - first_dword) / sizeof(u32) <= deferred_labels.size();
+    const auto for_each_overlap = [&](auto&& func) {
+        if (walk_dwords) {
+            for (VAddr dword = first_dword; dword < end; dword += sizeof(u32)) {
+                if (const auto it = deferred_labels.find(dword); it != deferred_labels.end()) {
+                    func(it->second);
+                }
+            }
+        } else {
+            for (const auto& [label, deferred] : deferred_labels) {
+                if (label >= first_dword && label < end) {
+                    func(deferred);
+                }
+            }
+        }
+    };
+    if (!deferred_labels.empty()) {
+        for_each_overlap(
+            [&](const DeferredLabel& deferred) { need = std::max(need, deferred.seq); });
+    }
+    if (need > landed && rasterizer) {
+        // Only the GPU work queued before the signal is waited for, as hardware would have
+        // at the wait. The signal's tick may not be submitted yet.
+        const auto start = std::chrono::steady_clock::now();
+        rasterizer->FlushFenceSignals();
+        u64 now_landed = landed_label_seq.load(std::memory_order_acquire);
+        while (now_landed < need) {
+            landed_label_seq.wait(now_landed, std::memory_order_acquire);
+            now_landed = landed_label_seq.load(std::memory_order_acquire);
+        }
+        ++wait_stats.order_waits;
+        wait_stats.order_wait_ns += std::chrono::duration_cast<std::chrono::nanoseconds>(
+                                        std::chrono::steady_clock::now() - start)
+                                        .count();
+    }
+    if (deferred_labels.empty()) {
+        return;
+    }
+    // The command processor's own waits must now read this write from memory.
+    if (walk_dwords) {
+        for (VAddr dword = first_dword; dword < end; dword += sizeof(u32)) {
             deferred_labels.erase(dword);
         }
     } else {
-        std::erase_if(deferred_labels, [address, end](const auto& entry) {
-            return entry.first >= address && entry.first < end;
+        std::erase_if(deferred_labels, [first_dword, end](const auto& entry) {
+            return entry.first >= first_dword && entry.first < end;
         });
     }
 }
@@ -256,6 +483,22 @@ bool Liverpool::TestWait(const PM4CmdWaitRegMem* wait) {
             if (it->second.seq > landed_label_seq.load(std::memory_order_acquire)) {
                 ++wait_stats.deferred_label_hits;
                 if (wait->TestValue(it->second.value)) {
+                    // Past this wait, hardware would have the label in memory already.
+                    // Waiting for it before the command processor's next memory write costs
+                    // Bloodborne ~200 waits/s, 3 ms a frame. What it guarded against (a late
+                    // label over memory the guest reused) WriteLabelsEarly now prevents, so
+                    // it's off unless SHADPS4_ORDER_AFTER_WAITS=1.
+                    static const bool order_after_waits = [] {
+                        const char* env = std::getenv("SHADPS4_ORDER_AFTER_WAITS");
+                        return env && std::strcmp(env, "1") == 0;
+                    }();
+                    if (order_after_waits) {
+                        cp_order_seq = std::max(cp_order_seq, it->second.seq);
+                    } else {
+                        // A command processor write after this wait may tell the guest the
+                        // work is done, and the guest may then reuse the label's memory.
+                        WriteLabelsEarly(it->second.seq);
+                    }
                     return true;
                 }
                 ++wait_stats.failed_polls;
@@ -287,16 +530,20 @@ void Liverpool::LogWaitStats() {
         return;
     }
     const double seconds = double(now - wait_stats.last_log_ns) / 1e9;
-    if (seconds > 0.5 && (wait_stats.failed_polls != 0 || wait_stats.deferred_label_hits != 0)) {
+    const u64 early = early_label_writes.exchange(0, std::memory_order_relaxed);
+    if (seconds > 0.5 && (wait_stats.failed_polls != 0 || wait_stats.deferred_label_hits != 0 ||
+                          wait_stats.order_waits != 0 || early != 0)) {
         const char* variant = Common::AbSwitch::Label();
         if (variant && switched) {
             variant = Common::AbSwitch::LabelOf(!Common::AbSwitch::IsB());
         }
         LOG_INFO(Render,
                  "Queue waits per second [{}] over {:.1f} s: {:.0f} polls failed, {:.0f} read a "
-                 "deferred label",
+                 "deferred label, {:.0f} writes waited for one ({:.2f} ms); {:.0f} labels written "
+                 "early at a wait that passed on them",
                  variant ? variant : "-", seconds, wait_stats.failed_polls / seconds,
-                 wait_stats.deferred_label_hits / seconds);
+                 wait_stats.deferred_label_hits / seconds, wait_stats.order_waits / seconds,
+                 wait_stats.order_wait_ns / 1e6 / seconds, early / seconds);
     }
     wait_stats = WaitStats{.last_log_ns = now, .ab_switches = switches};
 }
@@ -335,6 +582,7 @@ Liverpool::Task Liverpool::ProcessCeUpdate(std::span<const u32> ccb) {
             break;
         }
         case PM4ItOpcode::DumpConstRam: {
+            ForgetStreamCopies();
             const auto* dump_const = reinterpret_cast<const PM4DumpConstRam*>(header);
             memcpy(dump_const->Address<void*>(),
                    cblock.constants_heap.data() + dump_const->Offset(), dump_const->Size());
@@ -348,7 +596,7 @@ Liverpool::Task Liverpool::ProcessCeUpdate(std::span<const u32> ccb) {
             const auto diff = it_body[0];
             while (cblock.ce_count >= cblock.de_count &&
                    (cblock.ce_count - cblock.de_count) >= diff) {
-                YIELD_CE();
+                WAIT_YIELD(YIELD_CE());
             }
             break;
         }
@@ -362,7 +610,7 @@ Liverpool::Task Liverpool::ProcessCeUpdate(std::span<const u32> ccb) {
             RESUME_CE(task);
 
             while (!task.handle.done()) {
-                YIELD_CE();
+                WAIT_YIELD(YIELD_CE());
                 RESUME_CE(task);
             }
             break;
@@ -373,7 +621,7 @@ Liverpool::Task Liverpool::ProcessCeUpdate(std::span<const u32> ccb) {
             }
             const auto* rewind = reinterpret_cast<const PM4CmdRewind*>(header);
             while (!rewind->Valid()) {
-                YIELD_CE();
+                WAIT_YIELD(YIELD_CE());
             }
             break;
         }
@@ -388,8 +636,211 @@ Liverpool::Task Liverpool::ProcessCeUpdate(std::span<const u32> ccb) {
     FIBER_EXIT;
 }
 
+bool Liverpool::LookAhead() {
+    if (!EmulatorSettings.IsCompileLookahead() || in_lookahead || looked_ahead || !rasterizer ||
+        curr_qid != GfxQueueId || gfx_frames.empty()) {
+        return false;
+    }
+    looked_ahead = true;
+    in_lookahead = true;
+    const auto saved_regs = std::make_unique<Regs>(regs);
+    const auto saved_cs = mapped_queues[GfxQueueId].cs_state;
+    const u64 start = VideoCore::PerfStats::NowNs();
+
+    LookAheadBudget budget{.packets = 200'000, .pipelines = 256, .de_count = cblock.de_count};
+    const u32 initial_pipelines = budget.pipelines;
+    // Each level is on its current packet (the draw, or the indirect buffer being run), so
+    // reading starts after it, innermost level first.
+    for (auto it = gfx_frames.rbegin(); it != gfx_frames.rend(); ++it) {
+        const auto rest = **it;
+        if (rest.empty()) {
+            continue;
+        }
+        const auto* header = reinterpret_cast<const PM4Header*>(rest.data());
+        const size_t size = header->type == 3 ? header->type3.NumWords() + 1 : 1;
+        if (size > rest.size() || !ScanAhead(rest.subspan(size), budget, 0)) {
+            break;
+        }
+    }
+
+    regs = *saved_regs;
+    mapped_queues[GfxQueueId].cs_state = saved_cs;
+    in_lookahead = false;
+    LOG_INFO(Render, "Look-ahead read {} packets and made {} pipelines in {:.2f} ms{}",
+             200'000 - budget.packets, initial_pipelines - budget.pipelines,
+             (VideoCore::PerfStats::NowNs() - start) / 1e6,
+             budget.waits_for_ce ? ", up to the constant engine" : "");
+    return true;
+}
+
+bool Liverpool::ScanAhead(std::span<const u32> dcb, LookAheadBudget& budget, u32 depth) {
+    const auto write_regs = [this](u32 reg_addr, const u32* payload, u32 count) {
+        if (reg_addr + count <= Regs::NumRegs) {
+            std::memcpy(&regs.reg_array[reg_addr], payload, count * sizeof(u32));
+        }
+    };
+    const auto prefetched = [&budget](bool made) {
+        if (made && --budget.pipelines == 0) {
+            return false;
+        }
+        return true;
+    };
+    while (!dcb.empty()) {
+        if (budget.packets-- == 0) {
+            return false;
+        }
+        const auto* header = reinterpret_cast<const PM4Header*>(dcb.data());
+        if (header->type == 2) {
+            dcb = dcb.subspan(1);
+            continue;
+        }
+        if (header->type != 3) {
+            // Anything else would stop the real parser too.
+            return false;
+        }
+        const u32 count = header->type3.NumWords();
+        if (count + 1 > dcb.size()) {
+            return true;
+        }
+        const auto* payload = reinterpret_cast<const u32*>(header + 2);
+        switch (header->type3.opcode) {
+        case PM4ItOpcode::ClearState:
+            regs.SetDefaults();
+            break;
+        case PM4ItOpcode::SetConfigReg: {
+            const auto* set_data = reinterpret_cast<const PM4CmdSetData*>(header);
+            write_regs(Regs::ConfigRegWordOffset + set_data->reg_offset, payload, count - 1);
+            break;
+        }
+        case PM4ItOpcode::SetContextReg: {
+            const auto* set_data = reinterpret_cast<const PM4CmdSetData*>(header);
+            write_regs(Regs::ContextRegWordOffset + set_data->reg_offset, payload, count - 1);
+            break;
+        }
+        case PM4ItOpcode::SetShReg: {
+            const auto* set_data = reinterpret_cast<const PM4CmdSetData*>(header);
+            const auto set_size = (count - 1) * sizeof(u32);
+            if (set_data->reg_offset >= 0x200 &&
+                set_data->reg_offset <= (0x200 + sizeof(ComputeProgram) / 4)) {
+                if (set_size <= sizeof(ComputeProgram) - (set_data->reg_offset - 0x200) * 4) {
+                    auto* addr = reinterpret_cast<u32*>(&mapped_queues[GfxQueueId].cs_state) +
+                                 (set_data->reg_offset - 0x200);
+                    std::memcpy(addr, payload, set_size);
+                }
+            } else {
+                write_regs(Regs::ShRegWordOffset + set_data->reg_offset, payload, count - 1);
+            }
+            break;
+        }
+        case PM4ItOpcode::SetUconfigReg: {
+            const auto* set_data = reinterpret_cast<const PM4CmdSetData*>(header);
+            write_regs(Regs::UconfigRegWordOffset + set_data->reg_offset, payload, count - 1);
+            break;
+        }
+        case PM4ItOpcode::IndexType: {
+            const auto* index_type = reinterpret_cast<const PM4CmdDrawIndexType*>(header);
+            regs.index_buffer_type.raw = index_type->raw;
+            break;
+        }
+        case PM4ItOpcode::DrawIndex2: {
+            const auto* draw_index = reinterpret_cast<const PM4CmdDrawIndex2*>(header);
+            regs.num_indices = draw_index->index_count;
+            regs.draw_initiator = draw_index->draw_initiator;
+            if (!prefetched(rasterizer->PrefetchDraw())) {
+                return false;
+            }
+            break;
+        }
+        case PM4ItOpcode::DrawIndexOffset2: {
+            const auto* draw_index_off = reinterpret_cast<const PM4CmdDrawIndexOffset2*>(header);
+            regs.num_indices = draw_index_off->index_count;
+            regs.draw_initiator = draw_index_off->draw_initiator;
+            if (!prefetched(rasterizer->PrefetchDraw())) {
+                return false;
+            }
+            break;
+        }
+        case PM4ItOpcode::DrawIndexAuto: {
+            const auto* draw_index = reinterpret_cast<const PM4CmdDrawIndexAuto*>(header);
+            regs.num_indices = draw_index->index_count;
+            regs.draw_initiator = draw_index->draw_initiator;
+            if (!prefetched(rasterizer->PrefetchDraw())) {
+                return false;
+            }
+            break;
+        }
+        case PM4ItOpcode::DispatchDirect: {
+            const auto* dispatch_direct = reinterpret_cast<const PM4CmdDispatchDirect*>(header);
+            auto& cs_program = mapped_queues[GfxQueueId].cs_state;
+            cs_program.dim_x = dispatch_direct->dim_x;
+            cs_program.dim_y = dispatch_direct->dim_y;
+            cs_program.dim_z = dispatch_direct->dim_z;
+            cs_program.dispatch_initiator = dispatch_direct->dispatch_initiator;
+            if ((cs_program.dispatch_initiator & 1) != 0 &&
+                !prefetched(rasterizer->PrefetchDispatch())) {
+                return false;
+            }
+            break;
+        }
+        case PM4ItOpcode::IndirectBuffer: {
+            const auto* indirect_buffer = reinterpret_cast<const PM4CmdIndirectBuffer*>(header);
+            const std::span<const u32> target{indirect_buffer->Address<const u32>(),
+                                              indirect_buffer->ib_size};
+            if (indirect_buffer->chain) {
+                dcb = target;
+                continue;
+            }
+            if (depth < 8 && !ScanAhead(target, budget, depth + 1)) {
+                return false;
+            }
+            break;
+        }
+        case PM4ItOpcode::IncrementDeCounter:
+            ++budget.de_count;
+            break;
+        case PM4ItOpcode::WaitOnCeCounter:
+            // The draws after this read descriptor tables that the constant engine dumps to
+            // memory. Where it hasn't got that far, memory still holds older tables, and
+            // guesses made from them would be wrong.
+            if (cblock.ce_count <= budget.de_count) {
+                budget.waits_for_ce = true;
+                return false;
+            }
+            break;
+        case PM4ItOpcode::CondExec: {
+            const auto* cond_exec = reinterpret_cast<const PM4CmdCondExec*>(header);
+            if (*cond_exec->Address() == false) {
+                const size_t skip = count + 1 + cond_exec->exec_count.Value();
+                if (skip > dcb.size()) {
+                    return true;
+                }
+                dcb = dcb.subspan(skip);
+                continue;
+            }
+            break;
+        }
+        default:
+            // Indirect draws, memory writes, waits and events: their effects aren't known yet,
+            // so the guess carries on without them.
+            break;
+        }
+        dcb = dcb.subspan(count + 1);
+    }
+    return true;
+}
+
 Liverpool::Task Liverpool::ProcessGraphics(std::span<const u32> dcb) {
     FIBER_ENTER(dcb_task_name);
+    ForgetStreamCopies();
+
+    // A new submission starts with no level open, and may look ahead once.
+    if (gfx_frames.empty()) {
+        looked_ahead = false;
+    }
+    gfx_frames.push_back(&dcb);
+    SCOPE_EXIT {
+        gfx_frames.pop_back();
+    };
 
     auto base_addr = reinterpret_cast<uintptr_t>(dcb.data());
     while (!dcb.empty()) {
@@ -827,6 +1278,7 @@ Liverpool::Task Liverpool::ProcessGraphics(std::span<const u32> dcb) {
                         static constexpr u64 OcclusionCounterValidMask = 0x8000000000000000ULL;
                         static constexpr u64 OcclusionCounterStep = 0x2FFFFFFULL;
                         u64* results = event->Address<u64*>();
+                        OrderCpWrite(event->Address<VAddr>(), num_counter_pairs * 16);
                         for (s32 i = 0; i < num_counter_pairs; ++i, results += 2) {
                             *results = pixel_counter | OcclusionCounterValidMask;
                         }
@@ -836,13 +1288,9 @@ Liverpool::Task Liverpool::ProcessGraphics(std::span<const u32> dcb) {
                 break;
             }
             case PM4ItOpcode::EventWriteEos: {
+                ForgetStreamCopies();
                 const auto* event_eos = reinterpret_cast<const PM4CmdEventWriteEos*>(header);
-                auto signal = [eos = *event_eos] {
-                    eos.SignalFence([](void* address, u64 data, u32 num_bytes) {
-                        auto* memory = Core::Memory::Instance();
-                        ASSERT(memory->TryWriteBacking(address, &data, num_bytes));
-                    });
-                };
+                auto signal = [eos = *event_eos] { eos.SignalFence(WriteFenceLabel); };
                 LabelWrites writes;
                 event_eos->SignalFence([&writes](void* address, u64 data, u32 num_bytes) {
                     RecordLabelWrite(writes, address, data, num_bytes);
@@ -861,20 +1309,19 @@ Liverpool::Task Liverpool::ProcessGraphics(std::span<const u32> dcb) {
                     if (rasterizer) {
                         rasterizer->Finish();
                         const u32 value = rasterizer->ReadDataFromGds(event_eos->gds_index);
+                        OrderCpWrite(std::bit_cast<VAddr>(event_eos->Address()), sizeof(value));
                         *event_eos->Address() = value;
                     }
                 }
                 break;
             }
             case PM4ItOpcode::EventWriteEop: {
+                ForgetStreamCopies();
                 const auto* event_eop = reinterpret_cast<const PM4CmdEventWriteEop*>(header);
                 auto signal = [eop = *event_eop] {
-                    eop.SignalFence(
-                        [](void* address, u64 data, u32 num_bytes) {
-                            auto* memory = Core::Memory::Instance();
-                            ASSERT(memory->TryWriteBacking(address, &data, num_bytes));
-                        },
-                        [] { Platform::IrqC::Instance()->Signal(Platform::InterruptId::GfxEop); });
+                    eop.SignalFence(WriteFenceLabel, [] {
+                        Platform::IrqC::Instance()->Signal(Platform::InterruptId::GfxEop);
+                    });
                 };
                 // Throttle on the end-of-frame style fences that raise an interrupt.
                 const bool throttle = event_eop->int_sel != InterruptSelect::None;
@@ -900,7 +1347,7 @@ Liverpool::Task Liverpool::ProcessGraphics(std::span<const u32> dcb) {
                 ASSERT(dma_data->command.das == 0);
                 if (dma_data->dst_sel == DmaDataDst::Memory ||
                     dma_data->dst_sel == DmaDataDst::MemoryUsingL2) {
-                    ForgetDeferredLabels(dma_data->DstAddress<VAddr>(), dma_data->NumBytes());
+                    OrderCpWrite(dma_data->DstAddress<VAddr>(), dma_data->NumBytes());
                 }
                 if (dma_data->src_sel == DmaDataSrc::Data && dma_data->dst_sel == DmaDataDst::Gds) {
                     rasterizer->FillBuffer(dma_data->dst_addr_lo, dma_data->NumBytes(),
@@ -942,7 +1389,7 @@ Liverpool::Task Liverpool::ProcessGraphics(std::span<const u32> dcb) {
                     if (rasterizer) {
                         rasterizer->OnFence();
                     }
-                    ForgetDeferredLabels(std::bit_cast<VAddr>(address), data_size);
+                    OrderCpWrite(std::bit_cast<VAddr>(address), data_size);
                     std::memcpy(address, write_data->data, data_size);
                 } else {
                     UNREACHABLE();
@@ -962,30 +1409,37 @@ Liverpool::Task Liverpool::ProcessGraphics(std::span<const u32> dcb) {
             case PM4ItOpcode::MemSemaphore: {
                 const auto* mem_semaphore = reinterpret_cast<const PM4CmdMemSemaphore*>(header);
                 if (mem_semaphore->IsSignaling()) {
+                    OrderCpWrite(mem_semaphore->Address<VAddr>(), sizeof(u64));
                     mem_semaphore->Signal();
                 } else {
+                    ForgetStreamCopies();
                     while (!mem_semaphore->Signaled()) {
-                        YIELD_GFX();
+                        WAIT_YIELD(YIELD_GFX());
                     }
                     mem_semaphore->Decrement();
                 }
                 break;
             }
             case PM4ItOpcode::AcquireMem: {
+                // On hardware this invalidates the GPU's caches, so later reads see memory as
+                // it is now.
+                ForgetStreamCopies();
                 // const auto* acquire_mem = reinterpret_cast<PM4CmdAcquireMem*>(header);
                 break;
             }
             case PM4ItOpcode::Rewind: {
+                ForgetStreamCopies();
                 if (!rasterizer) {
                     break;
                 }
                 const PM4CmdRewind* rewind = reinterpret_cast<const PM4CmdRewind*>(header);
                 while (!rewind->Valid()) {
-                    YIELD_GFX();
+                    WAIT_YIELD(YIELD_GFX());
                 }
                 break;
             }
             case PM4ItOpcode::WaitRegMem: {
+                ForgetStreamCopies();
                 const auto* wait_reg_mem = reinterpret_cast<const PM4CmdWaitRegMem*>(header);
                 // ASSERT(wait_reg_mem->engine.Value() == PM4CmdWaitRegMem::Engine::Me);
                 // Optimization: VO label waits are special because the emulator
@@ -995,11 +1449,13 @@ Liverpool::Task Liverpool::ProcessGraphics(std::span<const u32> dcb) {
                 const u64* wait_addr = wait_reg_mem->Address<u64*>();
                 if (vo_port->IsVoLabel(wait_addr) &&
                     num_submits == mapped_queues[GfxQueueId].submits.size()) {
+                    const VideoCore::PerfStats::ScopedCost cost{
+                        VideoCore::PerfStats::Cost::Presents};
                     vo_port->WaitVoLabel([&] { return wait_reg_mem->Test(regs.reg_array); });
                     break;
                 }
                 while (!TestWait(wait_reg_mem)) {
-                    YIELD_GFX();
+                    WAIT_YIELD(YIELD_GFX());
                 }
                 break;
             }
@@ -1020,7 +1476,7 @@ Liverpool::Task Liverpool::ProcessGraphics(std::span<const u32> dcb) {
                 RESUME_GFX(task);
 
                 while (!task.handle.done()) {
-                    YIELD_GFX();
+                    WAIT_YIELD(YIELD_GFX());
                     RESUME_GFX(task);
                 }
                 break;
@@ -1030,8 +1486,9 @@ Liverpool::Task Liverpool::ProcessGraphics(std::span<const u32> dcb) {
                 break;
             }
             case PM4ItOpcode::WaitOnCeCounter: {
+                ForgetStreamCopies();
                 while (cblock.ce_count <= cblock.de_count) {
-                    YIELD_GFX();
+                    WAIT_YIELD(YIELD_GFX());
                 }
                 break;
             }
@@ -1115,6 +1572,7 @@ Liverpool::Task Liverpool::ProcessGraphics(std::span<const u32> dcb) {
 template <bool is_indirect>
 Liverpool::Task Liverpool::ProcessCompute(std::span<const u32> acb, u32 vqid) {
     FIBER_ENTER(acb_task_name[vqid]);
+    ForgetStreamCopies();
     auto& queue = asc_queues[{vqid}];
 
     struct IndirectPatch {
@@ -1194,7 +1652,7 @@ Liverpool::Task Liverpool::ProcessCompute(std::span<const u32> acb, u32 vqid) {
             RESUME_ASC(task, vqid);
 
             while (!task.handle.done()) {
-                YIELD_ASC(vqid);
+                WAIT_YIELD(YIELD_ASC(vqid));
                 RESUME_ASC(task, vqid);
             }
             break;
@@ -1207,7 +1665,7 @@ Liverpool::Task Liverpool::ProcessCompute(std::span<const u32> acb, u32 vqid) {
             ASSERT(dma_data->command.das == 0);
             if (dma_data->dst_sel == DmaDataDst::Memory ||
                 dma_data->dst_sel == DmaDataDst::MemoryUsingL2) {
-                ForgetDeferredLabels(dma_data->DstAddress<VAddr>(), dma_data->NumBytes());
+                OrderCpWrite(dma_data->DstAddress<VAddr>(), dma_data->NumBytes());
             }
             if (dma_data->src_sel == DmaDataSrc::Data && dma_data->dst_sel == DmaDataDst::Gds) {
                 rasterizer->FillBuffer(dma_data->dst_addr_lo, dma_data->NumBytes(), dma_data->data,
@@ -1250,6 +1708,7 @@ Liverpool::Task Liverpool::ProcessCompute(std::span<const u32> acb, u32 vqid) {
             break;
         }
         case PM4ItOpcode::AcquireMem: {
+            ForgetStreamCopies();
             break;
         }
         case PM4ItOpcode::Rewind: {
@@ -1258,7 +1717,7 @@ Liverpool::Task Liverpool::ProcessCompute(std::span<const u32> acb, u32 vqid) {
             }
             const PM4CmdRewind* rewind = reinterpret_cast<const PM4CmdRewind*>(header);
             while (!rewind->Valid()) {
-                YIELD_ASC(vqid);
+                WAIT_YIELD(YIELD_ASC(vqid));
             }
             break;
         }
@@ -1337,7 +1796,7 @@ Liverpool::Task Liverpool::ProcessCompute(std::span<const u32> acb, u32 vqid) {
                 if (rasterizer) {
                     rasterizer->OnFence();
                 }
-                ForgetDeferredLabels(write_data->Address<VAddr>(), data_size);
+                OrderCpWrite(write_data->Address<VAddr>(), data_size);
                 std::memcpy(write_data->Address<void*>(), write_data->data, data_size);
             } else {
                 UNREACHABLE();
@@ -1347,24 +1806,28 @@ Liverpool::Task Liverpool::ProcessCompute(std::span<const u32> acb, u32 vqid) {
         case PM4ItOpcode::MemSemaphore: {
             const auto* mem_semaphore = reinterpret_cast<const PM4CmdMemSemaphore*>(header);
             if (mem_semaphore->IsSignaling()) {
+                OrderCpWrite(mem_semaphore->Address<VAddr>(), sizeof(u64));
                 mem_semaphore->Signal();
             } else {
+                ForgetStreamCopies();
                 while (!mem_semaphore->Signaled()) {
-                    YIELD_ASC(vqid);
+                    WAIT_YIELD(YIELD_ASC(vqid));
                 }
                 mem_semaphore->Decrement();
             }
             break;
         }
         case PM4ItOpcode::WaitRegMem: {
+            ForgetStreamCopies();
             const auto* wait_reg_mem = reinterpret_cast<const PM4CmdWaitRegMem*>(header);
             ASSERT(wait_reg_mem->engine.Value() == PM4CmdWaitRegMem::Engine::Me);
             while (!TestWait(wait_reg_mem)) {
-                YIELD_ASC(vqid);
+                WAIT_YIELD(YIELD_ASC(vqid));
             }
             break;
         }
         case PM4ItOpcode::ReleaseMem: {
+            ForgetStreamCopies();
             const auto* release_mem = reinterpret_cast<const PM4CmdReleaseMem*>(header);
             const auto signal_irq = [pipe_id = queue.pipe_id] {
                 Platform::IrqC::Instance()->Signal(static_cast<Platform::InterruptId>(pipe_id));
@@ -1380,20 +1843,16 @@ Liverpool::Task Liverpool::ProcessCompute(std::span<const u32> acb, u32 vqid) {
                     [] {}, [](VAddr, u16, u16) {});
             }
             const bool deferred =
-                deferrable &&
-                DeferFenceSignal(
-                    [rel = *release_mem, signal_irq] {
-                        // Unlike the immediate path's memcpy, this skips write tracking: on the
-                        // priority thread a write fault would wait on the GPU thread. So the
-                        // buffer cache doesn't see the label change, as for EOP labels.
-                        rel.SignalFence(
-                            [](void* address, u64 data, u32 num_bytes) {
-                                auto* memory = Core::Memory::Instance();
-                                ASSERT(memory->TryWriteBacking(address, &data, num_bytes));
-                            },
-                            signal_irq, [](VAddr, u16, u16) { UNREACHABLE(); });
-                    },
-                    false, writes);
+                deferrable && DeferFenceSignal(
+                                  [rel = *release_mem, signal_irq] {
+                                      // Unlike the immediate path's memcpy, this skips write
+                                      // tracking: on the priority thread a write fault would wait
+                                      // on the GPU thread. So the buffer cache doesn't see the
+                                      // label change, as for EOP labels.
+                                      rel.SignalFence(WriteFenceLabel, signal_irq,
+                                                      [](VAddr, u16, u16) { UNREACHABLE(); });
+                                  },
+                                  false, writes);
             if (!deferred) {
                 if (rasterizer) {
                     rasterizer->OnFence();

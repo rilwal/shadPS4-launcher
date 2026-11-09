@@ -1,7 +1,12 @@
 // SPDX-FileCopyrightText: Copyright 2025 shadPS4 Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+#include <chrono>
+#include <cstdlib>
+#include <cstring>
+
 #include "common/alignment.h"
+#include "common/logging/log.h"
 #include "video_core/buffer_cache/buffer.h"
 #include "video_core/renderer_vulkan/liverpool_to_vk.h"
 #include "video_core/renderer_vulkan/vk_instance.h"
@@ -108,8 +113,104 @@ void Runtime::TickFrame() {
     staging_pool.TickFrame();
 }
 
+void Runtime::RunCopyBench() {
+    const char* env = std::getenv("SHADPS4_COPY_BENCH");
+    if (!env || env[0] != '1') {
+        return;
+    }
+    using VideoCore::MemoryType;
+    constexpr u64 Size = 256_MB;
+    constexpr int Rounds = 4;
+    const auto gbps = [](double ms) { return double(Size) / (ms * 1e6); };
+    const auto now = [] { return std::chrono::steady_clock::now(); };
+    const auto ms_since = [&](auto start) {
+        return std::chrono::duration<double, std::milli>(now() - start).count();
+    };
+
+    VideoCore::Buffer host{instance, 0, Size, MemoryType::HostUncached, "CopyBench:HostUncached"};
+    VideoCore::Buffer cached{instance, 0, Size, MemoryType::HostCached, "CopyBench:HostCached"};
+    VideoCore::Buffer stream{instance, 0, Size, MemoryType::Stream, "CopyBench:Stream"};
+    VideoCore::Buffer device_a{instance, 0, Size, MemoryType::DeviceLocal, "CopyBench:DeviceA"};
+    VideoCore::Buffer device_b{instance, 0, Size, MemoryType::DeviceLocal, "CopyBench:DeviceB"};
+
+    std::vector<u8> source(Size);
+    for (u64 i = 0; i < Size; i += 4096) {
+        source[i] = u8(i >> 12);
+    }
+    const auto cpu_write = [&](VideoCore::Buffer& buffer, std::string_view name) {
+        if (buffer.mapped_data.empty()) {
+            LOG_INFO(Render_Vulkan, "Copy bench: {} is not host visible", name);
+            return;
+        }
+        double best = 1e9;
+        for (int round = 0; round < Rounds; ++round) {
+            const auto start = now();
+            std::memcpy(buffer.mapped_data.data(), source.data(), Size);
+            best = std::min(best, ms_since(start));
+        }
+        LOG_INFO(Render_Vulkan, "Copy bench: CPU memcpy into {} {:.1f} GB/s ({:.1f} ms)", name,
+                 gbps(best), best);
+    };
+    cpu_write(host, "HostUncached");
+    cpu_write(stream, "Stream");
+
+    const auto gpu_copy = [&](VideoCore::Buffer& src, VideoCore::Buffer& dst,
+                              std::string_view name) {
+        double best = 1e9;
+        for (int round = 0; round < Rounds; ++round) {
+            scheduler.Finish();
+            const auto start = now();
+            const vk::BufferCopy copy{0, 0, Size};
+            scheduler.CommandBuffer().copyBuffer(src.Handle(), dst.Handle(), copy);
+            scheduler.Finish();
+            best = std::min(best, ms_since(start));
+        }
+        LOG_INFO(Render_Vulkan, "Copy bench: GPU copy {} {:.1f} GB/s ({:.1f} ms)", name, gbps(best),
+                 best);
+    };
+    gpu_copy(host, device_a, "HostUncached -> DeviceLocal");
+    gpu_copy(stream, device_a, "Stream -> DeviceLocal");
+    gpu_copy(device_a, device_b, "DeviceLocal -> DeviceLocal");
+    gpu_copy(device_a, cached, "DeviceLocal -> HostCached");
+
+    // Many small copies, like buffer cache uploads of scattered dirty pages.
+    for (const u64 chunk : {u64(4_KB), u64(64_KB), u64(1_MB)}) {
+        std::vector<vk::BufferCopy> copies;
+        for (u64 offset = 0; offset < Size; offset += chunk * 2) {
+            copies.push_back({offset, offset, chunk});
+        }
+        double best = 1e9;
+        for (int round = 0; round < Rounds; ++round) {
+            scheduler.Finish();
+            const auto start = now();
+            scheduler.CommandBuffer().copyBuffer(host.Handle(), device_a.Handle(), copies);
+            scheduler.Finish();
+            best = std::min(best, ms_since(start));
+        }
+        LOG_INFO(Render_Vulkan,
+                 "Copy bench: GPU copy HostUncached -> DeviceLocal in {} KB pieces {:.1f} GB/s "
+                 "({} copies, {:.1f} ms)",
+                 chunk / 1024, double(Size / 2) / (best * 1e6), copies.size(), best);
+    }
+}
+
 void Runtime::CopyBuffer(const VideoCore::Buffer* src, const VideoCore::Buffer* dst,
                          std::span<const vk::BufferCopy> copies) {
+    const auto in_host = [](const VideoCore::Buffer* buffer) {
+        // Stream buffers are written by the CPU and sit in host memory once BAR space runs out.
+        return buffer->mem_type == VideoCore::MemoryType::HostUncached ||
+               buffer->mem_type == VideoCore::MemoryType::HostCached ||
+               buffer->mem_type == VideoCore::MemoryType::Stream;
+    };
+    const auto kind = in_host(src)   ? Scheduler::GpuSection::BufferUploads
+                      : in_host(dst) ? Scheduler::GpuSection::BufferDownloads
+                                     : Scheduler::GpuSection::BufferCopies;
+    const Scheduler::ScopedGpuSection gpu_section{scheduler, kind};
+    u64 bytes{};
+    for (const auto& copy : copies) {
+        bytes += copy.size;
+    }
+    scheduler.AddGpuSectionBytes(bytes);
     scheduler.EndRendering();
 
     bool needs_flush{};
@@ -133,6 +234,7 @@ void Runtime::CopyBuffer(const VideoCore::Buffer* src, const VideoCore::Buffer* 
 }
 
 void Runtime::FillBuffer(const VideoCore::Buffer* dst, u64 offset, u64 size, u32 value) {
+    const Scheduler::ScopedGpuSection gpu_section{scheduler, Scheduler::GpuSection::BufferCopies};
     scheduler.EndRendering();
 
     if (IsBufferAccessed(dst, offset, size, true)) {
@@ -147,6 +249,7 @@ void Runtime::FillBuffer(const VideoCore::Buffer* dst, u64 offset, u64 size, u32
 }
 
 void Runtime::InlineData(VideoCore::Buffer* dst, u64 offset, u32 value) {
+    const Scheduler::ScopedGpuSection gpu_section{scheduler, Scheduler::GpuSection::BufferCopies};
     scheduler.EndRendering();
 
     if (IsBufferAccessed(dst, offset, sizeof(value), true)) {
@@ -170,6 +273,8 @@ bool Runtime::Transit(VideoCore::Image* image, vk::ImageLayout dst_layout,
 
 void Runtime::UploadImage(VideoCore::Image* dst, const VideoCore::Buffer* src,
                           std::span<const vk::BufferImageCopy> upload_copies) {
+    const Scheduler::ScopedGpuSection gpu_section{scheduler, Scheduler::GpuSection::ImageUploads};
+    scheduler.AddGpuSectionBytes(dst->info.guest_size);
     SetBackingSamples(dst, dst->info.num_samples, false);
     scheduler.EndRendering();
 
@@ -199,6 +304,7 @@ void Runtime::UploadImage(VideoCore::Image* dst, const VideoCore::Buffer* src,
 
 void Runtime::DownloadImage(VideoCore::Image* src, const VideoCore::Buffer* dst,
                             std::span<const vk::BufferImageCopy> download_copies) {
+    const Scheduler::ScopedGpuSection gpu_section{scheduler, Scheduler::GpuSection::ImageDownloads};
     SetBackingSamples(src, src->info.num_samples);
     scheduler.EndRendering();
 
@@ -225,6 +331,7 @@ void Runtime::DownloadImage(VideoCore::Image* src, const VideoCore::Buffer* dst,
 }
 
 void Runtime::CopyImage(VideoCore::Image* src, VideoCore::Image* dst) {
+    const Scheduler::ScopedGpuSection gpu_section{scheduler, Scheduler::GpuSection::ImageCopies};
     const u32 num_mips = std::min(src->info.resources.levels, dst->info.resources.levels);
 
     // Format mismatch warning (safe but useful)
@@ -324,6 +431,7 @@ void Runtime::CopyImage(VideoCore::Image* src, VideoCore::Image* dst) {
 
 void Runtime::CopyImageWithBuffer(VideoCore::Image* src, VideoCore::Image* dst,
                                   const VideoCore::Buffer* buffer, u64 offset) {
+    const Scheduler::ScopedGpuSection gpu_section{scheduler, Scheduler::GpuSection::ImageCopies};
     const u32 num_mips = std::min(src->info.resources.levels, dst->info.resources.levels);
     const u32 num_layers = std::min(src->info.resources.layers, dst->info.resources.layers);
 
@@ -397,6 +505,7 @@ void Runtime::CopyImageWithBuffer(VideoCore::Image* src, VideoCore::Image* dst,
 }
 
 void Runtime::CopyMip(VideoCore::Image* src, VideoCore::Image* dst, u32 mip, u32 slice) {
+    const Scheduler::ScopedGpuSection gpu_section{scheduler, Scheduler::GpuSection::ImageCopies};
     const auto dst_dim = dst->info.props.is_block ? 2 : 0;
     const auto mip_block_w = std::max(dst->info.size.width >> (mip + dst_dim), 1u);
     const auto mip_block_h = std::max(dst->info.size.height >> (mip + dst_dim), 1u);
@@ -449,6 +558,7 @@ void Runtime::CopyMip(VideoCore::Image* src, VideoCore::Image* dst, u32 mip, u32
 }
 
 void Runtime::CopyColorAndDepth(VideoCore::Image* src, VideoCore::Image* dst) {
+    const Scheduler::ScopedGpuSection gpu_section{scheduler, Scheduler::GpuSection::ImageCopies};
     if (src->info.num_samples == 1 && dst->info.num_samples == 1) {
         if ((instance.IsMaintenance8Supported() ||
              src->info.props.is_depth == dst->info.props.is_depth) &&
@@ -485,6 +595,7 @@ void Runtime::CopyColorAndDepth(VideoCore::Image* src, VideoCore::Image* dst) {
 
 void Runtime::CopyDepthStencil(VideoCore::Image* src, VideoCore::Image* dst,
                                const VideoCore::SubresourceRange& sub_range) {
+    const Scheduler::ScopedGpuSection gpu_section{scheduler, Scheduler::GpuSection::ImageCopies};
     scheduler.EndRendering();
 
     bool needs_flush =
@@ -527,6 +638,7 @@ void Runtime::CopyDepthStencil(VideoCore::Image* src, VideoCore::Image* dst,
 void Runtime::ResolveImage(VideoCore::Image* src, VideoCore::Image* dst,
                            const VideoCore::SubresourceRange& src_range,
                            const VideoCore::SubresourceRange& dst_range) {
+    const Scheduler::ScopedGpuSection gpu_section{scheduler, Scheduler::GpuSection::ImageResolves};
     SetBackingSamples(dst, 1, false);
     scheduler.EndRendering();
 
@@ -592,6 +704,7 @@ void Runtime::ResolveImage(VideoCore::Image* src, VideoCore::Image* dst,
 
 void Runtime::ClearImage(VideoCore::Image* dst, const VideoCore::SubresourceRange& range,
                          const vk::ClearValue& clear_value) {
+    const Scheduler::ScopedGpuSection gpu_section{scheduler, Scheduler::GpuSection::ImageClears};
     scheduler.EndRendering();
 
     const bool needs_flush =

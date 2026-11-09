@@ -63,6 +63,11 @@ void EmitGetMaskLaneVariable(EmitContext& ctx);
 void EmitSetScc(EmitContext& ctx);
 Id EmitReadConst(EmitContext& ctx, IR::Inst* inst, Id addr, Id offset);
 Id EmitReadConstBuffer(EmitContext& ctx, u32 handle, Id index);
+Id EmitBufferStride(EmitContext& ctx, u32 handle);
+Id EmitBufferFormat(EmitContext& ctx, u32 handle);
+Id EmitImageSwizzle(EmitContext& ctx, u32 image_index);
+Id EmitTargetSwizzle(EmitContext& ctx, u32 target);
+Id EmitVertexFormat(EmitContext& ctx, u32 index);
 Id EmitLoadBufferU8(EmitContext& ctx, IR::Inst* inst, u32 handle, Id address);
 Id EmitLoadBufferU16(EmitContext& ctx, IR::Inst* inst, u32 handle, Id address);
 Id EmitLoadBufferU32(EmitContext& ctx, IR::Inst* inst, u32 handle, Id address);
@@ -447,7 +452,7 @@ Id EmitImageGather(EmitContext& ctx, IR::Inst* inst, u32 handle, Id coords,
 Id EmitImageGatherDref(EmitContext& ctx, IR::Inst* inst, u32 handle, Id coords,
                        const IR::Value& offset, Id dref);
 Id EmitImageQueryDimensions(EmitContext& ctx, IR::Inst* inst, u32 handle, Id lod, bool skip_mips);
-Id EmitImageQueryLod(EmitContext& ctx, IR::Inst* inst, u32 handle, Id coords);
+Id EmitImageQueryLod(EmitContext& ctx, IR::Inst* inst, u32 handle, Id coords, u32 sampler);
 Id EmitImageGradient(EmitContext& ctx, IR::Inst* inst, u32 handle, Id coords, Id derivatives_dx,
                      Id derivatives_dy, const IR::Value& offset, const IR::Value& lod_clamp);
 Id EmitImageRead(EmitContext& ctx, IR::Inst* inst, u32 handle, Id coords, Id lod, Id ms);

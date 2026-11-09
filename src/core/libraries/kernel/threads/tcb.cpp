@@ -72,7 +72,8 @@ void TcbDtor(Core::Tcb* oldtls) {
     const u32 static_tls_size = linker->StaticTlsSize();
     u8* tls_base = (u8*)oldtls - static_tls_size;
 
-    for (int i = 1; i < num_dtvs; i++) {
+    // Module indices run from 1 to num_dtvs; entry i + 1 holds module i's block.
+    for (u32 i = 1; i <= num_dtvs; i++) {
         u8* dtv_ptr = dtv_table[i + 1].pointer;
         if (dtv_ptr && (dtv_ptr < tls_base || (const u8*)oldtls < dtv_ptr)) {
             linker->FreeTlsForNonPrimaryThread(dtv_ptr);

@@ -7,6 +7,7 @@
 #include "shader_recompiler/frontend/fetch_shader.h"
 #include "shader_recompiler/ir/attribute.h"
 #include "shader_recompiler/ir/microinstruction.h"
+#include "shader_recompiler/runtime_buffer_format.h"
 #include "shader_recompiler/runtime_info.h"
 
 #include <boost/container/static_vector.hpp>
@@ -245,11 +246,17 @@ void EmitContext::DefineBufferProperties() {
             continue;
         }
 
-        const u32 half = PushData::BufOffsetIndex + (binding >> 4);
         const u32 comp = (binding & 0xf) >> 2;
         const u32 offset = (binding & 0x3) << 3;
-        const Id ptr{OpAccessChain(TypePointer(spv::StorageClass::PushConstant, U32[1]),
-                                   push_data_block, ConstU32(half), ConstU32(comp))};
+        // With the descriptor heap, offsets come from the stage's own table, since push data is
+        // shared by every stage and each stage numbers its buffers from 0.
+        const bool from_table = profile.uses_descriptor_heap;
+        const u32 half = (from_table ? 0 : PushData::BufOffsetIndex) + (binding >> 4);
+        const auto storage_class =
+            from_table ? spv::StorageClass::Uniform : spv::StorageClass::PushConstant;
+        const Id ptr{OpAccessChain(TypePointer(storage_class, U32[1]),
+                                   from_table ? stage_table_block : push_data_block, ConstU32(half),
+                                   ConstU32(comp))};
         const Id value{OpLoad(U32[1], ptr)};
 
         const Id buf_offset{OpBitFieldUExtract(U32[1], value, ConstU32(offset), ConstU32(8U))};
@@ -343,14 +350,18 @@ void EmitContext::DefineInputs() {
         for (u32 semantic = 0; semantic < fetch_shader.attributes.size(); ++semantic) {
             const auto& attrib = fetch_shader.attributes[semantic];
             const auto sharp = attrib.GetSharp(info);
-            const Id type{GetAttributeType(*this, sharp.GetNumberFmt())[4]};
+            // A runtime format takes the element's raw bits, which the fetch converts.
+            const auto num_format = UsesRuntimeVertexFormat(profile.runtime_vertex_formats, sharp)
+                                        ? AmdGpu::NumberFormat::Uint
+                                        : sharp.GetNumberFmt();
+            const Id type{GetAttributeType(*this, num_format)[4]};
             Id id{DefineInput(type, semantic)};
             if (attrib.GetStepRate() != Gcn::VertexAttribute::InstanceIdType::None) {
                 Name(id, fmt::format("vs_instance_attr{}", semantic));
             } else {
                 Name(id, fmt::format("vs_in_attr{}", semantic));
             }
-            input_params[semantic] = GetAttributeInfo(sharp.GetNumberFmt(), id, 4, false);
+            input_params[semantic] = GetAttributeInfo(num_format, id, 4, false);
         }
         break;
     }
@@ -788,6 +799,63 @@ void EmitContext::DefinePushDataBlock() {
     push_data_block = DefineVar(struct_type, spv::StorageClass::PushConstant);
     Name(push_data_block, "push_data");
     interfaces.push_back(push_data_block);
+
+    if (profile.uses_descriptor_heap) {
+        DefineStageTable();
+    }
+}
+
+void EmitContext::DefineStageTable() {
+    static_assert(StageTable::BufOffsetsSize == 4 * 16);
+    static_assert(StageTable::StridesOffset == StageTable::StridesMember * 16);
+    static_assert(StageTable::FormatsOffset == StageTable::FormatsMember * 16);
+    static_assert(StageTable::ImageSwizzlesMember == StageTable::FormatsMember + 1);
+    static_assert(StageTable::ImageSwizzlesSize % 16 == 0);
+    static_assert(StageTable::TargetSwizzlesMember == StageTable::ImageSwizzlesMember + 1);
+    static_assert(StageTable::TargetSwizzlesSize % 16 == 0);
+    static_assert(StageTable::VertexFormatsMember == StageTable::TargetSwizzlesMember + 1);
+    static_assert(StageTable::NumVertexFormats == IR::NumParams);
+    std::array<Id, StageTable::VertexFormatsMember + 1> members;
+    members.fill(U32[4]);
+    const auto define_array = [&](u32 size) {
+        const Id type{TypeArray(U32[4], ConstU32(size / 16))};
+        Decorate(type, spv::Decoration::ArrayStride, 16U);
+        return type;
+    };
+    members[StageTable::FormatsMember] = define_array(StageTable::FormatsSize);
+    members[StageTable::ImageSwizzlesMember] = define_array(StageTable::ImageSwizzlesSize);
+    members[StageTable::TargetSwizzlesMember] = define_array(StageTable::TargetSwizzlesSize);
+    members[StageTable::VertexFormatsMember] = define_array(StageTable::VertexFormatsSize);
+    const Id table_type{Name(TypeStruct(members), "StageTable")};
+    Decorate(table_type, spv::Decoration::Block);
+    for (u32 i = 0; i < members.size(); ++i) {
+        std::string name;
+        u32 offset = i * 16;
+        if (i < StageTable::StridesMember) {
+            name = fmt::format("buf_offsets{}", i);
+        } else if (i < StageTable::FormatsMember) {
+            name = fmt::format("strides{}", i - StageTable::StridesMember);
+        } else if (i == StageTable::FormatsMember) {
+            name = "formats";
+            offset = StageTable::FormatsOffset;
+        } else if (i == StageTable::ImageSwizzlesMember) {
+            name = "image_swizzles";
+            offset = StageTable::ImageSwizzlesOffset;
+        } else if (i == StageTable::TargetSwizzlesMember) {
+            name = "target_swizzles";
+            offset = StageTable::TargetSwizzlesOffset;
+        } else {
+            name = "vertex_formats";
+            offset = StageTable::VertexFormatsOffset;
+        }
+        MemberName(table_type, i, name);
+        MemberDecorate(table_type, i, spv::Decoration::Offset, offset);
+    }
+    stage_table_block = DefineVar(table_type, spv::StorageClass::Uniform);
+    Decorate(stage_table_block, spv::Decoration::DescriptorSet, StageTable::DescriptorSet);
+    Decorate(stage_table_block, spv::Decoration::Binding, StageTable::Binding);
+    Name(stage_table_block, "stage_table");
+    interfaces.push_back(stage_table_block);
 }
 
 EmitContext::BufferSpv EmitContext::DefineBuffer(bool is_written, bool is_coherent, u32 elem_shift,

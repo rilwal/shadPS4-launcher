@@ -5,6 +5,7 @@
 
 #include "video_core/renderer_vulkan/vk_common.h"
 #include "video_core/renderer_vulkan/vk_pipeline_common.h"
+#include "video_core/renderer_vulkan/vk_pipeline_compiler.h"
 
 namespace VideoCore {
 class BufferCache;
@@ -47,7 +48,8 @@ public:
     ComputePipeline(const Instance& instance, Scheduler& scheduler, DescriptorHeap& desc_heap,
                     const Shader::Profile& profile, vk::PipelineCache pipeline_cache,
                     ComputePipelineKey compute_key, const Shader::Info& info,
-                    vk::ShaderModule module, SerializationSupport& sdata, bool preloading);
+                    vk::ShaderModule module, SerializationSupport& sdata, bool preloading,
+                    PipelineCompiler* compiler = nullptr);
     ~ComputePipeline();
 
 private:

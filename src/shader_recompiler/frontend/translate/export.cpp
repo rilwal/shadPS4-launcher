@@ -103,6 +103,28 @@ void Translator::ExportRenderTarget(const GcnInst& inst) {
                                     color_buffer.data_format == AmdGpu::DataFormat::Format8_8 ||
                                     color_buffer.data_format == AmdGpu::DataFormat::Format8_8_8_8);
 
+    if (profile.runtime_target_swizzles) {
+        // The target's swizzle comes from the stage table, so one shader serves targets of any
+        // component order. Every component is written; the unexported ones are undefined on
+        // the GPU too.
+        std::array<IR::F32, 4> filled;
+        for (u32 i = 0; i < 4; ++i) {
+            filled[i] = components[i].IsEmpty() ? ir.Imm32(0.f) : components[i];
+        }
+        const auto swizzled = IR::ApplyRuntimeSwizzle(
+            ir, ir.CompositeConstruct(filled[0], filled[1], filled[2], filled[3]),
+            ir.TargetSwizzle(ir.Imm32(color_buffer_idx)), 0);
+        for (u32 i = 0; i < 4; ++i) {
+            auto converted = ApplyWriteNumberConversion(
+                ir, IR::F32{ir.CompositeExtract(swizzled, i)}, color_buffer.num_conversion);
+            if (needs_unorm_fixup) {
+                converted = ir.FPSub(converted, ir.Imm32(1.f / 127500.f));
+            }
+            ir.SetAttribute(mrt, converted, i);
+        }
+        return;
+    }
+
     // Swizzle components and export
     for (u32 i = 0; i < 4; ++i) {
         const auto swizzled_comp = components[color_buffer.swizzle.Map(i)];

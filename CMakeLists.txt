@@ -799,6 +799,7 @@ set(COMMON src/common/logging/classes.cpp
            src/common/arch.h
            src/common/assert.cpp
            src/common/assert.h
+           src/common/soft_assert.h
            src/common/bit_field.h
            src/common/bounded_threadsafe_queue.h
            src/common/concepts.h
@@ -841,6 +842,7 @@ set(COMMON src/common/logging/classes.cpp
            src/common/slot_vector.h
            src/common/spin_lock.cpp
            src/common/spin_lock.h
+           src/common/spin_park_mutex.h
            src/common/stb.cpp
            src/common/stb.h
            src/common/string_literal.h
@@ -998,6 +1000,8 @@ set(CORE src/core/aerolib/stubs.cpp
          src/core/debug_state.h
          src/core/debugger.cpp
          src/core/debugger.h
+         src/core/fault_load.cpp
+         src/core/fault_load.h
          src/core/linker.cpp
          src/core/linker.h
          src/core/memory.cpp
@@ -1034,6 +1038,7 @@ set(SHADER_RECOMPILER src/shader_recompiler/profile.h
                       src/shader_recompiler/recompiler.cpp
                       src/shader_recompiler/recompiler.h
                       src/shader_recompiler/resource.h
+                      src/shader_recompiler/runtime_buffer_format.h
                       src/shader_recompiler/info.h
                       src/shader_recompiler/params.h
                       src/shader_recompiler/runtime_info.h
@@ -1177,6 +1182,8 @@ set(VIDEO_CORE src/video_core/amdgpu/cb_db_extent.h
                src/video_core/buffer_cache/region_definitions.h
                src/video_core/buffer_cache/region_manager.h
                src/video_core/renderer_vulkan/liverpool_to_vk.cpp
+               src/video_core/renderer_vulkan/shader_guess.cpp
+               src/video_core/renderer_vulkan/shader_guess.h
                src/video_core/renderer_vulkan/liverpool_to_vk.h
                src/video_core/renderer_vulkan/vk_common.cpp
                src/video_core/renderer_vulkan/vk_common.h
@@ -1190,6 +1197,8 @@ set(VIDEO_CORE src/video_core/amdgpu/cb_db_extent.h
                src/video_core/renderer_vulkan/vk_pipeline_cache.h
                src/video_core/renderer_vulkan/vk_pipeline_common.cpp
                src/video_core/renderer_vulkan/vk_pipeline_common.h
+               src/video_core/renderer_vulkan/vk_pipeline_compiler.cpp
+               src/video_core/renderer_vulkan/vk_pipeline_compiler.h
                src/video_core/renderer_vulkan/vk_pipeline_serialization.cpp
                src/video_core/renderer_vulkan/vk_pipeline_serialization.h
                src/video_core/renderer_vulkan/vk_platform.cpp
@@ -1200,6 +1209,14 @@ set(VIDEO_CORE src/video_core/amdgpu/cb_db_extent.h
                src/video_core/renderer_vulkan/vk_rasterizer.h
                src/video_core/renderer_vulkan/vk_resource_pool.cpp
                src/video_core/renderer_vulkan/vk_resource_pool.h
+               src/video_core/renderer_vulkan/vk_resource_heaps.cpp
+               src/video_core/renderer_vulkan/vk_resource_heaps.h
+               src/video_core/renderer_vulkan/vk_shader_objects.cpp
+               src/video_core/shader_list.cpp
+               src/video_core/shader_list.h
+               src/video_core/shader_scanner.cpp
+               src/video_core/shader_scanner.h
+               src/video_core/renderer_vulkan/vk_shader_objects.h
                src/video_core/renderer_vulkan/vk_runtime.cpp
                src/video_core/renderer_vulkan/vk_runtime.h
                src/video_core/renderer_vulkan/vk_scheduler.cpp
@@ -1239,6 +1256,7 @@ set(VIDEO_CORE src/video_core/amdgpu/cb_db_extent.h
                src/video_core/cache_storage.h
                src/video_core/page_manager.cpp
                src/video_core/page_manager.h
+               src/video_core/perf_stats.h
                src/video_core/renderdoc.cpp
                src/video_core/renderdoc.h
 )
@@ -1374,6 +1392,24 @@ target_link_libraries(shadps4 PRIVATE libprotobuf)
 target_link_libraries(shadps4 PRIVATE ZArchive::zarchive)
 target_link_libraries(shadps4 PRIVATE zstd::libzstd)
 target_link_libraries(shadps4 PRIVATE launcher_client)
+
+# Runs the shader recompiler on a game's saved shaders, without the rest of the emulator: for
+# timing translation and scoring guesses (src/shader_tool/main.cpp). `ninja shader_tool`.
+add_executable(shader_tool EXCLUDE_FROM_ALL
+    ${SHADER_RECOMPILER}
+    src/common/decoder.cpp
+    src/common/number_utils.cpp
+    src/shader_tool/main.cpp
+    src/shader_tool/support.cpp
+    src/video_core/amdgpu/pixel_format.cpp
+    src/video_core/renderer_vulkan/liverpool_to_vk.cpp
+    src/video_core/renderer_vulkan/shader_guess.cpp
+    src/video_core/shader_list.cpp
+)
+target_include_directories(shader_tool PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+target_link_libraries(shader_tool PRIVATE magic_enum::magic_enum fmt::fmt tsl::robin_map xbyak::xbyak
+    half::half Boost::headers sirit Vulkan::Headers xxHash::xxhash Zydis::Zydis zstd::libzstd
+    nlohmann_json::nlohmann_json)
 target_include_directories(shadps4 PRIVATE "${SHADNET_PROTO_OUT}")
 
 if (${CMAKE_SYSTEM_NAME} STREQUAL "FreeBSD")

@@ -8,6 +8,7 @@
 #include "common/assert.h"
 #include "common/debug.h"
 #include "common/types.h"
+#include "core/emulator_settings.h"
 #include "imgui/renderer/imgui_core.h"
 #include "launcher/overlay.h"
 #include "sdl_window.h"
@@ -221,7 +222,8 @@ bool Instance::CreateDevice() {
         vk::PhysicalDevicePrimitiveTopologyListRestartFeaturesEXT,
         vk::PhysicalDeviceShaderAtomicFloat2FeaturesEXT,
         vk::PhysicalDeviceWorkgroupMemoryExplicitLayoutFeaturesKHR,
-        vk::PhysicalDeviceImage2DViewOf3DFeaturesEXT, vk::PhysicalDeviceShaderClockFeaturesKHR>();
+        vk::PhysicalDeviceImage2DViewOf3DFeaturesEXT, vk::PhysicalDeviceShaderClockFeaturesKHR,
+        vk::PhysicalDeviceFaultFeaturesEXT>();
     features = feature_chain.get().features;
 
     const vk::StructureChain properties_chain = physical_device.getProperties2<
@@ -239,7 +241,7 @@ bool Instance::CreateDevice() {
         return false;
     }
 
-    boost::container::static_vector<const char*, 40> enabled_extensions;
+    boost::container::static_vector<const char*, 64> enabled_extensions;
     const auto add_extension = [&](std::string_view extension) -> bool {
         const auto result =
             std::find_if(available_extensions.begin(), available_extensions.end(),
@@ -278,6 +280,35 @@ bool Instance::CreateDevice() {
     maintenance_5 = add_extension(VK_KHR_MAINTENANCE_5_EXTENSION_NAME);
     maintenance_6 = add_extension(VK_KHR_MAINTENANCE_6_EXTENSION_NAME);
     maintenance_8 = add_extension(VK_KHR_MAINTENANCE_8_EXTENSION_NAME);
+    // Pipelines that use the heap set it through VkPipelineCreateFlags2CreateInfo.
+    if (EmulatorSettings.IsDescriptorHeap() && maintenance_5 &&
+        feature_chain.get<vk::PhysicalDeviceVulkan12Features>().bufferDeviceAddress) {
+        descriptor_heap = add_extension(VK_EXT_DESCRIPTOR_HEAP_EXTENSION_NAME);
+        if (descriptor_heap) {
+            const auto heap_features =
+                physical_device
+                    .getFeatures2<vk::PhysicalDeviceFeatures2,
+                                  vk::PhysicalDeviceDescriptorHeapFeaturesEXT>()
+                    .get<vk::PhysicalDeviceDescriptorHeapFeaturesEXT>();
+            descriptor_heap = heap_features.descriptorHeap;
+        }
+        if (descriptor_heap) {
+            descriptor_heap_props =
+                physical_device
+                    .getProperties2<vk::PhysicalDeviceProperties2,
+                                    vk::PhysicalDeviceDescriptorHeapPropertiesEXT>()
+                    .get<vk::PhysicalDeviceDescriptorHeapPropertiesEXT>();
+            const auto& p = descriptor_heap_props;
+            LOG_INFO(Render_Vulkan,
+                     "Descriptor heap: resource heap up to {} bytes, sampler heap up to {} "
+                     "bytes, descriptors {} (buffer) / {} (image) / {} (sampler) bytes, {} "
+                     "bytes of push data",
+                     p.maxResourceHeapSize, p.maxSamplerHeapSize, p.bufferDescriptorSize,
+                     p.imageDescriptorSize, p.samplerDescriptorSize, p.maxPushDataSize);
+        } else {
+            enabled_extensions.pop_back();
+        }
+    }
     attachment_feedback_loop = add_extension(VK_EXT_ATTACHMENT_FEEDBACK_LOOP_LAYOUT_EXTENSION_NAME);
     if (attachment_feedback_loop) {
         attachment_feedback_loop =
@@ -299,6 +330,23 @@ bool Instance::CreateDevice() {
     depth_clip_control = add_extension(VK_EXT_DEPTH_CLIP_CONTROL_EXTENSION_NAME);
     depth_clip_enable = add_extension(VK_EXT_DEPTH_CLIP_ENABLE_EXTENSION_NAME);
     vertex_input_dynamic_state = add_extension(VK_EXT_VERTEX_INPUT_DYNAMIC_STATE_EXTENSION_NAME);
+    // Shader objects take their descriptors from the heap and their vertex input and colour
+    // write masks from dynamic state, so they're only used with all three.
+    if (EmulatorSettings.IsShaderObjects() && descriptor_heap && vertex_input_dynamic_state &&
+        dynamic_state_3 && dynamic_state_3_features.extendedDynamicState3ColorWriteMask) {
+        shader_object = add_extension(VK_EXT_SHADER_OBJECT_EXTENSION_NAME);
+        if (shader_object) {
+            shader_object = physical_device
+                                .getFeatures2<vk::PhysicalDeviceFeatures2,
+                                              vk::PhysicalDeviceShaderObjectFeaturesEXT>()
+                                .get<vk::PhysicalDeviceShaderObjectFeaturesEXT>()
+                                .shaderObject;
+            if (!shader_object) {
+                enabled_extensions.pop_back();
+            }
+        }
+        LOG_INFO(Render_Vulkan, "Shader objects: {}", shader_object ? "on" : "unavailable");
+    }
     // Games excessively leave restart enabled with lists when it isn't actually needed, and it
     // slows down KosmicKrisp due to unrolling. Revisit if KosmicKrisp moves this to mesh shaders.
     list_restart = driver_id != vk::DriverId::eMesaKosmickrisp &&
@@ -365,6 +413,9 @@ bool Instance::CreateDevice() {
         LOG_INFO(Render_Vulkan, "- shaderSubgroupClock: {}",
                  shader_clock_features.shaderSubgroupClock);
     }
+    // To log what the GPU says went wrong when the device is lost
+    device_fault = feature_chain.get<vk::PhysicalDeviceFaultFeaturesEXT>().deviceFault &&
+                   add_extension(VK_EXT_DEVICE_FAULT_EXTENSION_NAME);
     const bool calibrated_timestamps =
         TRACY_GPU_ENABLED ? add_extension(VK_EXT_CALIBRATED_TIMESTAMPS_EXTENSION_NAME) : false;
     // For the game launcher's quick menu in the game's window, which shares images with the
@@ -521,6 +572,12 @@ bool Instance::CreateDevice() {
         vk::PhysicalDeviceMaintenance8FeaturesKHR{
             .maintenance8 = true,
         },
+        vk::PhysicalDeviceDescriptorHeapFeaturesEXT{
+            .descriptorHeap = true,
+        },
+        vk::PhysicalDeviceShaderObjectFeaturesEXT{
+            .shaderObject = true,
+        },
         vk::PhysicalDeviceAttachmentFeedbackLoopLayoutFeaturesEXT{
             .attachmentFeedbackLoopLayout = true,
         },
@@ -551,6 +608,9 @@ bool Instance::CreateDevice() {
         },
         vk::PhysicalDeviceShaderClockFeaturesKHR{
             .shaderSubgroupClock = shader_clock_features.shaderSubgroupClock,
+        },
+        vk::PhysicalDeviceFaultFeaturesEXT{
+            .deviceFault = true,
         },
     };
 
@@ -587,6 +647,12 @@ bool Instance::CreateDevice() {
     if (!maintenance_8) {
         device_chain.unlink<vk::PhysicalDeviceMaintenance8FeaturesKHR>();
     }
+    if (!descriptor_heap) {
+        device_chain.unlink<vk::PhysicalDeviceDescriptorHeapFeaturesEXT>();
+    }
+    if (!shader_object) {
+        device_chain.unlink<vk::PhysicalDeviceShaderObjectFeaturesEXT>();
+    }
     if (!attachment_feedback_loop) {
         device_chain.unlink<vk::PhysicalDeviceAttachmentFeedbackLoopLayoutFeaturesEXT>();
         device_chain.unlink<vk::PhysicalDeviceAttachmentFeedbackLoopDynamicStateFeaturesEXT>();
@@ -605,6 +671,9 @@ bool Instance::CreateDevice() {
     }
     if (!shader_clock) {
         device_chain.unlink<vk::PhysicalDeviceShaderClockFeaturesKHR>();
+    }
+    if (!device_fault) {
+        device_chain.unlink<vk::PhysicalDeviceFaultFeaturesEXT>();
     }
 
     auto [device_result, dev] = physical_device.createDeviceUnique(device_chain.get());
@@ -673,7 +742,7 @@ void Instance::CreateAllocator() {
     const VkResult result = vmaCreateAllocator(&allocator_info, &allocator);
     if (result != VK_SUCCESS) {
         UNREACHABLE_MSG("Failed to initialize VMA with error {}",
-                        vk::to_string(vk::Result{result}));
+                        vk::to_string(static_cast<vk::Result>(result)));
     }
 }
 
@@ -860,6 +929,43 @@ vk::Format Instance::GetSupportedFormat(const vk::Format format,
         }
     }
     return format;
+}
+
+void Instance::LogDeviceFault() const {
+    if (!device_fault || !VULKAN_HPP_DEFAULT_DISPATCHER.vkGetDeviceFaultInfoEXT) {
+        LOG_CRITICAL(Render_Vulkan, "Device lost; the driver has no VK_EXT_device_fault report");
+        return;
+    }
+    const VkDevice dev = *device;
+    VkDeviceFaultCountsEXT counts{.sType = VK_STRUCTURE_TYPE_DEVICE_FAULT_COUNTS_EXT};
+    if (VULKAN_HPP_DEFAULT_DISPATCHER.vkGetDeviceFaultInfoEXT(dev, &counts, nullptr) !=
+        VK_SUCCESS) {
+        LOG_CRITICAL(Render_Vulkan, "Device lost; vkGetDeviceFaultInfoEXT failed");
+        return;
+    }
+    std::vector<VkDeviceFaultAddressInfoEXT> addresses(counts.addressInfoCount);
+    std::vector<VkDeviceFaultVendorInfoEXT> vendor(counts.vendorInfoCount);
+    counts.vendorBinarySize = 0;
+    VkDeviceFaultInfoEXT info{
+        .sType = VK_STRUCTURE_TYPE_DEVICE_FAULT_INFO_EXT,
+        .pAddressInfos = addresses.data(),
+        .pVendorInfos = vendor.data(),
+    };
+    const VkResult result =
+        VULKAN_HPP_DEFAULT_DISPATCHER.vkGetDeviceFaultInfoEXT(dev, &counts, &info);
+    LOG_CRITICAL(Render_Vulkan, "Device lost: \"{}\" ({}, {} addresses, {} vendor records)",
+                 info.description, vk::to_string(static_cast<vk::Result>(result)),
+                 counts.addressInfoCount, counts.vendorInfoCount);
+    for (u32 i = 0; i < counts.addressInfoCount; ++i) {
+        LOG_CRITICAL(
+            Render_Vulkan, "  address {:#x} (precision {:#x}), {}", addresses[i].reportedAddress,
+            addresses[i].addressPrecision,
+            vk::to_string(static_cast<vk::DeviceFaultAddressTypeEXT>(addresses[i].addressType)));
+    }
+    for (u32 i = 0; i < counts.vendorInfoCount; ++i) {
+        LOG_CRITICAL(Render_Vulkan, "  vendor: \"{}\" code {:#x} data {:#x}", vendor[i].description,
+                     vendor[i].vendorFaultCode, vendor[i].vendorFaultData);
+    }
 }
 
 } // namespace Vulkan

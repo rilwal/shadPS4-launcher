@@ -6,6 +6,7 @@
 #include "video_core/amdgpu/pixel_format.h"
 #include "video_core/renderer_vulkan/liverpool_to_vk.h"
 #include "video_core/renderer_vulkan/vk_instance.h"
+#include "video_core/renderer_vulkan/vk_resource_heaps.h"
 #include "video_core/texture_cache/image.h"
 #include "video_core/texture_cache/image_view.h"
 #include "vulkan/vulkan.hpp"
@@ -141,6 +142,11 @@ ImageView::ImageView(const Vulkan::Instance& instance, const ImageViewInfo& info
                   magic_enum::enum_name(info.type), magic_enum::enum_name(image.info.type));
     }
 
+    create_info = image_view_ci;
+    create_info.pNext = nullptr;
+    usage_flags = usage_ci.usage;
+    min_lod = usage_ci.pNext ? min_lod_ci.minLod : 0.f;
+
     auto [view_result, view] = instance.GetDevice().createImageViewUnique(image_view_ci);
     ASSERT_MSG(view_result == vk::Result::eSuccess, "Failed to create image view: {}",
                vk::to_string(view_result));
@@ -158,5 +164,32 @@ ImageView::ImageView(const Vulkan::Instance& instance, const ImageViewInfo& info
 }
 
 ImageView::~ImageView() = default;
+
+ImageViewHeapSlots::~ImageViewHeapSlots() {
+    Release();
+}
+
+void ImageViewHeapSlots::Release() {
+    if (owner) {
+        for (u32 i = 0; i < count; ++i) {
+            owner->ReleaseKeptSlot(slots[i].index);
+        }
+    }
+    owner = nullptr;
+    count = 0;
+}
+
+const vk::ImageViewCreateInfo& ImageView::HeapCreateInfo(
+    vk::ImageViewCreateInfo& ci, vk::ImageViewUsageCreateInfo& usage,
+    vk::ImageViewMinLodCreateInfoEXT& min_lod_ci) const {
+    ci = create_info;
+    usage = vk::ImageViewUsageCreateInfo{.usage = usage_flags};
+    if (min_lod != 0.f) {
+        min_lod_ci = vk::ImageViewMinLodCreateInfoEXT{.minLod = min_lod};
+        usage.pNext = &min_lod_ci;
+    }
+    ci.pNext = &usage;
+    return ci;
+}
 
 } // namespace VideoCore

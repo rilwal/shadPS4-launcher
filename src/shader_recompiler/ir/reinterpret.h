@@ -3,6 +3,7 @@
 
 #pragma once
 
+#include <array>
 #include "shader_recompiler/ir/ir_emitter.h"
 #include "video_core/amdgpu/pixel_format.h"
 
@@ -19,6 +20,32 @@ inline Value ApplySwizzle(IREmitter& ir, const Value& vector, const AmdGpu::Comp
         ir.CompositeShuffle(constants_vec, vector, size_t(swizzle.r), size_t(swizzle.g),
                             size_t(swizzle.b), size_t(swizzle.a));
     return swizzled;
+}
+
+/// Applies a swizzle known only at run time: four 3-bit destination selects from `shift` in
+/// `selects`, encoded like CompSwizzle.
+inline Value ApplyRuntimeSwizzle(IREmitter& ir, const Value& vector, const U32& selects,
+                                 u32 shift) {
+    const auto zero = ir.Imm32(0.f);
+    const auto one = ir.Imm32(1.f);
+    std::array<Value, 4> components;
+    for (u32 i = 0; i < 4; ++i) {
+        components[i] = ir.CompositeExtract(vector, i);
+    }
+    std::array<Value, 4> out;
+    for (u32 i = 0; i < 4; ++i) {
+        const U32 select{ir.BitFieldExtract(selects, ir.Imm32(shift + i * 3), ir.Imm32(3u))};
+        const auto is = [&](AmdGpu::CompSwizzle c) {
+            return ir.IEqual(select, ir.Imm32(static_cast<u32>(c)));
+        };
+        Value value = ir.Select(is(AmdGpu::CompSwizzle::One), one, zero);
+        value = ir.Select(is(AmdGpu::CompSwizzle::Red), components[0], value);
+        value = ir.Select(is(AmdGpu::CompSwizzle::Green), components[1], value);
+        value = ir.Select(is(AmdGpu::CompSwizzle::Blue), components[2], value);
+        value = ir.Select(is(AmdGpu::CompSwizzle::Alpha), components[3], value);
+        out[i] = value;
+    }
+    return ir.CompositeConstruct(out[0], out[1], out[2], out[3]);
 }
 
 /// Converts gamma corrected value to linear space

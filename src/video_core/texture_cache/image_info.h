@@ -59,6 +59,11 @@ struct ImageInfo {
     bool IsCompatible(const ImageInfo& info) const;
     void UpdateSize() noexcept;
 
+private:
+    /// The T# constructor's work, which it caches.
+    void BuildFromSharp(const AmdGpu::Image& sharp, bool is_depth) noexcept;
+
+public:
     struct {
         VAddr cmask_addr;
         VAddr fmask_addr;

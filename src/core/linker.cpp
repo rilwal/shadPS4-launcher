@@ -465,7 +465,7 @@ bool Linker::Resolve(const std::string& name, Loader::SymbolType sym_type, Modul
 }
 
 void* Linker::TlsGetAddr(u64 module_index, u64 offset) {
-    std::scoped_lock lk{mutex};
+    std::unique_lock lk{mutex};
 
     DtvEntry* dtv_table = GetTcbBase()->tcb_dtv;
     if (dtv_table[0].counter != dtv_generation_counter) {
@@ -485,23 +485,50 @@ void* Linker::TlsGetAddr(u64 module_index, u64 offset) {
     }
 
     u8* addr = dtv_table[module_index + 1].pointer;
-    Module* module = m_modules[module_index - 1].get();
-    if (!addr) {
-        // Module was just loaded by above code. Allocate TLS block for it.
-        const u32 init_image_size = module->tls.init_image_size;
-        u8* dest{};
-        if (heap_api && heap_api->heap_malloc) {
-            dest = reinterpret_cast<u8*>(heap_api->heap_malloc(module->tls.image_size));
-        } else {
-            dest = reinterpret_cast<u8*>(std::malloc(module->tls.image_size));
-        }
-        const u8* src = reinterpret_cast<const u8*>(module->tls.image_virtual_addr);
-        std::memcpy(dest, src, init_image_size);
-        std::memset(dest + init_image_size, 0, module->tls.image_size - init_image_size);
-        dtv_table[module_index + 1].pointer = dest;
-        addr = dest;
+    if (addr) {
+        return addr + offset;
     }
-    return addr + offset;
+    // Module was just loaded by above code. Allocate TLS block for it.
+    const Module* module = m_modules[module_index - 1].get();
+    const u32 image_size = module->tls.image_size;
+    const u32 init_image_size = module->tls.init_image_size;
+    const u8* src = reinterpret_cast<const u8*>(module->tls.image_virtual_addr);
+    const decltype(HeapAPI::heap_malloc) malloc_fn = heap_api ? heap_api->heap_malloc : nullptr;
+    // The game's heap is guest code, which may wait for locks of its own: called with the
+    // linker's lock held, a thread holding one of those and waiting for the linker would never
+    // let it go. The DTV is this thread's own, and modules are never unloaded, so nothing
+    // here needs the lock any more.
+    lk.unlock();
+    u8* dest{};
+    if (malloc_fn) {
+        dest = reinterpret_cast<u8*>(malloc_fn(image_size));
+        if (!dest) {
+            // Seen with libc.prx's own block (Bloodborne, ThinLTO builds): the game's heap
+            // returned null for 1184 bytes. The block works the same anywhere in memory.
+            LOG_WARNING(Core_Linker,
+                        "The game's heap returned null for the TLS block of {} ({} bytes); "
+                        "allocating it on the host",
+                        module->name, image_size);
+        }
+    }
+    if (!dest) {
+        dest = reinterpret_cast<u8*>(std::malloc(image_size));
+        ASSERT_MSG(dest, "Allocating the TLS block of {} (index {}, {} bytes) failed", module->name,
+                   module_index, image_size);
+        std::scoped_lock hl{mutex};
+        host_tls_blocks.insert(dest);
+    }
+    // If the game's heap used this module's TLS itself, a nested call already made the block,
+    // and the heap may have kept state in it: that one stays, and this one goes back.
+    if (u8* made = GetTcbBase()->tcb_dtv[module_index + 1].pointer) {
+        FreeTlsForNonPrimaryThread(dest);
+        return made + offset;
+    }
+    std::memcpy(dest, src, init_image_size);
+    std::memset(dest + init_image_size, 0, image_size - init_image_size);
+    // The game's heap may have loaded a module and grown this thread's DTV meanwhile.
+    GetTcbBase()->tcb_dtv[module_index + 1].pointer = dest;
+    return dest + offset;
 }
 
 void* Linker::AllocateTlsForThread(bool is_primary) {
@@ -529,12 +556,23 @@ void* Linker::AllocateTlsForThread(bool is_primary) {
             addr_out = heap_api->heap_malloc(total_tls_size);
         } else {
             addr_out = std::malloc(total_tls_size);
+            if (addr_out) {
+                std::scoped_lock lk{mutex};
+                host_tls_blocks.insert(addr_out);
+            }
         }
     }
     return addr_out;
 }
 
 void Linker::FreeTlsForNonPrimaryThread(void* pointer) {
+    {
+        std::scoped_lock lk{mutex};
+        if (host_tls_blocks.erase(pointer)) {
+            std::free(pointer);
+            return;
+        }
+    }
     if (heap_api && heap_api->heap_free) {
         heap_api->heap_free(pointer);
     } else {

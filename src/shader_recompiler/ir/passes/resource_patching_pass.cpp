@@ -12,6 +12,7 @@
 #include "shader_recompiler/ir/reinterpret.h"
 #include "shader_recompiler/profile.h"
 #include "shader_recompiler/resource.h"
+#include "shader_recompiler/runtime_buffer_format.h"
 #include "video_core/amdgpu/resource.h"
 
 namespace Shader::Optimization {
@@ -227,6 +228,134 @@ void PatchBufferSharp(const ResourceDiscovery& resource, Info& info, Descriptors
     inst.SetArg(0, ir.Imm32(buffer_binding));
 }
 
+/// Whether a sample's coordinates come from the cube face instructions, which only cube maps
+/// need. The PSSL compiler leaves DA clear on cube samples, so the flag alone doesn't tell.
+static bool UsesCubeCoordinates(const IR::Inst& inst) {
+    if (inst.GetOpcode() != IR::Opcode::ImageSampleRaw) {
+        return false;
+    }
+    const auto from_cube = [](this auto&& self, const IR::Value& value, u32 depth) -> bool {
+        const IR::Inst* producer = value.TryInst();
+        if (!producer) {
+            return false;
+        }
+        if (producer->GetOpcode() == IR::Opcode::CubeFaceIndex) {
+            return true;
+        }
+        if (depth == 0) {
+            return false;
+        }
+        for (size_t i = 0; i < producer->NumArgs(); ++i) {
+            if (self(producer->Arg(i), depth - 1)) {
+                return true;
+            }
+        }
+        return false;
+    };
+    for (u32 arg = 2; arg <= 5; ++arg) {
+        if (from_cube(inst.Arg(arg), 3)) {
+            return true;
+        }
+    }
+    return false;
+}
+
+/// For shaders without reflection: whether an image instruction without the array flag
+/// addresses three coordinates, so the image is 3D. The address registers don't say how many
+/// there are (the T# does), and compilers fill the one past a 2D address with leftovers (in
+/// Bloodborne, an integer bit-cast to float), so a third coordinate counts only when it's
+/// made the same way as both x and y, and isn't a reinterpreted or converted integer.
+static bool UsesThirdCoordinate(const IR::Inst& inst) {
+    const auto flags = inst.Flags<IR::TextureInstInfo>();
+    if (flags.is_array || flags.has_derivatives) {
+        return false;
+    }
+    // Address component i: the sample's are spread over packs of four from Arg(2) on, a
+    // read's or write's are one pack in Arg(1).
+    u32 first{};
+    u32 third{};
+    bool sample = false;
+    switch (inst.GetOpcode()) {
+    case IR::Opcode::ImageSampleRaw:
+        // The LOD or clamp comes after the coordinates, so with one the third address is a 2D
+        // image's LOD or a 3D image's z: no telling.
+        if (flags.has_lod || flags.has_lod_clamp) {
+            return false;
+        }
+        sample = true;
+        first = u32(flags.has_offset) + u32(flags.has_bias) + u32(flags.is_depth);
+        third = first + 2;
+        if (third >= 12) {
+            return false;
+        }
+        break;
+    case IR::Opcode::ImageRead:
+    case IR::Opcode::ImageWrite:
+        // Likewise for the mip level.
+        if (flags.has_lod) {
+            return false;
+        }
+        third = 2;
+        break;
+    default:
+        return false;
+    }
+    const auto component = [&](u32 i) -> const IR::Inst* {
+        const IR::Inst* pack = sample ? inst.Arg(2 + i / 4).TryInst() : inst.Arg(1).TryInst();
+        if (!pack || pack->GetOpcode() != IR::Opcode::CompositeConstructF32x4 &&
+                         pack->GetOpcode() != IR::Opcode::CompositeConstructU32x4) {
+            return nullptr;
+        }
+        return pack->Arg(i % 4).TryInst();
+    };
+    const IR::Inst* x = component(first);
+    const IR::Inst* y = component(first + 1);
+    const IR::Inst* z = component(third);
+    if (!x || !y || !z) {
+        return false;
+    }
+    switch (z->GetOpcode()) {
+    case IR::Opcode::UndefU32:
+    case IR::Opcode::UndefF32:
+    case IR::Opcode::BitCastF32U32:
+    case IR::Opcode::ConvertF32U32:
+    case IR::Opcode::ConvertF32S32:
+        return false;
+    default:
+        break;
+    }
+    return z->GetOpcode() == x->GetOpcode() && z->GetOpcode() == y->GetOpcode();
+}
+
+/// With guess_state, the image's type from the shader's reflection, if its T# is read from a
+/// place the reflection names.
+static std::optional<AmdGpu::ImageType> ReflectedImageType(const SharpFetch<AmdGpu::Image>& fetch,
+                                                           const Info& info) {
+    if (info.guessed_images.empty() ||
+        fetch.summary == SharpFetch<AmdGpu::Image>::Summary::Invalid ||
+        (fetch.load_mask & 1) == 0) {
+        return std::nullopt;
+    }
+    const u32 flat = fetch.offsets[0];
+    const auto match = [&](bool table, u32 sgpr, u32 dword) -> std::optional<AmdGpu::ImageType> {
+        for (const auto& image : info.guessed_images) {
+            if (image.table == table && image.sgpr == sgpr && image.dword == dword) {
+                return image.type;
+            }
+        }
+        return std::nullopt;
+    };
+    if (flat < NUM_USER_DATA_REGS) {
+        return match(false, flat, 0);
+    }
+    for (const auto& source : info.guess_flat_sources) {
+        if (source.flat == flat) {
+            return match(true, source.sgpr, source.dword);
+        }
+    }
+    return std::nullopt;
+}
+
 void PatchImageSharp(const ResourceDiscovery& resource, Info& info, Descriptors& descriptors,
                      const Profile& profile) {
     IR::Inst& inst = *resource.user;
@@ -247,7 +376,24 @@ void PatchImageSharp(const ResourceDiscovery& resource, Info& info, Descriptors&
         .is_written = is_written,
         .is_r128 = bool(inst_info.is_r128),
         .post_op = resource.sharps[0].post_op,
+        .guess_type = inst_info.is_array          ? AmdGpu::ImageType::Color2DArray
+                      : UsesCubeCoordinates(inst) ? AmdGpu::ImageType::Cube
+                                                  : AmdGpu::ImageType::Color2D,
     };
+    if (info.guess_state) {
+        if (const auto reflected = ReflectedImageType(image_res.sharp_fetch, info)) {
+            image_res.guess_type = *reflected;
+        } else if (image_res.guess_type == AmdGpu::ImageType::Color2D &&
+                   UsesThirdCoordinate(inst)) {
+            info.saw_3d_coordinates = true;
+            if (info.guess_coordinate_3d) {
+                image_res.guess_type = AmdGpu::ImageType::Color3D;
+                LOG_INFO(Render_Recompiler,
+                         "Guessing an image of shader {:#x} as 3D from its coordinates",
+                         info.pgm_hash);
+            }
+        }
+    }
 
     auto image = image_res.GetSharp(info);
     ASSERT(image.GetType() != AmdGpu::ImageType::Invalid);
@@ -322,7 +468,8 @@ void PatchImageSharp(const ResourceDiscovery& resource, Info& info, Descriptors&
 
     IR::IREmitter ir{*inst.GetParent(), IR::Block::InstructionList::s_iterator_to(inst)};
 
-    if (inst.GetOpcode() == IR::Opcode::ImageSampleRaw) {
+    if (inst.GetOpcode() == IR::Opcode::ImageSampleRaw ||
+        inst.GetOpcode() == IR::Opcode::ImageQueryLod) {
         auto& lod_prod = resource.sharps[1].post_op_data.lod_prod;
         const u32 sampler_binding = descriptors.Add(SamplerResource{
             .sharp_fetch = ConstructSharpFetch<AmdGpu::Sampler>(resource.sharps[1]),
@@ -332,6 +479,10 @@ void PatchImageSharp(const ResourceDiscovery& resource, Info& info, Descriptors&
             .is_depth = bool(inst_info.is_depth), // true for the _C (compare) opcodes
         });
         inst.SetArg(0, ir.Imm32(image_binding | sampler_binding << 16));
+        if (inst.GetOpcode() == IR::Opcode::ImageQueryLod) {
+            // The binding carries the sampler now; drop the S# dwords.
+            inst.SetArg(2, ir.Imm32(0));
+        }
     } else {
         inst.SetArg(0, ir.Imm32(image_binding));
     }
@@ -547,21 +698,25 @@ void PatchGlobalDataShareAccess(IR::Inst& inst, Info& info, Descriptors& descrip
 }
 
 IR::U32 CalculateBufferAddress(IR::IREmitter& ir, const IR::Inst& inst, const Info& info,
-                               const AmdGpu::Buffer& buffer, u32 stride) {
+                               const AmdGpu::Buffer& buffer, u32 stride, bool runtime_stride,
+                               bool byte_address) {
     const auto inst_info = inst.Flags<IR::BufferInstInfo>();
     const u32 inst_offset = inst_info.inst_offset.Value();
     const auto is_inst_typed = inst_info.inst_data_fmt != AmdGpu::DataFormat::FormatInvalid;
     const auto data_format = is_inst_typed
                                  ? AmdGpu::RemapDataFormat(inst_info.inst_data_fmt.Value())
                                  : buffer.GetDataFmt();
-    const u32 shift = BufferAddressShift(inst, data_format);
+    // Loads that read their format at run time get a byte address, as the element size
+    // isn't known here.
+    const u32 shift = byte_address ? 0 : BufferAddressShift(inst, data_format);
     const u32 mask = (1 << shift) - 1;
     const IR::U32 soffset = IR::GetBufferSOffsetArg(&inst);
 
     // If address calculation is of the form "index * const_stride + offset" with offset constant
     // and both const_stride and offset are divisible with the element size, apply shift directly.
-    if (inst_info.index_enable && !inst_info.voffset_enable && soffset.IsImmediate() &&
-        !buffer.swizzle_enable && !buffer.add_tid_enable && (stride & mask) == 0) {
+    if (!runtime_stride && inst_info.index_enable && !inst_info.voffset_enable &&
+        soffset.IsImmediate() && !buffer.swizzle_enable && !buffer.add_tid_enable &&
+        (stride & mask) == 0) {
         const u32 total_offset = soffset.U32() + inst_offset;
         if ((total_offset & mask) == 0) {
             // buffer_offset = index * (const_stride >> shift) + (offset >> shift)
@@ -590,7 +745,12 @@ IR::U32 CalculateBufferAddress(IR::IREmitter& ir, const IR::Inst& inst, const In
         const IR::U32 voffset = IR::GetBufferVOffsetArg(&inst);
         offset = ir.IAdd(offset, voffset);
     }
-    const IR::U32 const_stride = ir.Imm32(stride);
+    // With runtime strides the stride comes from the stage's table, so the shader doesn't
+    // depend on it. Without an index the stride isn't used.
+    const bool has_index = inst_info.index_enable || buffer.add_tid_enable;
+    const IR::U32 const_stride = !runtime_stride ? ir.Imm32(stride)
+                                 : has_index     ? ir.BufferStride(inst.Arg(0))
+                                                 : ir.Imm32(0U);
     IR::U32 buffer_offset;
     if (buffer.swizzle_enable) {
         const IR::U32 const_index_stride = ir.Imm32(buffer.GetIndexStride());
@@ -622,7 +782,7 @@ IR::U32 CalculateBufferAddress(IR::IREmitter& ir, const IR::Inst& inst, const In
     return buffer_offset;
 }
 
-void PatchBufferArgs(IR::Inst& inst, Info& info) {
+void PatchBufferArgs(IR::Inst& inst, Info& info, const Profile& profile) {
     const auto handle = inst.Arg(0);
     const auto buffer_res = info.buffers[handle.U32()];
     const auto buffer = buffer_res.GetSharp(info);
@@ -633,8 +793,13 @@ void PatchBufferArgs(IR::Inst& inst, Info& info) {
     }
 
     IR::IREmitter ir{*inst.GetParent(), IR::Block::InstructionList::s_iterator_to(inst)};
+    const bool runtime_format =
+        inst.GetOpcode() == IR::Opcode::LoadBufferFormatF32 &&
+        inst.Flags<IR::BufferInstInfo>().inst_data_fmt == AmdGpu::DataFormat::FormatInvalid &&
+        UsesRuntimeBufferFormat(profile.runtime_buffer_formats, buffer_res, buffer);
     inst.SetArg(IR::LoadBufferArgs::Address,
-                CalculateBufferAddress(ir, inst, info, buffer, buffer.stride));
+                CalculateBufferAddress(ir, inst, info, buffer, buffer.stride,
+                                       profile.runtime_buffer_strides, runtime_format));
 }
 
 void PatchImageSampleArgs(IR::Inst& inst, Info& info, const ImageResource& image_res,
@@ -829,7 +994,7 @@ void PatchImageSampleArgs(IR::Inst& inst, Info& info, const ImageResource& image
     inst.ReplaceUsesWith(converted);
 }
 
-void PatchImageArgs(IR::Inst& inst, Info& info) {
+void PatchImageArgs(IR::Inst& inst, Info& info, const Profile& profile) {
     // Nothing to patch for dimension query.
     if (inst.GetOpcode() == IR::Opcode::ImageQueryDimensions) {
         return;
@@ -901,7 +1066,10 @@ void PatchImageArgs(IR::Inst& inst, Info& info) {
     const auto is_storage = image_res.is_written;
     if (inst.GetOpcode() == IR::Opcode::ImageRead) {
         auto texel = ir.ImageRead(image_handle, coords, lod, ms, inst_info);
-        if (is_storage) {
+        if (is_storage && profile.runtime_storage_swizzles) {
+            // The swizzle comes from the stage's table.
+            texel = ApplyRuntimeSwizzle(ir, texel, ir.ImageSwizzle(ir.Imm32(binding_index)), 0);
+        } else if (is_storage) {
             // Storage image requires shader swizzle.
             texel = ApplySwizzle(ir, texel, image.DstSelect());
         }
@@ -915,7 +1083,10 @@ void PatchImageArgs(IR::Inst& inst, Info& info) {
             inst.SetArg(3, ms);
 
             auto texel = inst.Arg(4);
-            if (is_storage) {
+            if (is_storage && profile.runtime_storage_swizzles) {
+                texel = ApplyRuntimeSwizzle(ir, texel, ir.ImageSwizzle(ir.Imm32(binding_index)),
+                                            ImageSwizzleInverseShift);
+            } else if (is_storage) {
                 // Storage image requires shader swizzle.
                 texel = ApplySwizzle(ir, texel, image.DstSelect().Inverse());
             }
@@ -944,9 +1115,9 @@ void ResourcePatchingPass(Shader::Info& info, const ResourceDiscoveryList& resou
     for (const auto& usage : resources) {
         IR::Inst& inst = *usage.user;
         if (IsBufferInstruction(inst)) {
-            PatchBufferArgs(inst, info);
+            PatchBufferArgs(inst, info, profile);
         } else if (IsImageInstruction(inst)) {
-            PatchImageArgs(inst, info);
+            PatchImageArgs(inst, info, profile);
         } else if (IsDataRingInstruction(inst)) {
             PatchGlobalDataShareAccess(inst, info, descriptors, profile);
         }

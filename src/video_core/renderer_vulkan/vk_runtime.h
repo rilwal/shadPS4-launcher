@@ -34,6 +34,9 @@ public:
 
     void TickFrame();
 
+    /// Logs copy bandwidth between host and device memory once, when SHADPS4_COPY_BENCH=1.
+    void RunCopyBench();
+
     void CopyBuffer(const VideoCore::Buffer* src, const VideoCore::Buffer* dst,
                     std::span<const vk::BufferCopy> copies);
 

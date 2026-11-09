@@ -1,6 +1,7 @@
 // SPDX-FileCopyrightText: Copyright 2024 shadPS4 Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+#include <bit>
 #include <numeric>
 
 #include "common/alignment.h"
@@ -135,13 +136,13 @@ vk::BufferUsageFlags SupportedUsage(const Vulkan::Instance& instance, vk::Buffer
 }
 
 Buffer::Buffer(const Vulkan::Instance& instance, VAddr cpu_addr_, u64 size_bytes_,
-               MemoryType mem_type_, std::string_view debug_name)
+               MemoryType mem_type_, std::string_view debug_name, vk::BufferUsageFlags extra_usage)
     : cpu_addr{cpu_addr_}, size_bytes{size_bytes_}, mem_type{mem_type_},
       buffer{instance.GetDevice(), instance.GetAllocator()} {
 
     vk::BufferCreateInfo buffer_ci = {
         .size = size_bytes,
-        .usage = SupportedUsage(instance, AllFlags),
+        .usage = SupportedUsage(instance, AllFlags | extra_usage),
         .sharingMode = vk::SharingMode::eExclusive,
     };
     VmaAllocationInfo alloc_info{};
@@ -204,7 +205,9 @@ bool StreamBuffer::PrepareMap(u64 size, u64 alignment, bool allow_wait) {
     }
 
     if (alignment > 0) {
-        offset = Common::AlignUp(offset, alignment);
+        // Maps happen several times a draw, and alignments are nearly always powers of 2.
+        offset = std::has_single_bit(alignment) ? Common::AlignUpPow2(offset, alignment)
+                                                : Common::AlignUp(offset, alignment);
     }
 
     if (offset + size > this->size_bytes) {
@@ -212,6 +215,7 @@ bool StreamBuffer::PrepareMap(u64 size, u64 alignment, bool allow_wait) {
         invalidation_mark = current_watch_cursor;
         current_watch_cursor = 0;
         offset = 0;
+        ++wraps;
 
         // Swap watches and reset waiting cursors.
         std::swap(previous_watches, current_watches);

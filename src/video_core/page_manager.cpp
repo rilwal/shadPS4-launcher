@@ -2,6 +2,11 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 #include <algorithm>
+#include <array>
+#include <atomic>
+#include <cstdlib>
+#include <map>
+#include <mutex>
 #include <utility>
 #include "common/adaptive_mutex.h"
 #include "common/assert.h"
@@ -12,9 +17,11 @@
 #include "common/signal_context.h"
 #include "common/thread.h"
 #include "core/emulator_settings.h"
+#include "core/fault_load.h"
 #include "core/memory.h"
 #include "core/signals.h"
 #include "video_core/page_manager.h"
+#include "video_core/perf_stats.h"
 #include "video_core/renderer_vulkan/vk_rasterizer.h"
 
 #ifndef _WIN64
@@ -37,10 +44,244 @@
 
 namespace VideoCore {
 
+namespace {
+
+/// Follows guest threads writing tracked memory in order (streaming data into a buffer), so
+/// their write traps can be removed ahead of them: each fault in such a run unprotects twice as
+/// many pages after it as the last, up to SHADPS4_FAULT_AHEAD_PAGES (0 turns it off). The pages
+/// are only marked as written early, which costs an upload of data that didn't change at worst.
+/// Runs that start where one started before (the same buffer refilled every frame) unprotect
+/// as far as that one wrote on their first fault (SHADPS4_FAULT_AHEAD_HISTORY=0 turns it off).
+class FaultAhead {
+public:
+    /// The range to unprotect after a write fault at `addr`, empty if it isn't in a run.
+    /// `predicted` says it came from an earlier run's length.
+    std::pair<VAddr, u64> Next(VAddr addr, bool& predicted) {
+        predicted = false;
+        const u64 max_pages = MaxPages();
+        if (max_pages == 0) {
+            return {};
+        }
+        const VAddr page = PageManager::GetPageAddr(addr);
+        const VAddr start = page + PageManager::GetPageSize();
+        std::scoped_lock lock{mutex};
+        ++tick;
+        Run* run = std::ranges::find(runs, page, &Run::end);
+        if (run == runs.end()) {
+            // A new run, replacing the one used longest ago.
+            run = std::ranges::min_element(runs, {}, &Run::last_use);
+            *run = Run{.start = page, .end = start, .pages = 0, .last_use = tick};
+            const History& seen = history[HistoryIndex(page)];
+            if (!HistoryEnabled() || seen.start != page || seen.pages <= 1) {
+                return {};
+            }
+            // Ahead to the last page the last run from here wrote. If this one goes further,
+            // its next fault starts doubling again.
+            predicted = true;
+            run->end = page + seen.pages * PageManager::GetPageSize();
+            return {start, run->end - start};
+        }
+        run->pages = std::clamp<u64>(run->pages * 2, 1, max_pages);
+        run->last_use = tick;
+        run->end = start + run->pages * PageManager::GetPageSize();
+        // The run has written up to this page; the pages unprotected after it may not be.
+        History& entry = history[HistoryIndex(run->start)];
+        entry.start = run->start;
+        entry.pages = static_cast<u32>(
+            std::min<u64>((start - run->start) / PageManager::GetPageSize(), MaxHistoryPages));
+        return {start, run->end - start};
+    }
+
+private:
+    static u64 MaxPages() {
+        static const u64 pages = [] {
+            const char* env = std::getenv("SHADPS4_FAULT_AHEAD_PAGES");
+            return env != nullptr ? std::strtoull(env, nullptr, 10) : u64{64};
+        }();
+        return pages;
+    }
+
+    static bool HistoryEnabled() {
+        static const bool enabled = [] {
+            const char* env = std::getenv("SHADPS4_FAULT_AHEAD_HISTORY");
+            return env == nullptr || env[0] != '0';
+        }();
+        return enabled;
+    }
+
+    static size_t HistoryIndex(VAddr page) {
+        const u64 n = page / PageManager::GetPageSize();
+        return (n ^ (n >> 12)) & (NumHistory - 1);
+    }
+
+    struct Run {
+        /// Its first page, the one whose fault started it.
+        VAddr start{};
+        /// The first page the run hasn't unprotected yet, where its next fault lands.
+        VAddr end{};
+        u64 pages{};
+        u64 last_use{};
+    };
+    /// How far the last run from a page wrote, in pages from it up to its last fault's page
+    /// (capped: unprotecting more than a run writes costs uploads of unchanged pages).
+    struct History {
+        VAddr start{};
+        u32 pages{};
+    };
+    static constexpr u64 MaxHistoryPages = 256;
+    static constexpr size_t NumHistory = 4096;
+    std::mutex mutex;
+    std::array<Run, 8> runs{};
+    std::array<History, NumHistory> history{};
+    u64 tick{};
+};
+
+FaultAhead fault_ahead;
+
+/// Read faults whose load reads no GPU-written bytes are finished from guest memory
+/// (Core::FaultLoad) instead of reading back the page. Read once: the handler runs often.
+bool FaultLoadsEnabled() {
+    static const bool enabled = EmulatorSettings.IsFaultLoadEmulation();
+    return enabled;
+}
+
+std::atomic<u64> write_fault_count{};
+std::atomic<u64> write_fault_ns{};
+/// WriteFaultPhases summed over every handled write fault, and over the unprotecting ahead.
+struct AtomicPhases {
+    std::atomic<u64> region_lock_ns{};
+    std::atomic<u64> page_lock_ns{};
+    std::atomic<u64> protect_ns{};
+    std::atomic<u64> texture_ns{};
+    std::atomic<u64> protect_calls{};
+    std::atomic<u64> protect_pages{};
+
+    void Add(const WriteFaultPhases& p) {
+        region_lock_ns.fetch_add(p.region_lock_ns, std::memory_order_relaxed);
+        page_lock_ns.fetch_add(p.page_lock_ns, std::memory_order_relaxed);
+        protect_ns.fetch_add(p.protect_ns, std::memory_order_relaxed);
+        texture_ns.fetch_add(p.texture_ns, std::memory_order_relaxed);
+        protect_calls.fetch_add(p.protect_calls, std::memory_order_relaxed);
+        protect_pages.fetch_add(p.protect_pages, std::memory_order_relaxed);
+    }
+
+    WriteFaultPhases Take() {
+        return {
+            .region_lock_ns = region_lock_ns.exchange(0),
+            .page_lock_ns = page_lock_ns.exchange(0),
+            .protect_ns = protect_ns.exchange(0),
+            .texture_ns = texture_ns.exchange(0),
+            .protect_calls = protect_calls.exchange(0),
+            .protect_pages = protect_pages.exchange(0),
+        };
+    }
+};
+AtomicPhases write_fault_phase_totals;
+std::atomic<u64> ahead_count{};
+std::atomic<u64> ahead_pages{};
+std::atomic<u64> ahead_predicted{};
+/// Handled read faults: all, and those on the GPU thread.
+std::array<std::atomic<u64>, 2> read_fault_count{};
+std::array<std::atomic<u64>, 2> read_fault_ns{};
+std::mutex slow_write_mutex;
+struct SlowWriteTotals {
+    u32 count;
+    u64 total_ns;
+    WriteFaultPhases phases;
+};
+std::map<std::pair<u64, bool>, SlowWriteTotals> slow_write_sites;
+
+/// Handles a write fault on tracked memory, unprotecting ahead of it too if the guest is
+/// writing in order (not on the GPU thread, which may hold the trackers' locks).
+bool HandleWriteFault(Vulkan::Rasterizer* rasterizer, VAddr addr, u64 size, bool is_gpu_thread,
+                      void* context) {
+    if (!rasterizer->IsMapped(addr, size)) {
+        return false;
+    }
+    const u64 start = PerfStats::NowNs();
+    bool predicted = false;
+    auto [ahead, ahead_size] =
+        is_gpu_thread ? std::pair<VAddr, u64>{} : fault_ahead.Next(addr, predicted);
+    if (ahead_size != 0 && !rasterizer->IsMapped(ahead, ahead_size)) {
+        ahead_size = 0;
+    }
+    write_fault_phases = WriteFaultPhases{.active = true};
+    rasterizer->InvalidateFaultedMemory(addr, size, is_gpu_thread, ahead, ahead_size);
+    const WriteFaultPhases phases = write_fault_phases;
+    write_fault_phases.active = false;
+    // A plain write fault takes a few microseconds; one that read the page back took far more.
+    constexpr u64 SlowNs = 50'000;
+    if (const u64 elapsed = PerfStats::NowNs() - start; elapsed > SlowNs) {
+        std::scoped_lock lock{slow_write_mutex};
+        auto& site = slow_write_sites[{Core::FaultInstructionAddress(context), is_gpu_thread}];
+        ++site.count;
+        site.total_ns += elapsed;
+        site.phases.region_lock_ns += phases.region_lock_ns;
+        site.phases.page_lock_ns += phases.page_lock_ns;
+        site.phases.protect_ns += phases.protect_ns;
+        site.phases.texture_ns += phases.texture_ns;
+    }
+    write_fault_phase_totals.Add(phases);
+    if (ahead_size != 0) {
+        const u64 pages = ahead_size / PageManager::GetPageSize();
+        ahead_count.fetch_add(1, std::memory_order_relaxed);
+        ahead_pages.fetch_add(pages, std::memory_order_relaxed);
+        ahead_predicted.fetch_add(predicted ? 1 : 0, std::memory_order_relaxed);
+        PerfStats::frames.AddCost(PerfStats::Cost::PagesAhead, pages);
+    }
+    const u64 elapsed = PerfStats::NowNs() - start;
+    PerfStats::frames.AddFault(elapsed);
+    write_fault_count.fetch_add(1, std::memory_order_relaxed);
+    write_fault_ns.fetch_add(elapsed, std::memory_order_relaxed);
+    return true;
+}
+
+} // namespace
+
+bool RegionLockProfiling() {
+    static const bool enabled = [] {
+        const char* env = std::getenv("SHADPS4_LOCK_PROFILE");
+        return env != nullptr && env[0] == '1';
+    }();
+    return enabled;
+}
+
+WriteFaultTotals TakeWriteFaultTotals() {
+    return {
+        .count = write_fault_count.exchange(0),
+        .ns = write_fault_ns.exchange(0),
+        .phases = write_fault_phase_totals.Take(),
+        .ahead_count = ahead_count.exchange(0),
+        .ahead_pages = ahead_pages.exchange(0),
+        .ahead_predicted = ahead_predicted.exchange(0),
+    };
+}
+
+ReadFaultTotals TakeReadFaultTotals() {
+    return {read_fault_count[0].exchange(0), read_fault_ns[0].exchange(0),
+            read_fault_count[1].exchange(0), read_fault_ns[1].exchange(0)};
+}
+
+std::vector<SlowWriteFaultSite> TakeSlowWriteFaultSites() {
+    std::scoped_lock lock{slow_write_mutex};
+    std::vector<SlowWriteFaultSite> sites;
+    sites.reserve(slow_write_sites.size());
+    for (const auto& [key, totals] : slow_write_sites) {
+        sites.push_back({key.first, key.second, totals.count, totals.total_ns, totals.phases});
+    }
+    slow_write_sites.clear();
+    return sites;
+}
+
 struct PageManager::Impl {
     struct PageState {
-        u8 num_write_watchers;
-        u8 num_read_watchers;
+        /// Signed: region trackers change protection after releasing their locks, so a change
+        /// can land before an earlier one it undoes, taking a count below zero for a moment.
+        /// Adds and removes commute, and a count that isn't zero protects the page: below zero
+        /// a track is still on its way, and until it lands writes fault and retry (the bits
+        /// already say what they do), which is safe where unprotecting wouldn't be.
+        s16 num_write_watchers;
+        s16 num_read_watchers;
 
         Core::MemoryPermission WritePerm() const noexcept {
             return num_write_watchers == 0 ? Core::MemoryPermission::Write
@@ -57,7 +298,7 @@ struct PageManager::Impl {
         }
 
         template <bool is_read>
-        u8 GetPage() const {
+        s16 GetPage() const {
             if constexpr (is_read) {
                 return num_read_watchers;
             } else {
@@ -68,21 +309,17 @@ struct PageManager::Impl {
         constexpr Core::MemoryPermission Update(PageOp write_op, bool update_write = true,
                                                 PageOp read_op = PageOp::None,
                                                 bool update_read = false) {
+            // Only a few changes can be in flight for a page at once.
+            constexpr s16 Limit = 1024;
             if (update_read) {
-                if (read_op == PageOp::Track) {
-                    ASSERT_MSG(num_read_watchers == 0, "Too many watchers");
-                } else if (read_op == PageOp::Untrack) {
-                    ASSERT_MSG(num_read_watchers > 0, "Not enough watchers");
-                }
                 num_read_watchers += std::to_underlying(read_op);
+                ASSERT_MSG(num_read_watchers > -Limit && num_read_watchers < Limit,
+                           "Read watchers out of range: {}", num_read_watchers);
             }
             if (update_write) {
-                if (write_op == PageOp::Track) {
-                    ASSERT_MSG(num_write_watchers < 255, "Too many watchers");
-                } else if (write_op == PageOp::Untrack) {
-                    ASSERT_MSG(num_write_watchers > 0, "Not enough watchers");
-                }
                 num_write_watchers += std::to_underlying(write_op);
+                ASSERT_MSG(num_write_watchers > -Limit && num_write_watchers < Limit,
+                           "Write watchers out of range: {}", num_write_watchers);
             }
             return Perms();
         }
@@ -148,7 +385,7 @@ struct PageManager::Impl {
                 continue;
             }
 
-            locks[page].lock();
+            LockTimingWriteFault(locks[page], write_fault_phases.page_lock_ns);
 
             const auto old_perms = state->Perms();
             if (page == page_start) {
@@ -213,7 +450,7 @@ struct PageManager::Impl {
                 continue;
             }
 
-            locks[base_page + page].lock();
+            LockTimingWriteFault(locks[base_page + page], write_fault_phases.page_lock_ns);
 
             const auto old_perms = state->Perms();
             if (page == page_start) {
@@ -396,8 +633,8 @@ public:
             // Notify rasterizer about the fault.
             const VAddr addr = msg.arg.pagefault.address;
             const auto ptid = msg.arg.pagefault.feat.ptid;
-            rasterizer->InvalidateMemory(addr, 1,
-                                         ptid == rasterizer->GetGpuCommandProcessorThreadId());
+            HandleWriteFault(rasterizer, addr, 1,
+                             ptid == rasterizer->GetGpuCommandProcessorThreadId(), nullptr);
 
             // Some calls to InvalidateMemory never reach the UFFDIO_WRITEPROTECT ioctl in
             // ::Protect, therefore we use MODE_DONTWAKE and wake the thread with UFFDIO_WAKE here
@@ -428,7 +665,18 @@ struct SignalImpl : public PageManager::Impl {
         auto& impl = memory->GetAddressSpace();
         ASSERT_MSG(perms != Core::MemoryPermission::Write,
                    "Attempted to protect region as write-only which is not a valid permission");
+        const bool timed = write_fault_phases.active || RegionLockProfiling();
+        const u64 start = timed ? WriteFaultClockNs() : 0;
         impl.Protect(address, size, perms);
+        if (timed) {
+            const u64 elapsed = WriteFaultClockNs() - start;
+            thread_protect_ns += elapsed;
+            if (write_fault_phases.active) {
+                write_fault_phases.protect_ns += elapsed;
+                ++write_fault_phases.protect_calls;
+                write_fault_phases.protect_pages += size / PageManager::GetPageSize();
+            }
+        }
     }
 
     static bool GuestFaultSignalHandler(void* context, void* fault_address) {
@@ -437,11 +685,52 @@ struct SignalImpl : public PageManager::Impl {
         const auto is_gpu_thread =
             std::this_thread::get_id() == rasterizer->GetGpuCommandProcessorThread();
         if (Common::IsWriteError(context)) {
-            return rasterizer->InvalidateMemory(addr, size, is_gpu_thread);
-        } else {
-            return rasterizer->ReadMemory(addr, size, is_gpu_thread);
+            return HandleWriteFault(rasterizer, addr, size, is_gpu_thread, context);
         }
-        return false;
+        const u64 start = VideoCore::PerfStats::NowNs();
+        bool handled;
+        bool served = false;
+        if (FaultLoadsEnabled()) {
+            // A load that reads no GPU-written bytes is finished here from guest memory, which
+            // has the current data of everything else, instead of reading back the page. On the
+            // GPU thread too: the emulator's own reads of guest memory fault as well.
+            Core::FaultLoad load{};
+            const bool decoded = Core::DecodeFaultLoad(context, load) && addr >= load.address &&
+                                 addr < load.address + load.size;
+            std::array<u8, 32> data;
+            const bool overlapping = load.address < load.store_address + load.size &&
+                                     load.store_address < load.address + load.size;
+            if (decoded && load.op == Core::FaultLoad::Op::Copy && !overlapping) {
+                handled = rasterizer->CopyMemoryForLoad(
+                    addr, size, load.address, load.store_address, load.size, served, is_gpu_thread);
+            } else {
+                const bool supported = decoded && load.op != Core::FaultLoad::Op::Copy;
+                handled = rasterizer->ReadMemoryForLoad(addr, size, supported ? load.address : 0,
+                                                        supported ? load.size : 0, load.mnemonic,
+                                                        data.data(), served, is_gpu_thread);
+            }
+            if (served && !Core::CompleteFaultLoad(context, load, data.data())) {
+                // Can't happen after a successful decode; retrying faults again and reads back.
+                served = false;
+                handled = rasterizer->ReadMemory(addr, size, is_gpu_thread);
+            }
+        } else {
+            handled = rasterizer->ReadMemory(addr, size, is_gpu_thread);
+        }
+        if (is_gpu_thread && handled) {
+            rasterizer->NoteGpuThreadReadFault(Core::FaultInstructionAddress(context), served);
+        }
+        if (handled) {
+            const u64 elapsed = VideoCore::PerfStats::NowNs() - start;
+            VideoCore::PerfStats::frames.AddFault(elapsed);
+            read_fault_count[0].fetch_add(1, std::memory_order_relaxed);
+            read_fault_ns[0].fetch_add(elapsed, std::memory_order_relaxed);
+            if (is_gpu_thread) {
+                read_fault_count[1].fetch_add(1, std::memory_order_relaxed);
+                read_fault_ns[1].fetch_add(elapsed, std::memory_order_relaxed);
+            }
+        }
+        return handled;
     }
 };
 

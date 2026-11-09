@@ -1,6 +1,10 @@
 // SPDX-FileCopyrightText: Copyright 2024-2026 shadPS4 Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+#include <array>
+#include <cstring>
+#include <memory>
+
 #include "common/assert.h"
 #include "core/libraries/kernel/process.h"
 #include "core/libraries/videoout/buffer.h"
@@ -141,8 +145,43 @@ ImageInfo::ImageInfo(const AmdGpu::DepthBuffer& buffer, u32 num_slices, VAddr ht
     }
 }
 
+namespace {
+/// The info built from each T#, by its bits and whether it's read as depth. Draws bind the same
+/// textures over and over, and working out the mip layout is most of the cost.
+struct SharpInfoEntry {
+    std::array<u64, 4> sharp{};
+    bool is_depth{};
+    bool valid{};
+    ImageInfo info;
+};
+using SharpInfos = std::array<SharpInfoEntry, 128>;
+/// On the heap: a big thread_local would grow every thread's TLS block, guest threads' too.
+thread_local std::unique_ptr<SharpInfos> sharp_infos;
+} // namespace
+
 ImageInfo::ImageInfo(const AmdGpu::Image& sharp, const Shader::ImageResource& desc) noexcept {
     const bool is_depth = desc.is_depth;
+    std::array<u64, 4> sharp_bits;
+    std::memcpy(sharp_bits.data(), &sharp, sizeof(sharp_bits));
+    const u64 hash = (sharp_bits[0] ^ sharp_bits[1] * 0x9e3779b97f4a7c15ULL ^ sharp_bits[2] ^
+                      (sharp_bits[3] + is_depth)) *
+                     0xff51afd7ed558ccdULL;
+    if (!sharp_infos) [[unlikely]] {
+        sharp_infos = std::make_unique<SharpInfos>();
+    }
+    auto& entry = (*sharp_infos)[(hash >> 57) % sharp_infos->size()];
+    if (entry.valid && entry.is_depth == is_depth && entry.sharp == sharp_bits) {
+        *this = entry.info;
+        return;
+    }
+    BuildFromSharp(sharp, is_depth);
+    entry.sharp = sharp_bits;
+    entry.is_depth = is_depth;
+    entry.valid = true;
+    entry.info = *this;
+}
+
+void ImageInfo::BuildFromSharp(const AmdGpu::Image& sharp, bool is_depth) noexcept {
     const auto image = sharp;
     const auto data_fmt = image.GetDataFmt();
     tile_mode = image.GetTileMode();

@@ -44,6 +44,9 @@ public:
     }
 
     /// Returns the Vulkan device
+    /// Logs the driver's VK_EXT_device_fault report; call it once the device is lost.
+    void LogDeviceFault() const;
+
     vk::Device GetDevice() const {
         return *device;
     }
@@ -116,6 +119,21 @@ public:
 
     bool IsMaintenance5Supported() const {
         return maintenance_5;
+    }
+
+    /// Returns true if shader resources are bound through VK_EXT_descriptor_heap.
+    bool UsesDescriptorHeap() const {
+        return descriptor_heap;
+    }
+
+    /// Returns true if graphics draws use VK_EXT_shader_object instead of pipelines.
+    bool UsesShaderObjects() const {
+        return shader_object;
+    }
+
+    /// Limits of VK_EXT_descriptor_heap, when it's used.
+    const vk::PhysicalDeviceDescriptorHeapPropertiesEXT& DescriptorHeapProperties() const {
+        return descriptor_heap_props;
     }
 
     bool IsMaintenance6Supported() const {
@@ -264,6 +282,14 @@ public:
         return amd_mixed_attachment_samples;
     }
 
+    bool IsDepthClampSupported() const {
+        return features.depthClamp;
+    }
+
+    bool IsNvFramebufferMixedSamplesSupported() const {
+        return nv_framebuffer_mixed_samples;
+    }
+
     /// Returns true when geometry shaders are supported by the device
     bool IsGeometryStageSupported() const {
         return features.geometryShader;
@@ -328,6 +354,11 @@ public:
     /// Returns the pipeline cache unique identifier
     const auto GetPipelineCacheUUID() const {
         return properties.pipelineCacheUUID;
+    }
+
+    /// Nanoseconds per GPU timestamp tick.
+    float TimestampPeriod() const {
+        return properties.limits.timestampPeriod;
     }
 
     /// Returns the minimum required alignment for uniforms
@@ -501,6 +532,7 @@ private:
     vk::PhysicalDeviceVulkan12Properties vk12_props;
     vk::PhysicalDeviceVulkan13Properties vk13_props;
     vk::PhysicalDevicePushDescriptorPropertiesKHR push_descriptor_props;
+    vk::PhysicalDeviceDescriptorHeapPropertiesEXT descriptor_heap_props;
     vk::PhysicalDeviceFeatures features;
     vk::PhysicalDeviceVulkan12Features vk12_features;
     vk::PhysicalDeviceVulkan13Features vk13_features;
@@ -542,12 +574,15 @@ private:
     bool shader_atomic_float2{};
     bool workgroup_memory_explicit_layout{};
     bool maintenance_5{};
+    bool descriptor_heap{};
+    bool shader_object{};
     bool maintenance_6{};
     bool maintenance_8{};
     bool attachment_feedback_loop{};
     bool image_2d_view_of_3d{};
     bool image_view_min_lod{};
     bool shader_clock{};
+    bool device_fault{};
     bool supports_memory_budget{};
     bool supports_block_texel_view{};
     u64 total_memory_budget{};

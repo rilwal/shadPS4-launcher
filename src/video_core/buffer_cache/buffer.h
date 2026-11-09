@@ -86,7 +86,8 @@ struct UniqueBuffer {
 
 struct Buffer {
     explicit Buffer(const Vulkan::Instance& instance, VAddr cpu_addr_, u64 size_bytes_,
-                    MemoryType mem_type, std::string_view debug_name = "");
+                    MemoryType mem_type, std::string_view debug_name = "",
+                    vk::BufferUsageFlags extra_usage = {});
 
     Buffer& operator=(const Buffer&) = delete;
     Buffer(const Buffer&) = delete;
@@ -151,6 +152,11 @@ struct StreamBuffer : public Buffer {
         return last_tick;
     }
 
+    /// How many times the buffer has wrapped around; regions from before may be reused.
+    [[nodiscard]] u64 Wraps() const noexcept {
+        return wraps;
+    }
+
     /// Maps and commits a memory region with user provided data
     u64 Copy(auto src, size_t size, size_t alignment = 0) {
         const auto [data, offset] = Map(size, alignment);
@@ -185,6 +191,7 @@ private:
     u64 offset{};
     u64 mapped_size{};
     u64 last_tick{};
+    u64 wraps{};
     std::vector<Watch> current_watches;
     std::size_t current_watch_cursor{};
     std::optional<size_t> invalidation_mark;

@@ -3,6 +3,7 @@
 
 #pragma once
 
+#include <algorithm>
 #include <bitset>
 
 #include "common/types.h"
@@ -10,6 +11,7 @@
 #include "shader_recompiler/frontend/fetch_shader.h"
 #include "shader_recompiler/info.h"
 #include "shader_recompiler/profile.h"
+#include "shader_recompiler/runtime_buffer_format.h"
 
 namespace Shader {
 
@@ -17,6 +19,9 @@ struct VsAttribSpecialization {
     u32 divisor{};
     AmdGpu::NumberClass num_class{};
     AmdGpu::CompMapping dst_select{};
+    /// The format is read at run time (see UsesRuntimeVertexFormat), and so are the class and
+    /// the select.
+    bool runtime_format{};
 
     bool operator==(const VsAttribSpecialization&) const = default;
 };
@@ -29,13 +34,15 @@ struct BufferSpecialization {
     u32 num_format : 4;
     u32 index_stride : 2;
     u32 element_size : 2;
+    /// Formatted loads read the format at run time, so it isn't part of the specialisation.
+    u32 runtime_format : 1;
     AmdGpu::CompMapping dst_select{};
     AmdGpu::NumberConversion num_conversion{};
 
     bool operator==(const BufferSpecialization& other) const {
         return stride == other.stride && is_formatted == other.is_formatted &&
-               swizzle_enable == other.swizzle_enable &&
-               (!is_formatted ||
+               swizzle_enable == other.swizzle_enable && runtime_format == other.runtime_format &&
+               (!is_formatted || runtime_format ||
                 (data_format == other.data_format && num_format == other.num_format &&
                  dst_select == other.dst_select && num_conversion == other.num_conversion)) &&
                (!swizzle_enable ||
@@ -91,56 +98,90 @@ struct StageSpecialization {
     Backend::Bindings start{};
 
     StageSpecialization() = default;
-    StageSpecialization(const Info& info_, RuntimeInfo runtime_info_, const Profile& profile_,
-                        Backend::Bindings start_)
-        : info{&info_}, runtime_info{runtime_info_}, start{start_} {
+    StageSpecialization(const Info& info_, const RuntimeInfo& runtime_info_,
+                        const Profile& profile_, Backend::Bindings start_) {
+        Build(info_, runtime_info_, profile_, start_);
+    }
+
+    /// Fills it for a draw, as constructing would. Each draw's lookup refills one kept per stage
+    /// instead of building a new one: constructing the ~1.5 KB object was half the cost.
+    void Build(const Info& info_, const RuntimeInfo& runtime_info_, const Profile& profile_,
+               Backend::Bindings start_) {
+        info = &info_;
+        runtime_info = runtime_info_;
+        start = start_;
+        bitset.reset();
+        fetch_shader_data.size = 0;
+        fetch_shader_data.attributes.clear();
+        fetch_shader_data.vertex_offset_sgpr = Gcn::FetchShaderData{}.vertex_offset_sgpr;
+        fetch_shader_data.instance_offset_sgpr = Gcn::FetchShaderData{}.instance_offset_sgpr;
+        vs_attribs.clear();
+        buffers.clear();
+        images.clear();
+        fmasks.clear();
+        samplers.clear();
         if (info_.sw_stage == SwStage::Vertex && Gcn::ParseFetchShader(info_, fetch_shader_data)) {
             // Specialize shader on VS input number types to follow spec.
+            // The divisor isn't in the code (the vertex input applies it), so with fewer
+            // variants it's left out.
+            const bool keep_divisor = !profile_.fewer_shader_variants;
+            const bool runtime_vertex = profile_.runtime_vertex_formats;
             ForEachSharp(vs_attribs, fetch_shader_data.attributes,
-                         [this](auto& spec, const auto& desc, AmdGpu::Buffer sharp) {
+                         [this, keep_divisor, runtime_vertex](auto& spec, const auto& desc,
+                                                              AmdGpu::Buffer sharp) {
                              using InstanceIdType = Shader::Gcn::VertexAttribute::InstanceIdType;
                              if (const auto step_rate = desc.GetStepRate();
-                                 step_rate != InstanceIdType::None) {
+                                 keep_divisor && step_rate != InstanceIdType::None) {
                                  spec.divisor = step_rate == InstanceIdType::OverStepRate0
                                                     ? runtime_info.sw.vs.step_rate_0
                                                     : (step_rate == InstanceIdType::OverStepRate1
                                                            ? runtime_info.sw.vs.step_rate_1
                                                            : 1);
                              }
-                             spec.num_class = AmdGpu::GetNumberClass(sharp.GetNumberFmt());
-                             spec.dst_select = sharp.DstSelect();
+                             spec.runtime_format = UsesRuntimeVertexFormat(runtime_vertex, sharp);
+                             if (!spec.runtime_format) {
+                                 spec.num_class = AmdGpu::GetNumberClass(sharp.GetNumberFmt());
+                                 spec.dst_select = sharp.DstSelect();
+                             }
                          });
         }
         u32 binding{};
-        ForEachSharp(binding, buffers, info->buffers,
-                     [](auto& spec, const auto& desc, AmdGpu::Buffer sharp) {
-                         spec.stride = sharp.GetStride();
-                         spec.is_formatted = desc.is_formatted;
-                         spec.swizzle_enable = sharp.swizzle_enable;
-                         if (spec.is_formatted) {
-                             spec.data_format = static_cast<u32>(sharp.GetDataFmt());
-                             spec.num_format = static_cast<u32>(sharp.GetNumberFmt());
-                             spec.dst_select = sharp.DstSelect();
-                             spec.num_conversion = sharp.GetNumberConversion();
-                         }
-                         if (spec.swizzle_enable) {
-                             spec.index_stride = sharp.index_stride;
-                             spec.element_size = sharp.element_size;
-                         }
-                     });
-        ForEachSharp(binding, images, info->images,
-                     [&](auto& spec, const auto& desc, AmdGpu::Image sharp) {
-                         spec.type = sharp.GetViewType(desc.is_array);
-                         spec.is_integer = AmdGpu::IsInteger(sharp.GetNumberFmt());
-                         spec.is_storage = desc.is_written;
-                         if (spec.is_storage) {
-                             spec.dst_select = sharp.DstSelect();
-                         } else {
-                             spec.is_srgb = sharp.GetNumberFmt() == AmdGpu::NumberFormat::Srgb;
-                         }
-                         spec.num_conversion = sharp.GetNumberConversion();
-                         spec.num_bindings = desc.NumBindings(*info);
-                     });
+        // With runtime strides (heap + fewer variants), shaders read buffer strides at run time.
+        const bool runtime_stride = profile_.runtime_buffer_strides;
+        const bool runtime_formats = profile_.runtime_buffer_formats;
+        ForEachSharp(
+            binding, buffers, info->buffers,
+            [runtime_stride, runtime_formats](auto& spec, const auto& desc, AmdGpu::Buffer sharp) {
+                spec.stride = runtime_stride ? 0 : sharp.GetStride();
+                spec.is_formatted = desc.is_formatted;
+                spec.swizzle_enable = sharp.swizzle_enable;
+                spec.runtime_format = UsesRuntimeBufferFormat(runtime_formats, desc, sharp);
+                if (spec.is_formatted && !spec.runtime_format) {
+                    spec.data_format = static_cast<u32>(sharp.GetDataFmt());
+                    spec.num_format = static_cast<u32>(sharp.GetNumberFmt());
+                    spec.dst_select = sharp.DstSelect();
+                    spec.num_conversion = sharp.GetNumberConversion();
+                }
+                if (spec.swizzle_enable) {
+                    spec.index_stride = sharp.index_stride;
+                    spec.element_size = sharp.element_size;
+                }
+            });
+        const bool runtime_swizzles = profile_.runtime_storage_swizzles;
+        ForEachSharp(
+            binding, images, info->images, [&](auto& spec, const auto& desc, AmdGpu::Image sharp) {
+                spec.type = sharp.GetViewType(desc.is_array);
+                spec.is_integer = AmdGpu::IsInteger(sharp.GetNumberFmt());
+                spec.is_storage = desc.is_written;
+                if (spec.is_storage) {
+                    // With runtime swizzles the shader reads it from the table.
+                    spec.dst_select = runtime_swizzles ? AmdGpu::CompMapping{} : sharp.DstSelect();
+                } else {
+                    spec.is_srgb = sharp.GetNumberFmt() == AmdGpu::NumberFormat::Srgb;
+                }
+                spec.num_conversion = sharp.GetNumberConversion();
+                spec.num_bindings = desc.NumBindings(*info);
+            });
         ForEachSharp(binding, fmasks, info->fmasks,
                      [](auto& spec, const auto& desc, AmdGpu::Image sharp) {
                          spec.width = sharp.width;
@@ -152,6 +193,15 @@ struct StageSpecialization {
                          spec.force_degamma = sharp.force_degamma;
                      });
 
+        // sRGB only changes the code where a sampler forces degamma; otherwise the view format
+        // does the conversion.
+        if (profile_.fewer_shader_variants &&
+            std::ranges::none_of(samplers, [](const auto& s) { return s.force_degamma; })) {
+            for (auto& image : images) {
+                image.is_srgb = false;
+            }
+        }
+
         // Initialize runtime_info fields that rely on analysis in tessellation passes
         if (info->sw_stage == SwStage::TessellationControl ||
             info->sw_stage == SwStage::TessellationEval) {
@@ -162,26 +212,28 @@ struct StageSpecialization {
     }
 
     void ForEachSharp(auto& spec_list, auto& desc_list, auto&& func) {
+        spec_list.resize(desc_list.size());
+        auto* spec = spec_list.data();
         for (const auto& desc : desc_list) {
-            auto& spec = spec_list.emplace_back();
             const auto sharp = desc.GetSharp(*info);
-            if (!sharp) {
-                continue;
+            if (sharp) {
+                func(*spec, desc, sharp);
             }
-            func(spec, desc, sharp);
+            ++spec;
         }
     }
 
     void ForEachSharp(u32& binding, auto& spec_list, auto& desc_list, auto&& func) {
+        spec_list.resize(desc_list.size());
+        auto* spec = spec_list.data();
         for (const auto& desc : desc_list) {
-            auto& spec = spec_list.emplace_back();
             const auto sharp = desc.GetSharp(*info);
-            if (!sharp) {
-                binding++;
-                continue;
+            if (sharp) {
+                bitset[binding] = true;
+                func(*spec, desc, sharp);
             }
-            bitset[binding++] = true;
-            func(spec, desc, sharp);
+            ++binding;
+            ++spec;
         }
     }
 

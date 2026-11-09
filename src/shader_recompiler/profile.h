@@ -54,6 +54,29 @@ struct Profile {
     bool supports_shader_stencil_export{};
     bool fast_shader_math{};
     bool support_bda{};
+    /// Resources come from VK_EXT_descriptor_heap: each stage numbers its own bindings, and
+    /// buffer offsets are read from the stage's table instead of push constants.
+    bool uses_descriptor_heap{};
+    /// Leaves out of specialisations what doesn't change the code: the exact format of
+    /// render targets (only its number class), and sRGB where no sampler forces degamma.
+    bool fewer_shader_variants{};
+    /// Formatted buffer loads read the buffer's format from the stage table, so shaders
+    /// aren't compiled again for each format. Needs the descriptor heap.
+    bool runtime_buffer_formats{};
+    /// Structured buffer accesses read the buffer's stride from the stage table, so shaders
+    /// aren't compiled again for each stride. Needs the descriptor heap.
+    bool runtime_buffer_strides{};
+    /// Storage image loads and stores read the image's swizzle from the stage table. Needs
+    /// the descriptor heap.
+    bool runtime_storage_swizzles{};
+    /// Color exports read each render target's swizzle from the stage table, and export to
+    /// every target the shader's export format names whether or not the draw binds it. Needs
+    /// the descriptor heap.
+    bool runtime_target_swizzles{};
+    /// Vertex attributes read their V#'s format from the stage table: the vertex input hands
+    /// the shader each element's raw bits and the shader converts them, so one shader serves
+    /// any format, number class and component order. Needs the descriptor heap.
+    bool runtime_vertex_formats{};
 
     bool operator==(const Profile&) const = default;
 };

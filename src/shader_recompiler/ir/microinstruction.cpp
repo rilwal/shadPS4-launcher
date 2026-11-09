@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 #include <algorithm>
+#include <atomic>
 #include <memory>
 
 #include "shader_recompiler/ir/basic_block.h"
@@ -23,7 +24,7 @@ Inst::Inst(const Inst& base) : op{base.op}, flags{base.flags} {
     std::construct_at(&args);
     const size_t num_args{base.NumArgs()};
     for (size_t index = 0; index < num_args; ++index) {
-        SetArg(index, base.Arg(index));
+        InitArg(index, base.Arg(index));
     }
 }
 
@@ -171,6 +172,14 @@ void Inst::SetArg(size_t index, Value value) {
     }
 }
 
+void Inst::InitArg(size_t index, Value value) {
+    DEBUG_ASSERT(op != Opcode::Phi && index < NumArgs() && Arg(index).IsEmpty());
+    if (auto* inst = value.TryInst()) {
+        Use(inst, index);
+    }
+    args[index] = value;
+}
+
 Block* Inst::PhiBlock(size_t index) const {
     if (op != Opcode::Phi) {
         UNREACHABLE_MSG("{} is not a Phi instruction", op);
@@ -186,6 +195,11 @@ void Inst::AddPhiOperand(Block* predecessor, const Value& value) {
         Use(inst, phi_args.size());
     }
     phi_args.emplace_back(predecessor, value);
+}
+
+u32 NextPassEpoch() noexcept {
+    static std::atomic<u32> epoch{0};
+    return epoch.fetch_add(1, std::memory_order_relaxed) + 1;
 }
 
 void Inst::Invalidate() {
@@ -217,12 +231,30 @@ void Inst::ClearArgs() {
 }
 
 void Inst::ReplaceUsesWith(Value replacement, bool preserve) {
-    for (auto it = uses.begin(); it != uses.end();) {
-        auto [user, operand] = *it;
-        it = std::next(it);
-        DEBUG_ASSERT(user->Arg(operand).Inst() == this);
-        user->SetArg(operand, replacement);
+    Inst* const replacement_inst = replacement.TryInst();
+    if (replacement_inst == this) {
+        for (auto it = uses.begin(); it != uses.end();) {
+            auto [user, operand] = *it;
+            it = std::next(it);
+            user->SetArg(operand, replacement);
+        }
+        Invalidate();
+        return;
     }
+    // Every use goes, so the list is dropped whole instead of searched once per user, which
+    // was quadratic in the uses of values used all over a shader.
+    for (const auto& [user, operand] : uses) {
+        DEBUG_ASSERT(user->Arg(operand).Inst() == this);
+        if (user->op == Opcode::Phi) {
+            user->phi_args[operand].second = replacement;
+        } else {
+            user->args[operand] = replacement;
+        }
+        if (replacement_inst) {
+            replacement_inst->uses.emplace_front(user, operand);
+        }
+    }
+    uses.clear();
     Invalidate();
 }
 
@@ -246,7 +278,11 @@ void Inst::Use(Inst* used, u32 operand) {
 void Inst::UndoUse(Inst* used, u32 operand) {
     IR::Use use(this, operand);
     DEBUG_ASSERT(1 == std::count(used->uses.begin(), used->uses.end(), use));
-    used->uses.remove(use);
+    // There's only one; uses are added at the front, so recent ones are found quickly.
+    const auto it = std::find(used->uses.begin(), used->uses.end(), use);
+    if (it != used->uses.end()) {
+        used->uses.erase(it);
+    }
 }
 
 } // namespace Shader::IR

@@ -3,8 +3,13 @@
 
 #pragma once
 
+#include <array>
+#include <atomic>
+#include <chrono>
 #include <cstddef>
 #include <memory>
+#include <utility>
+#include <vector>
 #include "common/alignment.h"
 #include "common/types.h"
 #include "video_core/buffer_cache/region_definitions.h"
@@ -23,6 +28,135 @@ enum class PageOp : s8 {
     Track = 1,
     Untrack = -1,
 };
+
+/// Where a write fault's handling spent its time, on the faulting thread while it's handled.
+/// For the slow write fault log.
+struct WriteFaultPhases {
+    bool active{};
+    u64 region_lock_ns{};
+    u64 page_lock_ns{};
+    u64 protect_ns{};
+    u64 texture_ns{};
+    u64 protect_calls{};
+    u64 protect_pages{};
+};
+inline thread_local WriteFaultPhases write_fault_phases;
+
+inline u64 WriteFaultClockNs() {
+    return std::chrono::duration_cast<std::chrono::nanoseconds>(
+               std::chrono::steady_clock::now().time_since_epoch())
+        .count();
+}
+
+/// Locks the mutex, adding any wait to `wait_ns` while a write fault is handled on this thread.
+template <typename Mutex>
+void LockTimingWriteFault(Mutex& mutex, u64& wait_ns) {
+    if (!write_fault_phases.active || mutex.try_lock()) [[likely]] {
+        if (!write_fault_phases.active) {
+            mutex.lock();
+        }
+        return;
+    }
+    const u64 start = WriteFaultClockNs();
+    mutex.lock();
+    wait_ns += WriteFaultClockNs() - start;
+}
+
+/// Region tracker lock holds over 20 us, by what held the lock (SHADPS4_LOCK_PROFILE=1), for
+/// the readback stats log: write faults waiting on that lock are slow.
+enum class RegionLockOp : u8 {
+    CpuSet,
+    CpuClear,
+    GpuSet,
+    GpuClear,
+    CpuSetGpuClear,
+    CpuClearGpuSet,
+    UploadRanges,
+    UploadRangesWritten,
+    DownloadRanges,
+    Explicit,
+    Other,
+    Count,
+};
+struct RegionLockHolds {
+    std::atomic<u64> count;
+    std::atomic<u64> hold_ns;
+    std::atomic<u64> protect_ns;
+    std::atomic<u64> max_ns;
+};
+inline std::array<RegionLockHolds, static_cast<size_t>(RegionLockOp::Count)> region_lock_holds{};
+/// Time this thread has spent in mprotect, always counted while lock profiling is on.
+inline thread_local u64 thread_protect_ns{};
+bool RegionLockProfiling();
+
+/// Times one hold of a region tracker lock, from construction (after locking) to Finish().
+class RegionLockHoldTimer {
+public:
+    RegionLockHoldTimer() {
+        if (RegionLockProfiling()) [[unlikely]] {
+            start = WriteFaultClockNs();
+            protect_start = thread_protect_ns;
+        }
+    }
+    void Finish(RegionLockOp op) {
+        if (start == 0) [[likely]] {
+            return;
+        }
+        constexpr u64 LongNs = 20'000;
+        const u64 held = WriteFaultClockNs() - start;
+        if (held > LongNs) {
+            auto& holds = region_lock_holds[static_cast<size_t>(op)];
+            holds.count.fetch_add(1, std::memory_order_relaxed);
+            holds.hold_ns.fetch_add(held, std::memory_order_relaxed);
+            holds.protect_ns.fetch_add(thread_protect_ns - protect_start,
+                                       std::memory_order_relaxed);
+            u64 max = holds.max_ns.load(std::memory_order_relaxed);
+            while (held > max && !holds.max_ns.compare_exchange_weak(max, held)) {
+            }
+        }
+    }
+
+private:
+    u64 start{};
+    u64 protect_start{};
+};
+
+/// A write fault that took long enough to have read memory back first, by faulting instruction:
+/// how many, and their total time and its parts.
+struct SlowWriteFaultSite {
+    u64 instruction;
+    bool gpu_thread;
+    u32 count;
+    u64 total_ns;
+    WriteFaultPhases phases;
+};
+
+/// All handled write faults since the last call, cleared: how many, their total time and its
+/// parts, and the unprotecting ahead of in-order writers that follows some of them.
+struct WriteFaultTotals {
+    u64 count;
+    u64 ns;
+    WriteFaultPhases phases;
+    /// Faults that also unprotected pages ahead, and those pages.
+    u64 ahead_count;
+    u64 ahead_pages;
+    /// Of those, the faults that started a run and went as far as the last run from there.
+    u64 ahead_predicted;
+};
+WriteFaultTotals TakeWriteFaultTotals();
+
+/// All handled read faults since the last call and their total time, and those on the GPU
+/// thread, cleared.
+struct ReadFaultTotals {
+    u64 count;
+    u64 ns;
+    u64 gpu_thread_count;
+    u64 gpu_thread_ns;
+};
+ReadFaultTotals TakeReadFaultTotals();
+
+/// The slow write fault sites since the last call, cleared. For the readback stats log.
+std::vector<SlowWriteFaultSite> TakeSlowWriteFaultSites();
 
 class PageManager {
     static constexpr size_t PM_PAGE_BITS = 12;

@@ -33,7 +33,7 @@ Block::iterator Block::PrependNewInst(iterator insertion_point, Opcode op,
         UNREACHABLE_MSG("Invalid number of arguments {} in {}", args.size(), op);
     }
     std::ranges::for_each(args, [inst, index = size_t{0}](const Value& arg) mutable {
-        inst->SetArg(index, arg);
+        inst->InitArg(index, arg);
         ++index;
     });
     return result_it;

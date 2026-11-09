@@ -2,7 +2,9 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 #include <algorithm>
+#include <cstdlib>
 #include <limits>
+#include <string_view>
 #include <xxhash.h>
 
 #include "common/assert.h"
@@ -13,6 +15,7 @@
 #include "core/memory.h"
 #include "video_core/buffer_cache/buffer_cache.h"
 #include "video_core/page_manager.h"
+#include "video_core/perf_stats.h"
 #include "video_core/renderer_vulkan/liverpool_to_vk.h"
 #include "video_core/renderer_vulkan/vk_instance.h"
 #include "video_core/renderer_vulkan/vk_runtime.h"
@@ -22,6 +25,16 @@
 #include "video_core/texture_cache/tile_manager.h"
 
 namespace VideoCore {
+
+/// Whether tiled images are copied into device memory before the detiler reads them.
+/// SHADPS4_DETILE_SOURCE=host reads them straight from host memory, as upstream does.
+static bool DetilesFromDevice() {
+    static const bool from_device = [] {
+        const char* env = std::getenv("SHADPS4_DETILE_SOURCE");
+        return !env || std::string_view{env} != "host";
+    }();
+    return from_device;
+}
 
 static constexpr u32 MAX_IMAGES = std::numeric_limits<u16>::max();
 static constexpr u32 MAX_IMAGE_VIEWS = std::numeric_limits<u16>::max();
@@ -94,13 +107,19 @@ TextureCache::TextureCache(const Vulkan::Instance& instance_, Vulkan::Scheduler&
 TextureCache::~TextureCache() = default;
 
 bool TextureCache::ProcessDownloadImages(bool priority) {
-    {
+    // Called at every fence (tens of thousands a second in some games), so the usual case of
+    // nothing to do skips the locks.
+    if (any_priority_frees.load(std::memory_order_acquire)) {
         // The staging pool belongs to this thread, so priority downloads free their buffer here.
         std::scoped_lock lk{priority_frees_mutex};
         for (const auto& download : priority_frees) {
             runtime.GetStagingPool().FreeDeferred(download);
         }
         priority_frees.clear();
+        any_priority_frees.store(false, std::memory_order_relaxed);
+    }
+    if (!any_download_images.load(std::memory_order_acquire)) {
+        return false;
     }
     std::unique_lock lk{download_images_mutex};
     if (download_images.empty()) {
@@ -111,6 +130,7 @@ bool TextureCache::ProcessDownloadImages(bool priority) {
         DownloadImageMemory(image_id, flags);
     }
     download_images.clear();
+    any_download_images.store(false, std::memory_order_relaxed);
     return true;
 }
 
@@ -174,6 +194,7 @@ void TextureCache::DownloadImageMemory(ImageId image_id, DownloadMemoryFlags fla
             // This runs on the priority thread, which must not touch the staging pool.
             std::scoped_lock lk{priority_frees_mutex};
             priority_frees.push_back(download);
+            any_priority_frees.store(true, std::memory_order_release);
         } else if (!is_sync) {
             runtime.GetStagingPool().FreeDeferred(download);
         }
@@ -251,7 +272,10 @@ void TextureCache::InvalidateMemoryFromGPU(VAddr address, size_t max_size) {
 
 void TextureCache::MarkAsMaybeGpuDirty(VAddr addr, size_t size) {
     ForEachImageInRegion(addr, size, [&](ImageId image_id, Image& image) {
-        if (image.gpu_hash == 0) {
+        // The hash only matters to an image evicted with GPU-valid data. A GPU-dirty image is
+        // freed instead, or refreshed first, which clears the hash: hashing it (every frame for
+        // compute outputs) is wasted.
+        if (image.gpu_hash == 0 && False(image.flags & ImageFlagBits::GpuDirty)) {
             // Read backing pages directly, without faulting through the guest readback path.
             image.gpu_hash = HashBackingMemory(image.info.guest_address, image.info.guest_size);
         }
@@ -609,42 +633,44 @@ ImageId TextureCache::ExpandImage(const ImageInfo& info, ImageId image_id) {
 }
 
 ImageId TextureCache::FindImage(ImageDesc& desc, bool exact_fmt) {
+    // Thousands of lookups a frame: timed whole only with SHADPS4_DRAW_COSTS=1. Otherwise only
+    // resolving overlaps and creating images are (uploads time themselves in RefreshImage).
+    const VideoCore::PerfStats::ScopedCost cost{VideoCore::PerfStats::Cost::Textures, true};
     const auto& info = desc.info;
 
     ASSERT(info.guest_address != 0);
 
-    SmallVector<ImageId, 8> image_ids;
-    ForEachImageInRegion(info.guest_address, info.guest_size,
-                         [&](ImageId image_id, Image& image) { image_ids.push_back(image_id); });
+    const auto is_perfect_match = [&](const Image& cache_image) {
+        return cache_image.info.guest_address == info.guest_address &&
+               cache_image.info.guest_size == info.guest_size &&
+               cache_image.info.size == info.size &&
+               IsVulkanFormatCompatible(cache_image.info.pixel_format, info.pixel_format) &&
+               (cache_image.info.type == info.type || info.size == Extent3D{1, 1, 1}) &&
+               (!exact_fmt || info.pixel_format == cache_image.info.pixel_format);
+    };
 
+    // A perfect match starts at the same address, so it's among the images registered there.
+    // The last one wins, as in the full search below, which walks every page of the image and
+    // runs only when there's none.
     ImageId image_id{};
+    ForEachImageWithAddress(info.guest_address, [&](ImageId cache_id, Image& cache_image) {
+        if (is_perfect_match(cache_image)) {
+            image_id = cache_id;
+        }
+    });
 
-    // Check for a perfect match first
-    for (const auto& cache_id : image_ids) {
-        auto& cache_image = slot_images[cache_id];
-        if (cache_image.info.guest_address != info.guest_address) {
-            continue;
-        }
-        if (cache_image.info.guest_size != info.guest_size) {
-            continue;
-        }
-        if (cache_image.info.size != info.size) {
-            continue;
-        }
-        if (!IsVulkanFormatCompatible(cache_image.info.pixel_format, info.pixel_format) ||
-            (cache_image.info.type != info.type && info.size != Extent3D{1, 1, 1})) {
-            continue;
-        }
-        if (exact_fmt && info.pixel_format != cache_image.info.pixel_format) {
-            continue;
-        }
-        image_id = cache_id;
+    SmallVector<ImageId, 8> image_ids;
+    if (!image_id) {
+        ForEachImageInRegion(
+            info.guest_address, info.guest_size,
+            [&](ImageId cache_id, Image& image) { image_ids.push_back(cache_id); });
     }
 
     // Try to resolve overlaps (if any)
     int view_mip{-1};
     int view_slice{-1};
-    if (!image_id) {
+    if (!image_id && !image_ids.empty()) {
+        const VideoCore::PerfStats::ScopedCost overlaps{VideoCore::PerfStats::Cost::Textures};
         for (const auto& cache_id : image_ids) {
             view_mip = -1;
             view_slice = -1;
@@ -674,6 +700,7 @@ ImageId TextureCache::FindImage(ImageDesc& desc, bool exact_fmt) {
     }
     // Create and register a new image
     if (!image_id) {
+        const VideoCore::PerfStats::ScopedCost create{VideoCore::PerfStats::Cost::Textures};
         image_id = slot_images.Insert(instance, runtime, slot_image_views, info);
         RegisterImage(image_id);
     }
@@ -731,6 +758,7 @@ ImageView& TextureCache::FindTexture(ImageId image_id, const ImageDesc& desc) {
             image.info.guest_address != 0) {
             std::unique_lock lk{download_images_mutex};
             download_images.emplace(image_id);
+            any_download_images.store(true, std::memory_order_release);
         }
     }
     UpdateImage(image_id);
@@ -768,6 +796,7 @@ ImageView& TextureCache::FindRenderTarget(ImageId image_id, const ImageDesc& des
     if (readback_linear_images && (!image.info.props.is_tiled || image.info.size.width <= 8)) {
         std::unique_lock lk{download_images_mutex};
         download_images.emplace(image_id);
+        any_download_images.store(true, std::memory_order_release);
     }
     image.usage.render_target = 1u;
     UpdateImage(image_id);
@@ -863,6 +892,7 @@ void TextureCache::RefreshImage(Image& image) {
     if (False(image.flags & ImageFlagBits::Dirty) || image.info.num_samples > 1) {
         return;
     }
+    const VideoCore::PerfStats::ScopedCost cost{VideoCore::PerfStats::Cost::Textures};
 
     RENDERER_TRACE;
     TRACE_HINT(fmt::format("{:x}:{:x}", image.info.guest_address, image.info.guest_size));
@@ -924,18 +954,22 @@ void TextureCache::RefreshImage(Image& image) {
     scheduler.EndRendering();
 
     const auto [in_buffer, in_offset] =
-        buffer_cache.ObtainBufferForImage(image.info.guest_address, image.info.guest_size);
+        buffer_cache.ObtainBufferForImage(image.info.guest_address, image.info.guest_size,
+                                          image.info.props.is_tiled && DetilesFromDevice());
     const auto [buffer, offset] = tile_manager.DetileImage(in_buffer, in_offset, image.info);
     for (auto& copy : image_copies) {
         copy.bufferOffset += offset;
     }
 
     runtime.UploadImage(&image, buffer, image_copies);
+    VideoCore::PerfStats::frames.AddGpuCount(VideoCore::PerfStats::Cost::ImageUploads, 1);
+    VideoCore::PerfStats::frames.AddGpuCount(VideoCore::PerfStats::Cost::ImageBytes,
+                                             image.info.guest_size);
 }
 
-vk::Sampler TextureCache::GetSampler(const AmdGpu::Sampler& sharp,
-                                     AmdGpu::BorderColorBuffer border_color_base,
-                                     const bool is_depth) {
+Sampler& TextureCache::GetSampler(const AmdGpu::Sampler& sharp,
+                                  AmdGpu::BorderColorBuffer border_color_base,
+                                  const bool is_depth) {
     // Compare and plain uses of one S# need separate samplers.
     const u64 hash = HashCombine(XXH3_64bits(&sharp, sizeof(sharp)), is_depth);
     const auto [it, new_sampler] = samplers.try_emplace(hash);
@@ -948,7 +982,7 @@ vk::Sampler TextureCache::GetSampler(const AmdGpu::Sampler& sharp,
 
     Sampler& sampler = slot_samplers[it->second];
     sampler_lru_cache.Touch(sampler, gc_tick);
-    return sampler.Handle();
+    return sampler;
 }
 
 void TextureCache::RegisterImage(ImageId image_id) {
@@ -1268,6 +1302,7 @@ void TextureCache::DeleteImage(ImageId image_id) {
         std::unique_lock lk{download_images_mutex};
         if (download_images.contains(image_id)) {
             download_images.erase(image_id);
+            any_download_images.store(!download_images.empty(), std::memory_order_release);
         }
     }
 

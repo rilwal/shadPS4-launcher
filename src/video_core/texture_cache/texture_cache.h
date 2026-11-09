@@ -3,6 +3,8 @@
 
 #pragma once
 
+#include <atomic>
+
 #include <mutex>
 #include <optional>
 #include <thread>
@@ -178,9 +180,8 @@ public:
     void RefreshImage(Image& image);
 
     /// Retrieves the sampler that matches the provided S# descriptor.
-    [[nodiscard]] vk::Sampler GetSampler(const AmdGpu::Sampler& sampler,
-                                         AmdGpu::BorderColorBuffer border_color_base,
-                                         bool is_depth);
+    [[nodiscard]] Sampler& GetSampler(const AmdGpu::Sampler& sampler,
+                                      AmdGpu::BorderColorBuffer border_color_base, bool is_depth);
 
     /// Retrieves the image with the specified id.
     [[nodiscard]] Image& GetImage(ImageId id) {
@@ -428,6 +429,9 @@ private:
     Common::LRUCache<Sampler> sampler_lru_cache;
     const bool readback_linear_images;
     std::mutex download_images_mutex;
+    /// Whether download_images / priority_frees may be non-empty, read without their locks.
+    std::atomic<bool> any_download_images{};
+    std::atomic<bool> any_priority_frees{};
     /// Staging buffers of priority downloads, freed back on the GPU thread.
     std::mutex priority_frees_mutex;
     std::vector<Vulkan::StagingBufferRef> priority_frees;

@@ -3,8 +3,10 @@
 
 #pragma once
 
+#include <atomic>
 #include <condition_variable>
 #include <coroutine>
+#include <deque>
 #include <exception>
 #include <mutex>
 #include <semaphore>
@@ -92,6 +94,11 @@ public:
         return num_submits == 0;
     }
 
+    /// Whether a SubmitDone hasn't been handled by the command processor yet.
+    bool IsSubmitDonePending() const {
+        return submit_done;
+    }
+
     void SetVoPort(Libraries::VideoOut::VideoOutPort* port) {
         vo_port = port;
     }
@@ -99,6 +106,12 @@ public:
     void BindRasterizer(Vulkan::Rasterizer* rasterizer_) {
         rasterizer = rasterizer_;
     }
+
+    /// Reads ahead from the draw or dispatch being run to the end of its submission, so the
+    /// pipelines of the draws and dispatches still to come start compiling on the workers.
+    /// Registers are restored after. Runs at most once per submission, only on the graphics
+    /// queue and only with the compile_lookahead setting. Returns true if it ran.
+    bool LookAhead();
 
     template <bool wait_done = false>
     void SendCommand(auto&& func) {
@@ -191,21 +204,56 @@ private:
     using CmdBuffer = std::pair<std::span<const u32>, std::span<const u32>>;
     CmdBuffer CopyCmdBuffers(std::span<const u32> dcb, std::span<const u32> ccb);
     Task ProcessGraphics(std::span<const u32> dcb);
+    /// One level of LookAhead: register writes, draws and dispatches in `dcb`, following
+    /// indirect buffers. Returns false once the budget is spent or the reading has to stop.
+    struct LookAheadBudget {
+        u32 packets;
+        u32 pipelines;
+        /// The DE counter as the reading goes, to know which constant engine dumps exist yet.
+        u32 de_count;
+        /// Stopped at a draw whose descriptors the constant engine hasn't written yet.
+        bool waits_for_ce;
+    };
+    bool ScanAhead(std::span<const u32> dcb, LookAheadBudget& budget, u32 depth);
     Task ProcessCeUpdate(std::span<const u32> ccb);
     template <bool is_indirect = false>
     Task ProcessCompute(std::span<const u32> acb, u32 vqid);
 
     /// Label writes of a fence signal, as dword address and value pairs.
-    using LabelWrites = boost::container::small_vector<std::pair<VAddr, u32>, 2>;
+    struct LabelWrite {
+        VAddr address;
+        u32 value;
+    };
+    using LabelWrites = boost::container::small_vector<LabelWrite, 2>;
     static void RecordLabelWrite(LabelWrites& writes, void* address, u64 data, u32 num_bytes);
+    /// Writes a fence signal's label, unless it's a deferred signal whose label WriteLabelsEarly
+    /// already wrote.
+    static void WriteFenceLabel(void* address, u64 data, u32 num_bytes);
+    /// The Liverpool and sequence number of the deferred signal running on this thread.
+    static thread_local Liverpool* running_label_owner;
+    static thread_local u64 running_label_seq;
+    /// A queue wait passed on deferred signal `seq`: writes the labels of it and the signals
+    /// before it that haven't landed, as hardware would have them in memory by then.
+    void WriteLabelsEarly(u64 seq);
 
     /// Hands a fence signal to the rasterizer to run later (fenced readbacks). Returns false
     /// if it must run now. `writes` are the label values the signal will write.
     bool DeferFenceSignal(Common::UniqueFunction<void>&& signal, bool throttle,
                           const LabelWrites& writes);
 
-    /// Drops deferred label values the command processor itself overwrites.
-    void ForgetDeferredLabels(VAddr address, u64 size);
+    /// Call before the command processor writes guest memory itself (WRITE_DATA, DMA_DATA,
+    /// semaphores...). On hardware those writes happen in order after any wait that read a
+    /// label, so after that label's write. Here a deferred label may still be on its way, so
+    /// this waits for it if the write overlaps one, or follows a wait that read a deferred
+    /// value: otherwise the late label write lands over this one (TLG's compute stall), or
+    /// the guest learns of progress before the label it waited behind is written. Then drops
+    /// the deferred values this write replaces.
+    void OrderCpWrite(VAddr address, u64 size);
+
+    /// Guest memory may have changed since the last draw: a wait on memory or the guest, a
+    /// memory write of the command processor's, another task's turn, a new submission. Copies
+    /// of it the rasterizer made since can't stand in for later reads.
+    void ForgetStreamCopies();
 
     /// Tests a WAIT_REG_MEM condition. A label whose signal is deferred reads as its new value.
     bool TestWait(const PM4CmdWaitRegMem* wait);
@@ -214,7 +262,8 @@ private:
     void LogWaitStats();
 
     void ProcessCommands();
-    void ProcessCeQueue();
+    /// Runs the constant engine's task, if any; returns whether there was one.
+    bool ProcessCeQueue();
     void Process(std::stop_token stoken);
     void HandleGetLodStats(const PM4CmdGetLodStats* get_lod);
 
@@ -247,6 +296,12 @@ private:
         static std::array<u8, 48_KB> constants_heap;
     } cblock{};
 
+    /// The command buffer of each graphics task level being run, innermost last, each at the
+    /// packet it's on, for LookAhead.
+    std::vector<std::span<const u32>*> gfx_frames;
+    bool looked_ahead{};
+    bool in_lookahead{};
+
     /// Labels whose fence signal is deferred until the data it guards is in guest memory.
     /// Only the guest CPU needs that delay: the command processor records everything in
     /// order on one Vulkan queue, so its own waits see the new value at once, as when signals
@@ -256,11 +311,30 @@ private:
         u64 seq;
     };
     std::unordered_map<VAddr, DeferredLabel> deferred_labels;
+    size_t deferred_labels_cleanup_at{256};
     u64 deferred_label_seq{};
     std::atomic<u64> landed_label_seq{};
+    /// The newest deferred signal a queue wait passed on: the command processor's own memory
+    /// writes after that wait must land after it.
+    u64 cp_order_seq{};
+    /// Deferred label writes not yet landed, in signal order, for WriteLabelsEarly. The newest
+    /// signal a queue wait passed on (its labels and those before it are in memory), and the
+    /// newest one whose label writes ran. All under label_mutex, which orders a signal's late
+    /// write against an early one.
+    struct PendingLabel {
+        u64 seq;
+        VAddr address;
+        u32 value;
+    };
+    std::mutex label_mutex;
+    std::deque<PendingLabel> pending_labels;
+    u64 passed_label_seq{};
+    u64 labels_written_seq{};
     struct WaitStats {
         u64 failed_polls{};
         u64 deferred_label_hits{};
+        u64 order_waits{};
+        u64 order_wait_ns{};
         u64 last_log_ns{};
         u64 ab_switches{};
     } wait_stats;

@@ -7,6 +7,7 @@
 #include "common/assert.h"
 #include "common/decoder.h"
 #include "common/signal_context.h"
+#include "common/soft_assert.h"
 #include "core/cpu_patches.h" // Windows static guest red-zone protection
 #include "core/libraries/kernel/kernel.h"
 #include "core/libraries/kernel/threads/exception.h"
@@ -289,6 +290,9 @@ void SignalHandler(int sig, siginfo_t* info, void* raw_context) {
             if (thread && thread->DispatchSignal(NativeToOrbisSignal(sig), info_p, context_p)) {
                 return;
             }
+            // A fault on a thread with soft asserts (a shader translated early) still stops
+            // here: an exception can't unwind out of a signal handler.
+            Common::SoftAsserts::EndOnThisThread();
             UNREACHABLE_MSG("Unhandled access violation at code address {}: {} address {}",
                             fmt::ptr(code_address),
                             is_write  ? "Write to"

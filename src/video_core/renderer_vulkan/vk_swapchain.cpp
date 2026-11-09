@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 #include <algorithm>
+#include <atomic>
 #include <limits>
 #include "common/assert.h"
 #include "common/logging/log.h"
@@ -110,6 +111,15 @@ bool Swapchain::AcquireNextImage() {
         device.acquireNextImageKHR(swapchain, std::numeric_limits<u64>::max(),
                                    image_acquired[frame_index], VK_NULL_HANDLE, &image_index);
 
+    if (result != vk::Result::eSuccess) {
+        // Debugging hangs with an idle GPU: a present waiting on an acquire that never signals
+        // would block the queue. The first few are enough.
+        static std::atomic<u32> logged{};
+        if (logged.fetch_add(1, std::memory_order_relaxed) < 20) {
+            LOG_WARNING(Render_Vulkan, "Swapchain acquire returned {} (frame index {})",
+                        vk::to_string(result), frame_index);
+        }
+    }
     switch (result) {
     case vk::Result::eSuccess:
         break;
@@ -140,6 +150,10 @@ bool Swapchain::Present() {
 
     auto result = instance.GetPresentQueue().presentKHR(present_info);
     if (result == vk::Result::eErrorOutOfDateKHR || result == vk::Result::eSuboptimalKHR) {
+        static std::atomic<u32> logged{};
+        if (logged.fetch_add(1, std::memory_order_relaxed) < 20) {
+            LOG_WARNING(Render_Vulkan, "Swapchain present returned {}", vk::to_string(result));
+        }
         needs_recreation = true;
     } else {
         ASSERT_MSG(result == vk::Result::eSuccess, "Swapchain presentation failed: {}",

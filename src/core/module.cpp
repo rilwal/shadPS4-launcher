@@ -16,6 +16,7 @@
 #include "core/memory.h"
 #include "core/module.h"
 #include "core/tls.h"
+#include "video_core/shader_scanner.h"
 
 namespace Core {
 
@@ -168,6 +169,7 @@ void Module::LoadModuleToMemory(u32& max_tls_index) {
             ASSERT_MSG(result == ORBIS_OK, "Failed to map segment at {:#x} for module {}",
                        segment_vaddr, name);
             elf.LoadSegment(segment_vaddr, phdr.p_offset, phdr.p_filesz);
+            VideoCore::ShaderScanner::NoteFilled(segment_vaddr, phdr.p_filesz);
         }
         if (info.num_segments < 4) {
             auto& segment = info.segments[info.num_segments++];

@@ -15,7 +15,7 @@
 #include "common/logging/log.h"
 #include "common/types.h"
 
-#define EmulatorSettings (*EmulatorSettingsImpl::GetInstance())
+#define EmulatorSettings (*EmulatorSettingsImpl::Instance())
 
 enum HideCursorState : int {
     Never,
@@ -421,7 +421,15 @@ struct GPUSettings {
     Setting<u32> internal_screen_height{720};
     Setting<bool> null_gpu{false};
     Setting<bool> copy_gpu_buffers{false};
-    Setting<u32> readbacks_mode{GpuReadbacksMode::Disabled};
+    /// Fenced: GPU-written memory lands in guest memory at fences, and CPU reads of memory
+    /// still in flight wait for it. Measured as cheap as Disabled where nothing is read back.
+    Setting<u32> readbacks_mode{GpuReadbacksMode::Fenced};
+    /// With Precise or Fenced readbacks, a CPU load that faults on a protected page but reads
+    /// none of its GPU-written bytes is finished from guest memory by the fault handler instead
+    /// of reading the page back (src/core/fault_load.h). Linux x86-64 only. Off by default:
+    /// once the GPU thread read shader code through the backing, it measured no faster (it
+    /// trades Uncharted's stalling reads for as many stalling writes to the same pages).
+    Setting<bool> fault_load_emulation{false};
     Setting<bool> readback_linear_images_enabled{false};
     Setting<bool> direct_memory_access_enabled{false};
     Setting<bool> dump_shaders{false};
@@ -437,6 +445,40 @@ struct GPUSettings {
     Setting<bool> userfaultfd{false};
     Setting<bool> inline_fetch_shader{false};
     Setting<bool> fast_shader_math{false};
+    /// New graphics pipelines: 0 = created on the GPU thread; 1 = on compile threads, skipping
+    /// draws to targets drawn every frame until ready and waiting for the rest; 2 = unoptimized
+    /// at once, replaced by an optimized one later; 3 = like 1 but skipping every draw.
+    Setting<u32> async_pipelines{0};
+    /// Most the GPU thread waits for background pipelines per 60 Hz frame's worth of time.
+    Setting<u32> async_pipeline_wait_ms{2};
+    /// Seconds between flipping async pipelines on and off, for A/B runs (0 = no flipping).
+    Setting<u32> async_pipelines_ab_seconds{0};
+    /// Also time an unoptimized creation of every new graphics pipeline and log both.
+    Setting<bool> pipeline_compile_probe{false};
+    /// Times each GPU submission with timestamps and logs the GPU's busy time with the compile
+    /// stats.
+    Setting<bool> gpu_timing{false};
+    /// Binds shader resources through VK_EXT_descriptor_heap where the driver has it, so a
+    /// shader doesn't depend on the other stages of its pipeline. Read at boot.
+    Setting<bool> descriptor_heap{false};
+    /// Draws with VK_EXT_shader_object instead of pipelines, so each shader is compiled once
+    /// and reused by every draw that uses it. Needs the descriptor heap.
+    Setting<bool> shader_objects{false};
+    /// When a draw needs a new pipeline, reads ahead through the rest of its submission and
+    /// starts compiling the pipelines of later draws and dispatches on the workers. Only with
+    /// the async_pipelines modes that skip draws.
+    Setting<bool> compile_lookahead{false};
+    /// Looks through the game's memory for shaders as it loads them, ahead of their first
+    /// draw. Linux only for now.
+    Setting<bool> shader_prescan{false};
+    /// Compiles one shader for draws that only differ in what doesn't change its code, such
+    /// as render targets of the same number class but different formats. With the descriptor
+    /// heap, formatted buffer loads also read the buffer's format at run time.
+    Setting<bool> fewer_shader_variants{false};
+    /// Threads that translate and compile the shaders shader_prescan finds before their first
+    /// draw, with the draw state guessed from each shader's own registers; 0 turns it off. Needs
+    /// the descriptor heap. A draw whose state differs from the guess compiles as before.
+    Setting<u32> shader_precompile_threads{0};
     /// Seconds between automatic A/B switches (0 = only on the hotkey).
     Setting<u32> ab_switch_seconds{0};
 
@@ -456,6 +498,7 @@ struct GPUSettings {
             make_override<GPUSettings>("dump_shaders", &GPUSettings::dump_shaders),
             make_override<GPUSettings>("patch_shaders", &GPUSettings::patch_shaders),
             make_override<GPUSettings>("readbacks_mode", &GPUSettings::readbacks_mode),
+            make_override<GPUSettings>("fault_load_emulation", &GPUSettings::fault_load_emulation),
             make_override<GPUSettings>("readback_linear_images_enabled",
                                        &GPUSettings::readback_linear_images_enabled),
             make_override<GPUSettings>("direct_memory_access_enabled",
@@ -464,18 +507,35 @@ struct GPUSettings {
             make_override<GPUSettings>("userfaultfd", &GPUSettings::userfaultfd),
             make_override<GPUSettings>("inline_fetch_shader", &GPUSettings::inline_fetch_shader),
             make_override<GPUSettings>("fast_shader_math", &GPUSettings::fast_shader_math),
+            make_override<GPUSettings>("async_pipelines", &GPUSettings::async_pipelines),
+            make_override<GPUSettings>("async_pipeline_wait_ms",
+                                       &GPUSettings::async_pipeline_wait_ms),
+            make_override<GPUSettings>("async_pipelines_ab_seconds",
+                                       &GPUSettings::async_pipelines_ab_seconds),
+            make_override<GPUSettings>("pipeline_compile_probe",
+                                       &GPUSettings::pipeline_compile_probe),
+            make_override<GPUSettings>("gpu_timing", &GPUSettings::gpu_timing),
+            make_override<GPUSettings>("shader_precompile_threads",
+                                       &GPUSettings::shader_precompile_threads),
+            make_override<GPUSettings>("descriptor_heap", &GPUSettings::descriptor_heap),
+            make_override<GPUSettings>("shader_objects", &GPUSettings::shader_objects),
+            make_override<GPUSettings>("compile_lookahead", &GPUSettings::compile_lookahead),
+            make_override<GPUSettings>("shader_prescan", &GPUSettings::shader_prescan),
+            make_override<GPUSettings>("fewer_shader_variants",
+                                       &GPUSettings::fewer_shader_variants),
             make_override<GPUSettings>("ab_switch_seconds", &GPUSettings::ab_switch_seconds),
         };
     }
 };
-NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE(GPUSettings, window_width, window_height, internal_screen_width,
-                                   internal_screen_height, null_gpu, copy_gpu_buffers,
-                                   readbacks_mode, readback_linear_images_enabled,
-                                   direct_memory_access_enabled, dump_shaders, patch_shaders,
-                                   vblank_frequency, full_screen, full_screen_mode, present_mode,
-                                   hdr_allowed, fsr_enabled, rcas_enabled, rcas_attenuation,
-                                   userfaultfd, inline_fetch_shader, fast_shader_math,
-                                   ab_switch_seconds)
+NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE(
+    GPUSettings, window_width, window_height, internal_screen_width, internal_screen_height,
+    null_gpu, copy_gpu_buffers, readbacks_mode, fault_load_emulation,
+    readback_linear_images_enabled, direct_memory_access_enabled, dump_shaders, patch_shaders,
+    vblank_frequency, full_screen, full_screen_mode, present_mode, hdr_allowed, fsr_enabled,
+    rcas_enabled, rcas_attenuation, userfaultfd, inline_fetch_shader, fast_shader_math,
+    async_pipelines, async_pipeline_wait_ms, async_pipelines_ab_seconds, pipeline_compile_probe,
+    descriptor_heap, shader_objects, compile_lookahead, shader_prescan, fewer_shader_variants,
+    gpu_timing, shader_precompile_threads, ab_switch_seconds)
 
 // -------------------------------
 // Vulkan settings
@@ -533,6 +593,16 @@ public:
     static std::shared_ptr<EmulatorSettingsImpl> GetInstance();
     static void SetInstance(std::shared_ptr<EmulatorSettingsImpl> instance);
 
+    /// The current instance without a lock or a reference count: the GPU thread reads settings
+    /// on every draw, and GetInstance's mutex and shared_ptr copy cost about 1% of it. Stays
+    /// valid while s_instance holds it.
+    static EmulatorSettingsImpl* Instance() {
+        if (auto* current = s_current.load(std::memory_order_acquire)) {
+            return current;
+        }
+        return GetInstance().get();
+    }
+
     bool Save(const std::string& serial = "");
     bool Load(const std::string& serial = "");
     void SetDefaultValues();
@@ -587,6 +657,7 @@ private:
     std::atomic<bool> m_shadnet_session_disabled{false};
 
     static std::shared_ptr<EmulatorSettingsImpl> s_instance;
+    static inline std::atomic<EmulatorSettingsImpl*> s_current{};
     static std::mutex s_mutex;
 
     /// Apply overrideable fields from groupJson into group.game_specific_value.
@@ -777,6 +848,7 @@ public:
     SETTING_FORWARD_BOOL(m_gpu, RcasEnabled, rcas_enabled)
     SETTING_FORWARD(m_gpu, RcasAttenuation, rcas_attenuation)
     SETTING_FORWARD(m_gpu, ReadbacksMode, readbacks_mode)
+    SETTING_FORWARD_BOOL(m_gpu, FaultLoadEmulation, fault_load_emulation)
     SETTING_FORWARD(m_gpu, AbSwitchSeconds, ab_switch_seconds)
     SETTING_FORWARD_BOOL(m_gpu, ReadbackLinearImagesEnabled, readback_linear_images_enabled)
     SETTING_FORWARD_BOOL(m_gpu, DirectMemoryAccessEnabled, direct_memory_access_enabled)
@@ -784,6 +856,17 @@ public:
     SETTING_FORWARD_BOOL(m_gpu, UserfaultfdTracking, userfaultfd)
     SETTING_FORWARD_BOOL_READONLY(m_gpu, InlineFetchShader, inline_fetch_shader)
     SETTING_FORWARD_BOOL_READONLY(m_gpu, FastShaderMath, fast_shader_math)
+    SETTING_FORWARD(m_gpu, AsyncPipelines, async_pipelines)
+    SETTING_FORWARD(m_gpu, AsyncPipelineWaitMs, async_pipeline_wait_ms)
+    SETTING_FORWARD(m_gpu, AsyncPipelinesAbSeconds, async_pipelines_ab_seconds)
+    SETTING_FORWARD_BOOL(m_gpu, PipelineCompileProbe, pipeline_compile_probe)
+    SETTING_FORWARD_BOOL(m_gpu, DescriptorHeap, descriptor_heap)
+    SETTING_FORWARD_BOOL(m_gpu, ShaderObjects, shader_objects)
+    SETTING_FORWARD_BOOL(m_gpu, CompileLookahead, compile_lookahead)
+    SETTING_FORWARD_BOOL(m_gpu, ShaderPrescan, shader_prescan)
+    SETTING_FORWARD_BOOL(m_gpu, FewerShaderVariants, fewer_shader_variants)
+    SETTING_FORWARD_BOOL(m_gpu, GpuTiming, gpu_timing)
+    SETTING_FORWARD(m_gpu, ShaderPrecompileThreads, shader_precompile_threads)
 
     u32 GetVblankFrequency() {
         if (m_gpu.vblank_frequency.value < 30) {

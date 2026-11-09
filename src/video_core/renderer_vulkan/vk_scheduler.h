@@ -5,7 +5,11 @@
 
 #include <condition_variable>
 #include <mutex>
+#include <optional>
+#include <source_location>
+#include <string>
 #include <thread>
+#include <vector>
 #include <queue>
 
 #include "common/interval_set.h"
@@ -126,6 +130,8 @@ struct DynamicState {
         bool color_write_masks : 1;
         bool line_width : 1;
         bool feedback_loop_enabled : 1;
+        /// Shader objects and the state they set, which a pipeline bind leaves undefined.
+        bool shader_objects : 1;
     } dirty_state{};
 
     Viewports viewports{};
@@ -166,6 +172,13 @@ struct DynamicState {
 
     /// Commits the dynamic state to the provided command buffer.
     void Commit(const Instance& instance, const vk::CommandBuffer& cmdbuf);
+
+    /// True once after an invalidation, so the rasterizer binds its shader objects again.
+    bool TakeShaderObjectsDirty() {
+        const bool dirty = dirty_state.shader_objects;
+        dirty_state.shader_objects = false;
+        return dirty;
+    }
 
     /// Invalidates all dynamic state to be flushed into the next command buffer.
     void Invalidate() {
@@ -364,10 +377,14 @@ public:
     void Flush();
 
     /// Sends the current execution context to the GPU and waits for it to complete.
-    void Finish();
+    void Finish(std::source_location where = std::source_location::current());
 
     /// Waits for the given tick to trigger on the GPU.
-    void Wait(u64 tick);
+    void Wait(u64 tick, std::source_location where = std::source_location::current());
+
+    /// Where the GPU thread waited for the GPU since the last call, most time first, as
+    /// "file:line n waits X ms" entries.
+    std::vector<std::string> TakeWaitSites();
 
     /// Attempts to execute operations whose tick the GPU has caught up with.
     void PopPendingOperations();
@@ -390,6 +407,11 @@ public:
     }
 
     /// Sets a function to be called on every scheduler submission.
+    /// Names this scheduler's timeline for the log of a GPU wait that takes too long.
+    void SetName(const char* name) {
+        work_semaphore.SetName(name);
+    }
+
     void SetSubmitCallback(SubmitFunc&& on_submit) {
         this->on_submit = std::move(on_submit);
     }
@@ -447,7 +469,88 @@ public:
 
     static std::mutex submit_mutex;
 
+    /// GPU time of each submission, from timestamps at its start and end, while gpu_timing is
+    /// on. Submissions run one after another, so the sum is how long the GPU was busy.
+    /// Kinds of GPU work timed separately inside each timed submission. A timestamp is written
+    /// wherever the kind changes, and the time up to it goes to the kind that was running, so the
+    /// kinds add up to the submission's time.
+    enum class GpuSection : u8 {
+        Other,
+        Draws,
+        Dispatches,
+        Detiling,
+        ImageUploads,
+        /// Copies between images: the texture cache's copies on overlaps and format
+        /// reinterpretations, mips, color/depth conversions.
+        ImageCopies,
+        ImageClears,
+        ImageResolves,
+        ImageDownloads,
+        /// Copies and fills between device memory buffers.
+        BufferCopies,
+        /// Copies from host memory into device memory.
+        BufferUploads,
+        /// Copies from device memory into host memory.
+        BufferDownloads,
+        Count,
+    };
+    static constexpr std::array<const char*, size_t(GpuSection::Count)> GpuSectionNames = {
+        "other",           "draws",         "dispatches",     "detiling",
+        "image uploads",   "image copies",  "image clears",   "image resolves",
+        "image downloads", "buffer copies", "buffer uploads", "buffer downloads",
+    };
+
+    struct GpuTime {
+        u64 busy_ns{};
+        u64 worst_ns{};
+        u32 submits{};
+        std::array<u64, size_t(GpuSection::Count)> section_ns{};
+        /// Submissions that ran out of timestamps; what followed went to the last kind.
+        u32 overflowed{};
+    };
+    /// What finished since the last call.
+    GpuTime TakeGpuTime();
+
+    /// Work recorded from here on is of this kind, until the next change.
+    void SetGpuSection(GpuSection section) {
+        if (section != gpu_section) {
+            MarkGpuSection(section);
+        }
+    }
+    [[nodiscard]] GpuSection CurrentGpuSection() const noexcept {
+        return gpu_section;
+    }
+
+    /// Counts bytes moved by work of the current kind, for the slow submit split.
+    void AddGpuSectionBytes(u64 bytes) noexcept {
+        if (current_timed) {
+            timed_bytes[size_t(gpu_section)] += bytes;
+        }
+    }
+
+    /// Sets a kind for its scope, then goes back to the one before.
+    class ScopedGpuSection {
+    public:
+        ScopedGpuSection(Scheduler& scheduler_, GpuSection section)
+            : scheduler{scheduler_}, previous{scheduler_.CurrentGpuSection()} {
+            scheduler.SetGpuSection(section);
+        }
+        ~ScopedGpuSection() {
+            scheduler.SetGpuSection(previous);
+        }
+        ScopedGpuSection(const ScopedGpuSection&) = delete;
+        ScopedGpuSection& operator=(const ScopedGpuSection&) = delete;
+
+    private:
+        Scheduler& scheduler;
+        GpuSection previous;
+    };
+
 private:
+    void ReadGpuTimes();
+
+    void MarkGpuSection(GpuSection section);
+
     void EndSession();
 
     void SubmitExecution(SubmitInfo& info);
@@ -455,6 +558,15 @@ private:
     void PriorityPendingOpsThread(std::stop_token stoken);
 
 private:
+    /// GPU-thread waits by the call site that asked for them.
+    struct WaitSite {
+        const char* file;
+        u32 line;
+        u64 count;
+        u64 ns;
+    };
+    std::vector<WaitSite> wait_sites;
+
     const Instance& instance;
     Semaphore work_semaphore;
     CommandPool command_pool;
@@ -480,6 +592,31 @@ private:
     RenderState render_state;
     bool is_rendering = false;
     tracy::VkCtxScope* profiler_scope{};
+    /// Each timed submission gets a slot of timestamps: its start, one per change of kind, and
+    /// its end. Slots are used as a ring.
+    static constexpr u32 NumTimedSubmits = 64;
+    static constexpr u32 QueriesPerSubmit = 2048;
+    /// Submissions that took this long on the GPU log their split.
+    static constexpr u64 SlowSubmitNs = 30'000'000;
+    vk::UniqueQueryPool timestamp_pool;
+    u32 next_timed{};
+    /// The submission being recorded is timed in this slot.
+    std::optional<u32> current_timed;
+    /// The kind of each timed stretch so far, in order; stretch i ends at query i + 1.
+    std::vector<GpuSection> timed_sections;
+    /// Bytes moved by each kind in the submission being recorded.
+    std::array<u64, size_t(GpuSection::Count)> timed_bytes{};
+    GpuSection gpu_section{GpuSection::Other};
+    bool ending_submit{};
+    struct TimedSubmit {
+        u32 slot;
+        u64 tick;
+        std::vector<GpuSection> sections;
+        std::array<u64, size_t(GpuSection::Count)> bytes;
+    };
+    std::queue<TimedSubmit> timed_submits;
+    std::mutex gpu_time_mutex;
+    GpuTime gpu_time;
 };
 
 } // namespace Vulkan

@@ -13,6 +13,7 @@
 #include "shader_recompiler/ir/reg.h"
 #include "shader_recompiler/ir/reinterpret.h"
 #include "shader_recompiler/profile.h"
+#include "shader_recompiler/runtime_buffer_format.h"
 #include "shader_recompiler/runtime_info.h"
 #include "video_core/amdgpu/resource.h"
 
@@ -1150,10 +1151,52 @@ template void Translator::SetDstPk<IR::U32, true>(const InstOperand& operand,
 template void Translator::SetDstPk<IR::F32, false>(const InstOperand& operand,
                                                    const pk_type<IR::F32>& value);
 
+/// Makes component `i` of a vertex attribute from its raw dwords by its RuntimeVertexFormat,
+/// without branches.
+static IR::F32 ReadRuntimeVertexComponent(IR::IREmitter& ir, const std::array<IR::U32, 4>& dwords,
+                                          const IR::Value& fields, const IR::Value& scales, u32 i) {
+    using Format = RuntimeVertexFormat;
+    using Mode = Format::Mode;
+    const IR::U32 word{ir.CompositeExtract(fields, i / 2)};
+    const auto field = [&](u32 shift, u32 bits) {
+        return ir.BitFieldExtract(word, ir.Imm32(16 * (i % 2) + shift), ir.Imm32(bits));
+    };
+    const IR::U32 dword_index{field(Format::DwordShift, 2)};
+    const IR::U32 offset{field(Format::OffsetShift, 5)};
+    const IR::U32 width{field(Format::WidthShift, 6)};
+    const IR::U1 is_signed{ir.INotEqual(field(Format::SignedShift, 1), ir.Imm32(0u))};
+    const IR::U32 mode{field(Format::ModeShift, 2)};
+    const auto is_mode = [&](Mode m) { return ir.IEqual(mode, ir.Imm32(static_cast<u32>(m))); };
+
+    const IR::U32 dword{ir.Select(
+        ir.IEqual(dword_index, ir.Imm32(0u)), dwords[0],
+        ir.Select(ir.IEqual(dword_index, ir.Imm32(1u)), dwords[1],
+                  ir.Select(ir.IEqual(dword_index, ir.Imm32(2u)), dwords[2], dwords[3])))};
+    const IR::U32 u{ir.BitFieldExtract(dword, offset, width)};
+    const IR::U32 s{ir.BitFieldExtract(dword, offset, width, true)};
+    const IR::F32 raw{ir.BitCast<IR::F32, IR::U32>(IR::U32{ir.Select(is_signed, s, u)})};
+    const IR::F32 half{ir.CompositeExtract(ir.Unpack2x16(AmdGpu::NumberFormat::Float, u), 0)};
+    const IR::F32 scale{ir.BitCast<IR::F32, IR::U32>(IR::U32{ir.CompositeExtract(scales, i)})};
+    const IR::F32 converted{ir.FPMul(
+        IR::F32{ir.Select(is_signed, ir.ConvertSToF(32, 32, s), ir.ConvertUToF(32, 32, u))},
+        scale)};
+    IR::F32 value{ir.Select(is_mode(Mode::Snorm), ir.FPMax(converted, ir.Imm32(-1.f)), converted)};
+    value = IR::F32{ir.Select(is_mode(Mode::Half), half, value)};
+    value = IR::F32{ir.Select(is_mode(Mode::Raw), raw, value)};
+
+    // No bits: the offset says which constant.
+    using Constant = Format::Constant;
+    const IR::F32 constant{ir.Select(
+        ir.IEqual(offset, ir.Imm32(static_cast<u32>(Constant::One))), ir.Imm32(1.f),
+        IR::F32{ir.Select(ir.IEqual(offset, ir.Imm32(static_cast<u32>(Constant::IntegerOne))),
+                          ir.BitCast<IR::F32, IR::U32>(ir.Imm32(1u)), ir.Imm32(0.f))})};
+    return IR::F32{ir.Select(ir.IEqual(width, ir.Imm32(0u)), constant, value)};
+}
+
 void Translator::EmitFetch(const GcnInst& inst) {
     const auto code_sgpr_base = inst.src[0].code;
 
-    if (EmulatorSettings.IsInlineFetchShader()) {
+    if (EmulatorSettings.IsInlineFetchShader() && !info.guess_state && !info.replay) {
         // Translate fetch shader inline using regular buffer bindings; useful for debugging.
         const auto* code = GetFetchShaderCode(info, code_sgpr_base);
         GcnCodeSlice slice(code, code + std::numeric_limits<u32>::max());
@@ -1175,7 +1218,7 @@ void Translator::EmitFetch(const GcnInst& inst) {
     info.fetch_shader_sgpr_base = code_sgpr_base;
     ASSERT(ParseFetchShader(info, fetch_data));
 
-    if (EmulatorSettings.IsDumpShaders()) {
+    if (EmulatorSettings.IsDumpShaders() && !info.guess_state && !info.replay) {
         using namespace Common::FS;
         const auto dump_dir = GetUserPath(PathType::ShaderDir) / "dumps";
         if (!std::filesystem::exists(dump_dir)) {
@@ -1194,6 +1237,21 @@ void Translator::EmitFetch(const GcnInst& inst) {
 
         // Read the V# of the attribute to figure out component number and type.
         const auto buffer = attrib.GetSharp(info);
+        if (UsesRuntimeVertexFormat(profile.runtime_vertex_formats, buffer)) {
+            // The vertex input gives the element's raw bits, and the stage table says how to
+            // make each component from them.
+            std::array<IR::U32, 4> dwords;
+            for (u32 i = 0; i < 4; ++i) {
+                dwords[i] = ir.BitCast<IR::U32, IR::F32>(ir.GetAttribute(attr, i));
+            }
+            const IR::Value fields = ir.VertexFormat(ir.Imm32(semantic * 2));
+            const IR::Value scales = ir.VertexFormat(ir.Imm32(semantic * 2 + 1));
+            for (u32 i = 0; i < attrib.num_elements; i++) {
+                ir.SetVectorReg(dst_reg++,
+                                ReadRuntimeVertexComponent(ir, dwords, fields, scales, i));
+            }
+            continue;
+        }
         const auto values =
             ir.CompositeConstruct(ir.GetAttribute(attr, 0), ir.GetAttribute(attr, 1),
                                   ir.GetAttribute(attr, 2), ir.GetAttribute(attr, 3));

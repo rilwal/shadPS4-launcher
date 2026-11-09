@@ -109,6 +109,11 @@ CFG::CFG(Common::ObjectPool<Block>& block_pool_, std::span<const GcnInst> inst_l
     labels.reserve(LabelReserveSize);
     EmitLabels();
     EmitBlocks();
+    // Code with no s_endpgm or branch has one label and so no blocks (bytes the shader scanner
+    // took for a shader, seen in The Last Guardian). An empty block set made
+    // RemoveUnreachableBlocks loop forever.
+    ASSERT_MSG(!blocks.empty(), "Program of {} instructions has no blocks (no s_endpgm)",
+               inst_list.size());
     LinkBlocks();
     SplitDivergenceScopes();
     RemoveUnreachableBlocks();
@@ -157,6 +162,18 @@ void CFG::EmitLabels() {
 
     // Sort labels to make sure block insertion is correct.
     std::ranges::sort(labels);
+
+    // A branch into the middle of an instruction or past the end of the program can't come from
+    // a real shader, only from bytes that aren't one (the shader scanner's guesses), and makes
+    // blocks that overlap or run off the instruction list.
+    for (u32 i = 0; i < inst_list.size(); ++i) {
+        ASSERT_MSG(inst_list[i].length != 0, "Instruction {} has no length", i);
+    }
+    for (const Label label : labels) {
+        ASSERT_MSG(std::ranges::binary_search(index_to_pc, label),
+                   "Branch target {:#x} isn't the start of an instruction (program ends at {:#x})",
+                   label, pc);
+    }
 }
 
 void CFG::SplitDivergenceScopes() {
@@ -212,6 +229,13 @@ void CFG::SplitDivergenceScopes() {
                     }
 
                     // Create a new block for the divergence scope.
+                    // The scope's blocks must sort between the parent and the next block.
+                    ASSERT_MSG(curr_begin <= curr_end &&
+                                   curr_end <= static_cast<s32>(blk->end_index) &&
+                                   index_to_pc[curr_begin] > blk->begin &&
+                                   (next_blk == blocks.end() || blk->end <= next_blk->begin),
+                               "Divergence scope {}-{} doesn't fit block {:#x}", curr_begin,
+                               curr_end, blk->begin);
                     Block* block = block_pool.Create();
                     block->begin = index_to_pc[curr_begin];
                     block->end = index_to_pc[curr_end];
@@ -372,7 +396,11 @@ void CFG::LinkBlocks() {
 }
 
 void CFG::RemoveUnreachableBlocks() {
+    // Each step visits or erases a block, so more steps than blocks means the set is corrupt
+    // (seen with a scanned guess in The Last Guardian, which spun here forever).
+    size_t steps_left = blocks.size();
     for (auto it = std::next(blocks.begin()); it != blocks.end();) {
+        ASSERT_MSG(steps_left-- != 0, "Block list of {} blocks doesn't end", blocks.size());
         if (it->num_predecessors == 0) {
             LOG_WARNING(Render_Recompiler, "Removing unreachable block begin={:#x}", it->begin);
             it = blocks.erase(it);

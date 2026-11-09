@@ -1,6 +1,8 @@
 // SPDX-FileCopyrightText: Copyright 2024-2026 shadPS4 Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+#include <chrono>
+
 #include "gnm_error.h"
 #include "gnmdriver.h"
 
@@ -87,7 +89,29 @@ static void ResetSubmissionLock(Platform::InterruptId irq) {
 static void WaitGpuIdle() {
     HLE_TRACE;
     std::unique_lock lock{m_wait_idle};
-    cv_lock.wait(lock, [] { return submission_lock == 0; });
+    // The GPU-idle interrupt clears the lock at the end of each pass of the command processor.
+    // Bloodborne uncapped sometimes waited here forever with the command processor idle, out of
+    // work: whatever lost that interrupt, a lock still set a second after the GPU went idle
+    // with nothing queued is stale. Clear it, and say so.
+    while (!cv_lock.wait_for(lock, std::chrono::seconds{1}, [] { return submission_lock == 0; })) {
+        if (liverpool->IsGpuIdle() && !liverpool->IsSubmitDonePending()) {
+            LOG_WARNING(Lib_GnmDriver,
+                        "Submission lock still set with the GPU idle and nothing queued: the "
+                        "GPU-idle interrupt was lost. Clearing it.");
+            submission_lock = 0;
+            break;
+        }
+    }
+}
+
+/// After a submit: until the next GPU-idle interrupt, further submits wait. Under the same lock
+/// as that interrupt's handler, so it can't come between the check and the store and leave the
+/// lock set with no interrupt to come.
+static void LockSubmissionsUntilIdle() {
+    std::scoped_lock lock{m_wait_idle};
+    if (!liverpool->IsGpuIdle()) {
+        submission_lock = true;
+    }
 }
 
 // Write a special NOP packet with N DWs data block
@@ -1471,9 +1495,7 @@ s32 PS4_SYSV_ABI sceGnmRequestFlipAndSubmitDoneForWorkload(u64 workload, u32* gp
     }
     liverpool->SubmitGfx(dcb_span, {});
 
-    if (!liverpool->IsGpuIdle()) {
-        submission_lock = true;
-    }
+    LockSubmissionsUntilIdle();
     liverpool->SubmitDone();
     send_init_packet = true;
 
@@ -2474,9 +2496,7 @@ s32 PS4_SYSV_ABI sceGnmSubmitDone() {
     LOG_DEBUG(Lib_GnmDriver, "called");
     std::scoped_lock lk{m_submit_lock};
     WaitGpuIdle();
-    if (!liverpool->IsGpuIdle()) {
-        submission_lock = true;
-    }
+    LockSubmissionsUntilIdle();
     liverpool->SubmitDone();
     send_init_packet = true;
     ++frames_submitted;

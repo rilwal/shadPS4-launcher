@@ -3,6 +3,7 @@
 
 #pragma once
 
+#include <algorithm>
 #include <span>
 #include <vector>
 #include <boost/container/static_vector.hpp>
@@ -134,6 +135,53 @@ struct Info : InfoPersistent {
     bool stores_tess_level_outer{};
     bool stores_tess_level_inner{};
     bool translation_failed{};
+    /// Translates without the draw's state, as if all user data were zero: to measure how
+    /// often a shader found ahead of its first draw translates the same with nothing known.
+    bool guess_state{};
+    /// With guess_state, the fetch shader to assume (a Gcn::FetchShaderData), since there's
+    /// no user data to find the real one with.
+    const void* guessed_fetch{};
+    /// With guess_state, image types known from the shader's reflection, by where the T# is
+    /// read: user data registers from `sgpr` on, or `dword` into the table `sgpr` points at.
+    struct GuessedImage {
+        u8 sgpr;
+        bool table;
+        u32 dword;
+        AmdGpu::ImageType type;
+    };
+    std::span<const GuessedImage> guessed_images;
+    /// With guess_state, whether an image the reflection doesn't type counts as 3D when its third
+    /// coordinate is made the same way as x and y. Off by default: on its own it was right for
+    /// 2 and wrong for 25 of Bloodborne's used shaders, and right for 13 and wrong for 8 of
+    /// The Last Guardian's.
+    bool guess_coordinate_3d{};
+    /// Set by a guess translation without guess_coordinate_3d when some image's coordinates
+    /// would have made it 3D, so a 3D variant is worth compiling as well.
+    bool saw_3d_coordinates{};
+    /// With guess_state, where the flattening put dwords read straight from a table a user data
+    /// register points at: flattened offset, register, dword offset in the table.
+    struct FlatSource {
+        u16 flat;
+        u8 sgpr;
+        u32 dword;
+    };
+    std::vector<FlatSource> guess_flat_sources;
+
+    /// Identifies what each flattened user data dword holds (where its value is read from), so
+    /// a flattened buffer recorded by another build is only used if it's laid out the same.
+    /// Zero when only user data registers are flattened.
+    u64 flat_layout{};
+
+    /// A draw's state recorded at an earlier first use, to translate the shader for exactly
+    /// that draw without reading guest memory: the flattened user data (which holds every
+    /// sharp the shader reads), the fetch shader and the vertex buffer V#s by dword offset.
+    struct ReplayState {
+        std::span<const u32> flat_buf;
+        /// A Gcn::FetchShaderData, or null without one.
+        const void* fetch{};
+        std::span<const std::pair<u32, AmdGpu::Buffer>> vertex_buffers;
+    };
+    const ReplayState* replay{};
 
     std::array<Interpolation, IR::NumParams> fs_interpolation{};
 
@@ -154,6 +202,11 @@ struct Info : InfoPersistent {
         if (ptr_index != IR::NumScalarRegs) {
             std::memcpy(&base, &user_data[ptr_index], sizeof(base));
             base = reinterpret_cast<const u32*>(VAddr(base) & 0xFFFFFFFFFFFFULL);
+            if (base == nullptr) {
+                // A table pointer the game hasn't set up (Bloodborne's loading, run uncapped).
+                // The GPU would fault on it; reading host address 0 crashes the emulator.
+                return T{};
+            }
         }
         std::memcpy(&data, base + dword_offset, sizeof(T));
         return data;
@@ -166,6 +219,17 @@ struct Info : InfoPersistent {
 
     void RefreshFlatBuf() {
         flattened_ud_buf.resize(srt_info.flattened_bufsize_dw);
+        if (replay) {
+            std::ranges::fill(flattened_ud_buf, 0u);
+            std::copy_n(replay->flat_buf.begin(),
+                        std::min(replay->flat_buf.size(), flattened_ud_buf.size()),
+                        flattened_ud_buf.begin());
+            return;
+        }
+        if (guess_state) {
+            std::ranges::fill(flattened_ud_buf, 0u);
+            return;
+        }
         ASSERT(user_data.size() <= NUM_USER_DATA_REGS);
         std::memcpy(flattened_ud_buf.data(), user_data.data(), user_data.size_bytes());
         if (srt_info.walker_func) {

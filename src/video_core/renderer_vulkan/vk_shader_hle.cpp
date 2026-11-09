@@ -1,7 +1,10 @@
 // SPDX-FileCopyrightText: Copyright 2024 shadPS4 Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+#include <algorithm>
+#include "common/alignment.h"
 #include "shader_recompiler/info.h"
+#include "video_core/perf_stats.h"
 #include "video_core/renderer_vulkan/vk_rasterizer.h"
 #include "video_core/renderer_vulkan/vk_runtime.h"
 #include "video_core/renderer_vulkan/vk_shader_hle.h"
@@ -11,6 +14,41 @@ extern std::unique_ptr<AmdGpu::Liverpool> liverpool;
 namespace Vulkan {
 
 static constexpr u64 COPY_SHADER_HASH = 0xfefebf9f;
+
+namespace {
+
+/// What the copy shader moves against what it uploads, logged every 5 seconds: sources are
+/// obtained as spans covering several copies, which upload every CPU-written page in between.
+struct CopyShaderTotals {
+    u64 dispatches{};
+    u64 batches{};
+    u64 copied_bytes{};
+    u64 source_span_bytes{};
+    u64 uploaded_bytes{};
+    u64 last_log_ns{};
+
+    void MaybeLog() {
+        const u64 now = VideoCore::PerfStats::NowNs();
+        if (last_log_ns == 0) {
+            last_log_ns = now;
+            return;
+        }
+        if (now - last_log_ns < 5'000'000'000ULL) {
+            return;
+        }
+        const double seconds = (now - last_log_ns) / 1e9;
+        constexpr double MB = 1024.0 * 1024.0;
+        LOG_INFO(Render_Vulkan,
+                 "Copy shader per second: {:.1f} dispatches, {:.1f} batches, {:.2f} MB copied "
+                 "from {:.2f} MB of source spans, {:.2f} MB of them uploaded",
+                 dispatches / seconds, batches / seconds, copied_bytes / MB / seconds,
+                 source_span_bytes / MB / seconds, uploaded_bytes / MB / seconds);
+        *this = CopyShaderTotals{.last_log_ns = now};
+    }
+};
+CopyShaderTotals copy_shader_totals;
+
+} // namespace
 
 static bool ExecuteCopyShaderHLE(const Shader::Info& info, const AmdGpu::ComputeProgram& cs_program,
                                  Rasterizer& rasterizer) {
@@ -42,6 +80,15 @@ static bool ExecuteCopyShaderHLE(const Shader::Info& info, const AmdGpu::Compute
         const u32 local_dst_offset = dst_idx * buf_stride;
         const u32 local_src_offset = src_idx * buf_stride;
         const u32 local_size = (end + 1) * buf_stride;
+        // Entries often continue the previous one in both buffers: one region copies both.
+        if (!copies.empty()) {
+            auto& last = copies.back();
+            if (last.srcOffset + last.size == local_src_offset &&
+                last.dstOffset + last.size == local_dst_offset) {
+                last.size += local_size;
+                continue;
+            }
+        }
         copies.emplace_back(local_src_offset, local_dst_offset, local_size);
     }
 
@@ -79,9 +126,40 @@ static bool ExecuteCopyShaderHLE(const Shader::Info& info, const AmdGpu::Compute
             dst_offset_max = new_dst_offset_max;
         }
 
-        // Obtain buffers for the total source and destination ranges.
-        const auto [src_buf, src_buf_offset] = buffer_cache.ObtainBuffer(
-            src_buf_sharp.base_address + src_offset_min, src_offset_max - src_offset_min);
+        // Obtain buffers for the total source and destination ranges. The copies read a small
+        // part of the source span (about 1% in Bloodborne), so only the pages they read are
+        // uploaded: uploading the span's CPU-written pages moved four times what was copied.
+        static std::vector<std::pair<VAddr, u64>> src_ranges;
+        src_ranges.clear();
+        for (u32 i = batch_start; i < batch_end; ++i) {
+            src_ranges.emplace_back(src_buf_sharp.base_address + copies[i].srcOffset,
+                                    copies[i].size);
+        }
+        std::ranges::sort(src_ranges);
+        size_t num_ranges = 0;
+        constexpr u64 PageSize = 4_KB;
+        for (const auto& [addr, size] : src_ranges) {
+            if (num_ranges != 0) {
+                auto& last = src_ranges[num_ranges - 1];
+                // Ranges on the same tracked page or touching it upload that page once anyway.
+                if (addr <= Common::AlignUp(last.first + last.second, PageSize)) {
+                    last.second = std::max(last.first + last.second, addr + size) - last.first;
+                    continue;
+                }
+            }
+            src_ranges[num_ranges++] = {addr, size};
+        }
+        const u64 synchronized_before = buffer_cache.SynchronizedBytes();
+        const auto [src_buf, src_buf_offset] = buffer_cache.ObtainBufferForRanges(
+            src_buf_sharp.base_address + src_offset_min, src_offset_max - src_offset_min,
+            std::span{src_ranges}.first(num_ranges));
+        auto& totals = copy_shader_totals;
+        ++totals.batches;
+        totals.source_span_bytes += src_offset_max - src_offset_min;
+        totals.uploaded_bytes += buffer_cache.SynchronizedBytes() - synchronized_before;
+        for (u32 i = batch_start; i < batch_end; ++i) {
+            totals.copied_bytes += copies[i].size;
+        }
         const auto [dst_buf, dst_buf_offset] = buffer_cache.ObtainBuffer(
             dst_buf_sharp.base_address + dst_offset_min, dst_offset_max - dst_offset_min,
             VideoCore::ObtainBufferFlags::IgnoreStreamBuffer);
@@ -100,13 +178,30 @@ static bool ExecuteCopyShaderHLE(const Shader::Info& info, const AmdGpu::Compute
         batch_start = batch_end;
     }
 
+    // Marked as GPU-written in runs of touching or overlapping destinations, not per entry:
+    // each mark takes the tracker's lock and may change page protection.
+    VAddr run_start = 0;
+    VAddr run_end = 0;
     for (u32 i = 0; i < cs_program.dim_x; i++) {
         const auto& [dst_idx, src_idx, end] = ctl_buf[i];
         const VAddr dst_addr = dst_buf_sharp.base_address + (dst_idx * buf_stride);
-        const u32 size = (end + 1) * buf_stride;
-        buffer_cache.MarkRegionAsGpuModified(dst_addr, size);
+        const VAddr dst_end = dst_addr + (end + 1) * buf_stride;
+        if (run_end != 0 && dst_addr >= run_start && dst_addr <= run_end) {
+            run_end = std::max(run_end, dst_end);
+            continue;
+        }
+        if (run_end != 0) {
+            buffer_cache.MarkRegionAsGpuModified(run_start, run_end - run_start);
+        }
+        run_start = dst_addr;
+        run_end = dst_end;
+    }
+    if (run_end != 0) {
+        buffer_cache.MarkRegionAsGpuModified(run_start, run_end - run_start);
     }
 
+    ++copy_shader_totals.dispatches;
+    copy_shader_totals.MaybeLog();
     return true;
 }
 

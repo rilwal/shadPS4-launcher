@@ -3,8 +3,12 @@
 
 #pragma once
 
+#include <algorithm>
 #include <bit>
+#include <cstddef>
 #include <cstring>
+#include <memory>
+#include <new>
 #include <type_traits>
 
 #include <boost/container/list.hpp>
@@ -17,6 +21,67 @@
 #include "shader_recompiler/ir/value.h"
 
 namespace Shader::IR {
+
+/// Allocates single list nodes from a free list per thread, carved from larger blocks. Use
+/// lists gain and lose a node with every argument set, so the general allocator took about a
+/// third of translation time. A node freed on another thread goes to that thread's list; blocks
+/// stay with the process.
+template <typename T>
+struct NodeAllocator {
+    using value_type = T;
+
+    NodeAllocator() = default;
+    template <typename U>
+    NodeAllocator(const NodeAllocator<U>&) noexcept {}
+
+    T* allocate(size_t n) {
+        if (n != 1) {
+            return std::allocator<T>{}.allocate(n);
+        }
+        void*& head = FreeList();
+        if (head == nullptr) {
+            Refill(head);
+        }
+        void* node = head;
+        head = *static_cast<void**>(node);
+        return static_cast<T*>(node);
+    }
+
+    void deallocate(T* p, size_t n) noexcept {
+        if (n != 1) {
+            std::allocator<T>{}.deallocate(p, n);
+            return;
+        }
+        void*& head = FreeList();
+        *reinterpret_cast<void**>(p) = head;
+        head = p;
+    }
+
+    template <typename U>
+    bool operator==(const NodeAllocator<U>&) const noexcept {
+        return true;
+    }
+
+private:
+    static constexpr size_t SlotSize =
+        (std::max(sizeof(T), sizeof(void*)) + alignof(std::max_align_t) - 1) &
+        ~(alignof(std::max_align_t) - 1);
+    static constexpr size_t SlotsPerBlock = 256;
+
+    static void*& FreeList() {
+        thread_local void* head = nullptr;
+        return head;
+    }
+
+    static void Refill(void*& head) {
+        auto* block = static_cast<std::byte*>(::operator new(SlotSize * SlotsPerBlock));
+        for (size_t i = SlotsPerBlock; i-- > 0;) {
+            void* slot = block + i * SlotSize;
+            *static_cast<void**>(slot) = head;
+            head = slot;
+        }
+    }
+};
 
 struct Use {
     Inst* user;
@@ -121,12 +186,29 @@ public:
     IR::Type Type() const;
     void ReplaceOpcode(IR::Opcode opcode);
     void SetArg(size_t index, Value value);
+    /// SetArg for an argument that holds nothing yet (a new instruction): skips reading the old
+    /// value to undo its use, which missed the cache on freshly allocated instructions.
+    void InitArg(size_t index, Value value);
 
     Block* PhiBlock(size_t index) const;
     void AddPhiOperand(Block* predecessor, const Value& value);
 
     void Invalidate();
     void ClearArgs();
+
+    /// Marks this instruction for the pass running under the given epoch. Returns false when it
+    /// was already marked in that epoch. Epochs come from NextPassEpoch, so marks left by earlier
+    /// passes never match.
+    bool Mark(u32 epoch) noexcept {
+        if (pass_mark == epoch) {
+            return false;
+        }
+        pass_mark = epoch;
+        return true;
+    }
+    bool IsMarked(u32 epoch) const noexcept {
+        return pass_mark == epoch;
+    }
 
     u32 scc_index{};
 
@@ -144,15 +226,19 @@ private:
     u64 flags{};
     IR::Block* parent{};
     RegTag reg_tag{};
+    u32 pass_mark{};
     union {
         NonTriviallyDummy dummy{};
         boost::container::small_vector<std::pair<Block*, Value>, 2> phi_args;
         std::array<Value, 6> args;
     };
 
-    boost::container::list<IR::Use> uses;
+    boost::container::list<IR::Use, NodeAllocator<IR::Use>> uses;
 };
 static_assert(sizeof(Inst) <= 184, "Inst size unintentionally increased");
+
+/// Returns an epoch no earlier pass has used, for Inst::Mark.
+[[nodiscard]] u32 NextPassEpoch() noexcept;
 
 [[nodiscard]] inline bool IsPhi(const Inst& inst) {
     return inst.GetOpcode() == Opcode::Phi;

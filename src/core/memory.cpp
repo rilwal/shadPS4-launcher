@@ -1,6 +1,8 @@
 // SPDX-FileCopyrightText: Copyright 2025-2026 shadPS4 Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+#include <cstring>
+#include <vector>
 #include <boost/container/small_vector.hpp>
 #include "common/alignment.h"
 #include "common/assert.h"
@@ -13,6 +15,7 @@
 #include "core/libraries/kernel/process.h"
 #include "core/memory.h"
 #include "video_core/renderer_vulkan/vk_rasterizer.h"
+#include "video_core/shader_scanner.h"
 
 namespace Core {
 
@@ -162,8 +165,61 @@ void MemoryManager::CopySparseMemory(VAddr virtual_addr, u8* dest, u64 size) {
     }
 }
 
+namespace {
+template <typename Func>
+bool ForEachBackingPage(const AddressSpace& impl, VAddr address, u64 size, Func&& func) {
+    // The table covers only the low ADDRESS_SPACE_BITS of the address space and indexes past its
+    // end above that (memory up there has no backing pages; see AddressSpace::Map).
+    constexpr u64 TableEnd = 1ULL << AddressSpace::Traits::ADDRESS_SPACE_BITS;
+    if (size == 0 || address >= TableEnd || size > TableEnd - address) {
+        return false;
+    }
+    const auto& backing_pages = impl.BackingPages();
+    for (VAddr page = address >> GUEST_PAGE_BITS; page <= (address + size - 1) >> GUEST_PAGE_BITS;
+         ++page) {
+        if (const auto* entry = backing_pages.find(page); !entry || !*entry) {
+            return false;
+        }
+    }
+    u64 offset = 0;
+    while (offset < size) {
+        const VAddr addr = address + offset;
+        const u64 offset_in_page = addr % GUEST_PAGE_SIZE;
+        const u64 length = std::min<u64>(GUEST_PAGE_SIZE - offset_in_page, size - offset);
+        func(*backing_pages.find(addr >> GUEST_PAGE_BITS) + offset_in_page, offset, length);
+        offset += length;
+    }
+    return true;
+}
+} // namespace
+
+bool MemoryManager::ReadBackingPages(VAddr address, void* data, u64 size) {
+    return ForEachBackingPage(impl, address, size, [data](u8* backing, u64 offset, u64 length) {
+        std::memcpy(static_cast<u8*>(data) + offset, backing, length);
+    });
+}
+
+bool MemoryManager::WriteBackingPages(VAddr address, const void* data, u64 size) {
+    return ForEachBackingPage(impl, address, size, [data](u8* backing, u64 offset, u64 length) {
+        std::memcpy(backing, static_cast<const u8*>(data) + offset, length);
+    });
+}
+
 bool MemoryManager::TryWriteBacking(void* address, const void* data, u64 size) {
-    const VAddr virtual_addr = std::bit_cast<VAddr>(address);
+    return ForEachBacking(std::bit_cast<VAddr>(address), size,
+                          [data](u8* backing, u64 offset, u64 length) {
+                              memcpy(backing, static_cast<const u8*>(data) + offset, length);
+                          });
+}
+
+bool MemoryManager::TryReadBacking(VAddr address, void* data, u64 size) {
+    return ForEachBacking(address, size, [data](u8* backing, u64 offset, u64 length) {
+        memcpy(static_cast<u8*>(data) + offset, backing, length);
+    });
+}
+
+bool MemoryManager::ForEachBacking(VAddr virtual_addr, u64 size,
+                                   const std::function<void(u8*, u64, u64)>& func) {
     std::shared_lock lk{mutex};
     ASSERT_MSG(IsValidMapping(virtual_addr, size), "Attempted to access invalid address {:#x}",
                virtual_addr);
@@ -183,6 +239,7 @@ bool MemoryManager::TryWriteBacking(void* address, const void* data, u64 size) {
         return false;
     }
 
+    u64 offset = 0;
     for (const auto* vma_ptr : vmas_to_write) {
         const auto& vma = *vma_ptr;
         auto start_in_vma = std::max<VAddr>(virtual_addr, vma.base) - vma.base;
@@ -195,8 +252,8 @@ bool MemoryManager::TryWriteBacking(void* address, const void* data, u64 size) {
                 std::max<u64>(start_in_vma, phys_handle->first) - phys_handle->first;
             u8* backing = impl.BackingBase() + phys_handle->second.base + start_in_dma;
             u64 copy_size = std::min<u64>(size, phys_handle->second.size - start_in_dma);
-            memcpy(backing, data, copy_size);
-            data = static_cast<const u8*>(data) + copy_size;
+            func(backing, offset, copy_size);
+            offset += copy_size;
             size -= copy_size;
         }
     }
@@ -822,6 +879,8 @@ s32 MemoryManager::MapFile(void** out_addr, VAddr virtual_addr, u64 size, Memory
         // read-only mappings cannot be registered with userfaultfd in writeprotect mode
         rasterizer->RegisterMemory(mapped_addr, size);
     }
+    // A mapped file may hold shaders, which can be translated before their first draw.
+    VideoCore::ShaderScanner::NoteFilled(mapped_addr, size);
 
     *out_addr = std::bit_cast<void*>(mapped_addr);
     return ORBIS_OK;
@@ -1690,6 +1749,22 @@ MemoryManager::PhysHandle MemoryManager::Split(PhysMap& map, PhysHandle phys_han
     new_area.size -= offset_in_area;
 
     return map.emplace_hint(std::next(phys_handle), new_area.base, new_area);
+}
+
+std::vector<std::pair<VAddr, u64>> MemoryManager::MappedRanges() {
+    std::shared_lock lk{mutex};
+    std::vector<std::pair<VAddr, u64>> ranges;
+    for (const auto& [base, vma] : vma_map) {
+        if (!vma.IsMapped()) {
+            continue;
+        }
+        if (!ranges.empty() && ranges.back().first + ranges.back().second == base) {
+            ranges.back().second += vma.size;
+        } else {
+            ranges.emplace_back(base, vma.size);
+        }
+    }
+    return ranges;
 }
 
 } // namespace Core

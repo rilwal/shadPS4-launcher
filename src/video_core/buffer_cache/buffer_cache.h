@@ -3,9 +3,14 @@
 
 #pragma once
 
+#include <functional>
+
+#include <array>
 #include <atomic>
 #include <deque>
 #include <memory>
+#include <span>
+#include <unordered_map>
 #include <boost/container/small_vector.hpp>
 
 #include "common/enum.h"
@@ -93,8 +98,15 @@ public:
 
     void TickFrame();
 
-    /// Invalidates any buffer in the logical page range.
-    void InvalidateMemory(VAddr device_addr, u64 size, bool assume_locks = false);
+    /// Bytes uploaded to arenas from guest memory so far (GPU thread only).
+    u64 SynchronizedBytes() const {
+        return synchronized_bytes;
+    }
+
+    /// Invalidates any buffer in the logical page range, and marks [ahead, ahead + ahead_size),
+    /// which the guest is about to write, as modified from the CPU ahead of its faults.
+    void InvalidateMemory(VAddr device_addr, u64 size, bool assume_locks = false, VAddr ahead = 0,
+                          u64 ahead_size = 0);
 
     /// Unmark a region as modified from the GPU.
     void UnmarkRegionAsGpuModified(VAddr device_addr, u64 size, bool is_write = false);
@@ -102,6 +114,46 @@ public:
     /// Flushes any GPU modified buffer in the logical page range back to CPU memory.
     void ReadMemory(VAddr device_addr, u64 size, bool is_write = false, bool async = false,
                     bool assume_locks = false);
+
+    /// A CPU read fault from a load the fault handler decoded (load_size 0 if it couldn't, with
+    /// its mnemonic for the stats). If the load reads no byte whose GPU data is still on the GPU,
+    /// copies its bytes from guest memory into `data` and returns true: the handler finishes the
+    /// load. Otherwise reads back as ReadMemory does and returns false. Not on the GPU thread.
+    bool ReadMemoryForLoad(VAddr device_addr, u64 size, VAddr load_addr, u32 load_size,
+                           u16 mnemonic, u8* data, bool assume_locks);
+
+    /// With `assume_locks` (on the GPU thread) runs here instead of on the GPU thread.
+    /// The command processor passed a point where guest memory may have changed (a wait on
+    /// memory, its own memory write, a new submission): copies of guest memory in the stream
+    /// buffer can't stand in for later reads. GPU thread.
+    void ForgetStreamCopies() noexcept {
+        ++stream_copy_epoch;
+    }
+
+    /// Whether any byte of the range has GPU data not yet in guest memory. On the GPU thread.
+    [[nodiscard]] bool GpuBytesPending(VAddr address, u64 size) const;
+
+    /// The guest's memory will have newer data for the range than the GPU's copy (a deferred
+    /// fence signal writes it), so readbacks leave it out. Tracking stays per page. GPU thread.
+    void ForgetGpuWrites(VAddr address, u64 size) {
+        gpu_modified_ranges.Subtract(address, size);
+    }
+
+    /// Precise or Fenced readbacks: GPU-written pages stay protected until their data lands.
+    [[nodiscard]] bool TracksGpuPages() const {
+        return tracks_gpu_pages;
+    }
+
+    /// ReadMemoryForLoad for a movs that faulted reading `src`: if neither `src` nor `dst` has
+    /// GPU bytes pending, copies `bytes` from `src` to `dst` through guest memory's backing,
+    /// with `write_dst` (run on the GPU thread, false if it can't) doing the write, and returns
+    /// true. Otherwise reads back as ReadMemory does and returns false. Not on the GPU thread.
+    bool CopyMemoryForLoad(VAddr device_addr, u64 size, VAddr src, VAddr dst, u64 bytes,
+                           const std::function<bool(const u8*)>& write_dst, bool assume_locks);
+
+    /// Counts a read fault the GPU thread itself took, by the faulting instruction's address,
+    /// and whether it was served from guest memory. On the GPU thread.
+    void NoteGpuThreadReadFault(u64 instruction, bool served);
 
     /// Fenced readbacks: records copies of every GPU-modified buffer range into staging memory.
     /// They are written to guest memory on the scheduler's priority thread once the GPU reaches
@@ -116,8 +168,17 @@ public:
     [[nodiscard]] std::pair<const Buffer*, u64> ObtainBuffer(
         VAddr device_addr, u32 size, ObtainBufferFlags flags = ObtainBufferFlags::None);
 
+    /// ObtainBuffer for a read-only region of which only `ranges` (sorted, inside it) are read:
+    /// only the CPU-written pages of those are uploaded, and the rest stay CPU-written.
+    [[nodiscard]] std::pair<const Buffer*, u64> ObtainBufferForRanges(
+        VAddr device_addr, u32 size, std::span<const std::pair<VAddr, u64>> ranges);
+
     /// Attempts to obtain a buffer without modifying the cache contents.
-    [[nodiscard]] std::pair<const Buffer*, u64> ObtainBufferForImage(VAddr device_addr, u32 size);
+    /// Returns a buffer holding the guest memory of an image. With device_local, memory that
+    /// only the CPU wrote is copied into device memory first, so that a shader reading it in a
+    /// scattered order (the detiler) doesn't read host memory across the bus.
+    [[nodiscard]] std::pair<const Buffer*, u64> ObtainBufferForImage(VAddr device_addr, u32 size,
+                                                                     bool device_local);
 
     /// Return true when a region is modified from the CPU
     [[nodiscard]] bool IsRegionCpuModified(VAddr addr, size_t size);
@@ -135,6 +196,12 @@ public:
     void RecordFence(bool deferred, u64 throttle_ns) {
         ++(deferred ? readback_stats.deferred_fences : readback_stats.immediate_fences);
         readback_stats.throttle_ns += throttle_ns;
+    }
+
+    /// Readback profiling: a fence that could have landed GPU-written memory but didn't,
+    /// because the last landing was too recent.
+    void RecordSkippedLanding() {
+        ++readback_stats.skipped_landings;
     }
 
     /// Synchronizes all buffers needed for DMA.
@@ -183,6 +250,10 @@ private:
     bool SynchronizeMemory(const Buffer* arena, VAddr device_addr, u32 size, bool is_written,
                            bool is_texel_buffer);
 
+    /// Uploads the CPU-written pages of each range into the arena, in one staging copy.
+    void UploadCpuModified(const Buffer* arena, std::span<const std::pair<VAddr, u64>> ranges,
+                           bool is_written);
+
     bool SynchronizeMemoryFromImage(const Buffer* arena, VAddr device_addr, u32 size);
 
     const Vulkan::Instance& instance;
@@ -195,11 +266,29 @@ private:
     std::unique_ptr<MemoryTracker> memory_tracker;
 
     StreamBuffer stream_buffer;
+    /// Read-only ranges copied into the stream buffer since the command processor last passed a
+    /// point where guest memory may have changed. Draws read the same constants over and over,
+    /// and nothing can change them between those points but the GPU (whose writes keep ranges
+    /// out of the stream buffer) or the guest racing the GPU.
+    struct StreamCopy {
+        VAddr address{};
+        u32 size{};
+        u32 epoch{};
+        u64 tick{};
+        u64 wraps{};
+        u64 offset{};
+    };
+    std::array<StreamCopy, 1024> stream_copies{};
+    u32 stream_copy_epoch{1};
+    bool reuse_stream_copies{true};
+    /// Whether reuse_stream_copies follows the A/B switch (SHADPS4_AB=stream-copies).
+    bool stream_copies_ab{};
     Buffer gds_buffer;
     std::unique_ptr<Buffer> null_index_buffer;
     RangeSet gpu_modified_ranges;
-    /// Pages the CPU has faulted on to read GPU data. Fenced readbacks land only these early.
-    RangeSet cpu_read_ranges;
+    /// Pages the CPU has faulted on to read GPU data, or to write a page holding GPU data. Fenced
+    /// readbacks land only these early.
+    RangeSet land_early_ranges;
     /// Ranges taken by async downloads whose data isn't in guest memory yet (GPU thread only).
     RangeSet async_downloads;
     u32 num_async_downloads{};
@@ -210,6 +299,62 @@ private:
     std::unique_ptr<Buffer> landing_ring;
     u64 landing_ring_head{};
     std::atomic<u64> landing_ring_tail{};
+    /// Why a synchronous readback was needed, for the readback stats.
+    enum class ReadReason : u8 {
+        /// The CPU read a page it hadn't read before.
+        FirstRead,
+        /// The CPU read a page it had read before, whose data hadn't landed.
+        RepeatRead,
+        /// The CPU wrote a page the GPU had written.
+        Write,
+        /// Anything else: unmaps, the texture cache, GC.
+        Other,
+    };
+    ReadReason read_reason{ReadReason::Other};
+    /// Pages with repeat read faults in this stats window: faults, and the most bytes of the
+    /// page the GPU had written at a fault.
+    struct FaultPage {
+        u32 faults{};
+        u32 gpu_bytes{};
+    };
+    std::unordered_map<VAddr, FaultPage> fault_pages;
+    /// Pages with write faults that read GPU data back in this stats window: faults, the most
+    /// bytes of the page the GPU had written, and faults whose own bytes the GPU had written.
+    struct WriteFaultPage {
+        u32 faults{};
+        u32 gpu_bytes{};
+        u32 onto_gpu_bytes{};
+    };
+    std::unordered_map<VAddr, WriteFaultPage> write_fault_pages;
+
+    /// Readback profiling of a write fault on a page holding GPU data.
+    void NoteWriteFault(VAddr address, u64 size);
+
+    /// ReadMemory's work, on the GPU thread.
+    void ReadMemoryNow(VAddr device_addr, u64 size, bool is_write, bool async);
+
+    /// Read faults whose load the handler couldn't decode, by mnemonic, this stats window.
+    std::unordered_map<u16, u32> unsupported_loads;
+
+    /// Whether a page may have another load served from guest memory. Each served load leaves
+    /// its page protected, so a page read many times (a loop, or the GPU thread parsing
+    /// commands) would fault on every read: past a budget per 16 ms it's read back instead.
+    bool TakeFaultLoadBudget(VAddr address);
+    struct FaultLoadBudget {
+        u64 window_start_ns;
+        u32 served;
+    };
+    std::unordered_map<VAddr, FaultLoadBudget> fault_load_budgets;
+
+    /// GPU-thread read faults this stats window by instruction address: count, served count.
+    std::unordered_map<u64, std::pair<u32, u32>> gpu_thread_fault_sites;
+
+    /// CopyMemoryForLoad's staging, used on the GPU thread.
+    std::vector<u8> copy_scratch;
+
+    /// Readback profiling of a repeat read fault at the address.
+    void NoteRepeatRead(VAddr address, u64 size);
+
     /// Precise or Fenced: GPU-written pages are protected until their data is in guest memory.
     bool tracks_gpu_pages{};
 
@@ -223,6 +368,23 @@ private:
         u64 throttle_ns{};
         u64 deferred_fences{};
         u64 immediate_fences{};
+        u64 skipped_landings{};
+        u64 full_ring_landings{};
+        /// Stalling downloads and their stalls by why they were needed (ReadReason).
+        std::array<u64, 4> sync_by_reason{};
+        std::array<u64, 4> stall_ns_by_reason{};
+        /// Repeat reads whose faulting bytes the GPU wrote (rather than other bytes of the
+        /// page), and repeat reads of a page a landing in flight is filling.
+        u64 repeat_reads_of_gpu_bytes{};
+        u64 repeat_reads_in_flight{};
+        /// Read faults finished from guest memory, and ones that read GPU bytes.
+        u64 served_loads{};
+        u64 gpu_byte_loads{};
+        /// The movs copies among them, and the bytes they copied.
+        u64 served_copies{};
+        u64 served_copy_bytes{};
+        /// Loads read back because their page had used its budget of served loads.
+        u64 over_budget_loads{};
         u64 last_log_ns{};
         u64 ab_switches{};
     } readback_stats;
@@ -233,6 +395,7 @@ private:
 
     std::array<const Buffer*, NUM_ARENA_PAGES> address_space{};
     std::deque<Buffer> arenas;
+    u64 synchronized_bytes{};
     std::vector<ArenaBinds> pending_binds;
     Vulkan::Semaphore memory_semaphore;
 

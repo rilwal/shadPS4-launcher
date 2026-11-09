@@ -62,10 +62,61 @@ public:
         });
     }
 
-    /// Removes all protection from a page and ensures GPU data has been flushed if requested
-    void InvalidateRegion(VAddr cpu_addr, u64 size, auto&& on_flush) noexcept {
+    /// Marks pages the guest is about to write as modified from the CPU, removing their
+    /// protection, except where the GPU modified them: those keep their traps, so a write still
+    /// flushes the GPU's data first.
+    /// In every readbacks mode: with readbacks off, guest memory never gets the GPU's data
+    /// back, so marking a GPU-written page the guest doesn't write would upload stale guest
+    /// memory over it.
+    void MarkRegionAsCpuModifiedAhead(VAddr cpu_addr, u64 size) noexcept {
+        IteratePages(cpu_addr, size, [](RegionManager* manager, u64 offset, u64 size) {
+            const auto bounds = manager->GetBounds(offset, size);
+            manager->Lock(bounds);
+            if (!manager->template IsRegionModified<Type::GPU>(offset, size)) {
+                manager->template ChangeRegionState<StateOp::Set, StateOp::None, false>(offset,
+                                                                                        size);
+            }
+            manager->Unlock(bounds);
+        });
+    }
+
+    /// Removes all protection from a page and ensures GPU data has been flushed if requested,
+    /// then marks [ahead, ahead + ahead_size) as MarkRegionAsCpuModifiedAhead does. The pages
+    /// ahead start at or before the end of the faulting range's last page, so where the GPU
+    /// modified none of it the whole span changes together, in one mprotect per region instead
+    /// of two: they serialize on the kernel's memory map lock.
+    void InvalidateRegion(VAddr cpu_addr, u64 size, VAddr ahead, u64 ahead_size,
+                          auto&& on_flush) noexcept {
+        const VAddr end = std::max(cpu_addr + size, ahead + ahead_size);
         if (readbacks_mode == GpuReadbacksMode::Disabled) {
-            return MarkRegionAsCpuModified(cpu_addr, size);
+            // The faulting range as upstream does; the pages ahead only where the GPU wrote none.
+            MarkRegionAsCpuModified(cpu_addr, size);
+            if (ahead_size != 0) {
+                MarkRegionAsCpuModifiedAhead(ahead, ahead_size);
+            }
+            return;
+        }
+        if (ahead_size != 0) {
+            bool gpu_modified = false;
+            IteratePages(
+                cpu_addr, end - cpu_addr,
+                [&gpu_modified](RegionManager* manager, u64 offset, u64 size) {
+                    const auto bounds = manager->GetBounds(offset, size);
+                    manager->Lock(bounds);
+                    if (manager->template IsRegionModified<Type::GPU>(offset, size)) {
+                        gpu_modified = true;
+                    } else {
+                        manager->template ChangeRegionState<StateOp::Set, StateOp::None, false>(
+                            offset, size);
+                    }
+                    manager->Unlock(bounds);
+                });
+            if (!gpu_modified) {
+                return;
+            }
+            // The GPU wrote some of it: each part on its own (setting a part done again is a
+            // no-op).
+            MarkRegionAsCpuModifiedAhead(ahead, ahead_size);
         }
         bool should_flush = false;
         IteratePages(cpu_addr, size, [&should_flush](RegionManager* manager, u64 offset, u64 size) {
@@ -118,6 +169,11 @@ private:
         u64 page_index = cpu_address >> HIGHER_PAGE_BITS;
         u64 page_offset = cpu_address & HIGHER_PAGE_MASK;
         while (remaining_size > 0) {
+            // Nothing above the tracked address space is tracked (the guest has addresses
+            // there, e.g. shader code read through the backing).
+            if (page_index >= NUM_HIGH_PAGES) {
+                break;
+            }
             const u64 copy_amount = std::min(HIGHER_PAGE_SIZE - page_offset, remaining_size);
             if (auto* region = top_tier[page_index]; region) {
                 if constexpr (BOOL_BREAK) {

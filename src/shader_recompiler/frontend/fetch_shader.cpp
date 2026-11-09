@@ -1,6 +1,9 @@
 // SPDX-FileCopyrightText: Copyright 2024 shadPS4 Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+#include <array>
+#include <bit>
+#include <cstring>
 #include <utility>
 #include "common/assert.h"
 #include "shader_recompiler/frontend/decode.h"
@@ -40,9 +43,31 @@ const u32* GetFetchShaderCode(const Info& info, u32 sgpr_base) {
     return code;
 }
 
+namespace {
+std::function<bool(VAddr, void*, u64)> guest_code_reader;
+} // namespace
+
+void SetGuestCodeReader(std::function<bool(VAddr, void*, u64)> reader) {
+    guest_code_reader = std::move(reader);
+}
+
 bool ParseFetchShader(const Shader::Info& info, FetchShaderData& out_fetch_data) {
     if (!info.has_fetch_shader) {
         return false;
+    }
+    if (info.replay) {
+        if (!info.replay->fetch) {
+            return false;
+        }
+        out_fetch_data = *static_cast<const FetchShaderData*>(info.replay->fetch);
+        return true;
+    }
+    if (info.guess_state) {
+        if (!info.guessed_fetch) {
+            return false;
+        }
+        out_fetch_data = *static_cast<const FetchShaderData*>(info.guessed_fetch);
+        return true;
     }
 
     out_fetch_data.attributes.clear();
@@ -53,9 +78,48 @@ bool ParseFetchShader(const Shader::Info& info, FetchShaderData& out_fetch_data)
     };
     std::array<VsharpLoad, 104> loads{};
 
+    // Parsed from a copy where the reader can make one; past the copy's end, from the guest.
+    // Shorter copies are tried when a long one fails, since GPU data pending or an unmapped page
+    // a little past a short fetch shader shouldn't send the whole parse to the guest.
+    // Every draw parses its fetch shader, and most are a few dozen dwords, so the first copy is
+    // short; a parse that runs past it starts again from a full-size one.
     const auto* code = GetFetchShaderCode(info, info.fetch_shader_sgpr_base);
-    const u32* ptr = code;
+    std::array<u32, 128> copy;
+    const u32* begin = code;
+    const u32* end = nullptr;
+    const auto read_copy = [&](u64 first_dwords) {
+        if (!guest_code_reader) {
+            return false;
+        }
+        for (u64 dwords = first_dwords; dwords >= 16; dwords /= 2) {
+            if (guest_code_reader(std::bit_cast<VAddr>(code), copy.data(), dwords * 4)) {
+                begin = copy.data();
+                end = copy.data() + dwords;
+                return true;
+            }
+        }
+        return false;
+    };
+    constexpr u64 FirstCopyDwords = 32;
+    if (!read_copy(FirstCopyDwords)) {
+        read_copy(copy.size());
+    }
+    const u32* ptr = begin;
     while (true) {
+        if (end != nullptr && end - ptr < 2) {
+            out_fetch_data.attributes.clear();
+            out_fetch_data.vertex_offset_sgpr = FetchShaderData{}.vertex_offset_sgpr;
+            out_fetch_data.instance_offset_sgpr = FetchShaderData{}.instance_offset_sgpr;
+            loads = {};
+            const u64 had = static_cast<u64>(end - begin);
+            if (had >= copy.size() || !read_copy(copy.size()) ||
+                static_cast<u64>(end - begin) <= had) {
+                begin = code;
+                end = nullptr;
+            }
+            ptr = begin;
+            continue;
+        }
         const u32 word0 = *(ptr++);
         const auto encoding = GetInstructionEncoding(word0);
 
@@ -131,7 +195,7 @@ bool ParseFetchShader(const Shader::Info& info, FetchShaderData& out_fetch_data)
         }
     }
 
-    out_fetch_data.size = (ptr - code) * sizeof(u32);
+    out_fetch_data.size = (ptr - begin) * sizeof(u32);
     return true;
 }
 

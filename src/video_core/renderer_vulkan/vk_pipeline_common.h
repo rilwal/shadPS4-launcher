@@ -7,6 +7,7 @@
 #include "shader_recompiler/runtime_info.h"
 #include "video_core/renderer_vulkan/vk_common.h"
 
+#include <atomic>
 #include <boost/container/small_vector.hpp>
 
 namespace Shader {
@@ -33,7 +34,24 @@ public:
     virtual ~Pipeline();
 
     vk::Pipeline Handle() const noexcept {
-        return *pipeline;
+        const VkPipeline upgraded = upgraded_handle.load(std::memory_order_acquire);
+        return upgraded != VK_NULL_HANDLE ? vk::Pipeline{upgraded} : *pipeline;
+    }
+
+    /// False while a worker still creates it (draws that use it are skipped until then), or if
+    /// that was dropped at shutdown.
+    [[nodiscard]] bool IsReady() const noexcept {
+        return state.load(std::memory_order_acquire) == State::Ready;
+    }
+
+    /// The compile job creating it in the background, 0 if there's none.
+    [[nodiscard]] u64 CompileTicket() const noexcept {
+        return compile_ticket;
+    }
+
+    /// Time the driver took to create it, once it's ready.
+    [[nodiscard]] u64 DriverNs() const noexcept {
+        return driver_ns;
     }
 
     vk::PipelineLayout GetLayout() const noexcept {
@@ -61,7 +79,32 @@ public:
     void BindResources(DescriptorWrites& set_writes, const Shader::PushData& push_data) const;
 
 protected:
+    enum class State : u8 {
+        Ready,
+        Pending,
+        Dropped,
+    };
+
     [[nodiscard]] std::string GetDebugString() const;
+
+    /// Publishes the result of a background creation.
+    void Finish(State result) noexcept {
+        state.store(result, std::memory_order_release);
+        state.notify_all();
+    }
+
+    /// Waits for background work on the pipeline, so it never outlives it.
+    void WaitIdle() const noexcept {
+        state.wait(State::Pending, std::memory_order_acquire);
+        upgrading.wait(true, std::memory_order_acquire);
+    }
+
+    /// Publishes an optimized pipeline that replaces the first one. Both stay alive, as
+    /// recorded commands may still use the first.
+    void Upgrade(vk::UniquePipeline optimized) noexcept {
+        upgraded = std::move(optimized);
+        upgraded_handle.store(*upgraded, std::memory_order_release);
+    }
 
     const Instance& instance;
     Scheduler& scheduler;
@@ -73,6 +116,13 @@ protected:
     std::array<const Shader::Info*, Shader::MaxStageTypes> stages{};
     bool uses_push_descriptors{};
     bool is_compute;
+    std::atomic<State> state{State::Ready};
+    /// An optimized version is being created in the background.
+    std::atomic<bool> upgrading{false};
+    vk::UniquePipeline upgraded;
+    std::atomic<VkPipeline> upgraded_handle{VK_NULL_HANDLE};
+    u64 driver_ns{};
+    u64 compile_ticket{};
 };
 
 } // namespace Vulkan

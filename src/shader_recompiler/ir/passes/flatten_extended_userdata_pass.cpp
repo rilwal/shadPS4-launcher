@@ -1,13 +1,16 @@
 // SPDX-FileCopyrightText: Copyright 2024-2026 shadPS4 Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+#include <mutex>
 #include <unordered_map>
 #include <boost/container/flat_map.hpp>
 #include <queue>
 #include <xbyak/xbyak.h>
 #include <xbyak/xbyak_util.h>
+#include <xxhash.h>
 #include "common/arch.h"
 #include "common/decoder.h"
+#include "common/hash.h"
 #include "common/io_file.h"
 #include "common/logging/log.h"
 #include "common/path_util.h"
@@ -29,10 +32,16 @@ using namespace Xbyak::util;
 
 static Xbyak::CodeGenerator g_srt_codegen(32_MB);
 static const u8* g_srt_codegen_start = nullptr;
+/// Walkers are emitted one instruction at a time into the one code buffer, and shaders can be
+/// translated on several threads at once (the GPU thread and the early-compile workers), so
+/// each emission holds this from start to end. The signal handler only reads the buffer's
+/// bounds, which only grow.
+static std::mutex g_srt_codegen_mutex;
 
 namespace Shader {
 
 PFN_SrtWalker RegisterWalkerCode(const u8* ptr, size_t size) {
+    std::scoped_lock lock{g_srt_codegen_mutex};
     const auto func_addr = (PFN_SrtWalker)g_srt_codegen.getCurr();
     g_srt_codegen.db(ptr, size);
     g_srt_codegen.ready();
@@ -600,6 +609,14 @@ static void VisitPointer(const IR::Value& off_dw, IR::Inst* subtree, PassInfo& p
     PassInfo::PtrUserList* use_list = pass_info.GetUsesAsPointer(subtree);
     ASSERT(use_list);
 
+    // A null table pointer reads as zeros for this table and everything under it. Checking here
+    // costs one branch per table; the fault handler below patches the load to read zero for good,
+    // so after one null pointer every later draw with that shader would read zeros too.
+    const u32 first_dst_off_dw = pass_info.dst_off_dw;
+    Xbyak::Label null_table, done;
+    c.test(rdi, rdi);
+    c.jz(null_table, Xbyak::CodeGenerator::T_NEAR);
+
     // First copy all the src data from this tree level
     // That way, all data that was contiguous in the guest SRT is also contiguous in the
     // flattened buffer.
@@ -629,6 +646,14 @@ static void VisitPointer(const IR::Value& off_dw, IR::Inst* subtree, PassInfo& p
             VisitPointer(src_off_dw, use, pass_info, c);
         }
     }
+    c.jmp(done, Xbyak::CodeGenerator::T_NEAR);
+
+    // The table and its children filled a contiguous range of the flattened buffer
+    c.L(null_table);
+    for (u32 off_dw = first_dst_off_dw; off_dw < pass_info.dst_off_dw; ++off_dw) {
+        c.mov(dword[rsi + (off_dw << 2)], 0);
+    }
+    c.L(done);
 
     PopPtr(c);
 }
@@ -639,6 +664,7 @@ static void GenerateSrtProgram(Info& info, PassInfo& pass_info) {
     if (pass_info.srt_roots.empty()) {
         return;
     }
+    std::scoped_lock lock{g_srt_codegen_mutex};
 
     // Register the signal handler for SRT walker, if not already registered
     if (g_srt_codegen_start == nullptr) {
@@ -853,6 +879,61 @@ void FlattenExtendedUserdataPass(IR::Program& program) {
         ASSERT(pass_info.vn_to_inst.contains(pass_info.gvn_table.GetValueNumber(readconst)));
         IR::Inst* original = pass_info.DeduplicateInstruction(readconst);
         SetFlatbufOffset(readconst, GetFlatbufOffset(original));
+    }
+
+    // What each flattened dword is read from: its kind, offset, the register or flattened dword
+    // its pointer comes from, and its offset in the table (or that it's computed).
+    {
+        std::vector<std::array<u32, 4>> layout;
+        for (IR::Inst* readconst : all_readconsts) {
+            if (pass_info.DeduplicateInstruction(readconst) != readconst) {
+                continue;
+            }
+            std::array<u32, 4> entry{u32(readconst->GetOpcode()), GetFlatbufOffset(readconst), ~0u,
+                                     ~0u};
+            if (readconst->GetOpcode() == IR::Opcode::ReadConst) {
+                const IR::Inst* base = readconst->Arg(0).TryInst();
+                IR::Inst* ptr_lo = base ? base->Arg(0).TryInst() : nullptr;
+                if (ptr_lo && ptr_lo->GetOpcode() == IR::Opcode::GetUserData) {
+                    entry[2] = u32(ptr_lo->Arg(0).ScalarReg());
+                } else if (ptr_lo && (ptr_lo->GetOpcode() == IR::Opcode::ReadConst ||
+                                      ptr_lo->GetOpcode() == IR::Opcode::ReadConstBuffer)) {
+                    entry[2] =
+                        0x10000u | GetFlatbufOffset(pass_info.DeduplicateInstruction(ptr_lo));
+                }
+                if (readconst->Arg(1).IsImmediate()) {
+                    entry[3] = readconst->Arg(1).U32();
+                }
+            }
+            layout.push_back(entry);
+        }
+        std::ranges::sort(layout);
+        program.info.flat_layout =
+            layout.empty()
+                ? 0
+                : HashCombine(XXH3_64bits(layout.data(), layout.size() * sizeof(layout[0])),
+                              u64(program.info.srt_info.flattened_bufsize_dw));
+    }
+
+    // A translation without the draw's state finds image types by where their T#s are read.
+    if (program.info.guess_state) {
+        program.info.guess_flat_sources.clear();
+        for (IR::Inst* readconst : all_readconsts) {
+            if (readconst->GetOpcode() != IR::Opcode::ReadConst ||
+                !readconst->Arg(1).IsImmediate()) {
+                continue;
+            }
+            const IR::Inst* base = readconst->Arg(0).TryInst();
+            const IR::Inst* ptr_lo = base ? base->Arg(0).TryInst() : nullptr;
+            if (!ptr_lo || ptr_lo->GetOpcode() != IR::Opcode::GetUserData) {
+                continue;
+            }
+            program.info.guess_flat_sources.push_back({
+                .flat = GetFlatbufOffset(readconst),
+                .sgpr = static_cast<u8>(ptr_lo->Arg(0).ScalarReg()),
+                .dword = readconst->Arg(1).U32(),
+            });
+        }
     }
 
     program.info.RefreshFlatBuf();

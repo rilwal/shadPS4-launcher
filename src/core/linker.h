@@ -5,6 +5,7 @@
 
 #include <algorithm>
 #include <mutex>
+#include <unordered_set>
 #include <vector>
 #include "core/libraries/kernel/threads.h"
 #include "core/module.h"
@@ -171,6 +172,9 @@ private:
     u32 max_tls_index{};
     u32 num_static_modules{};
     AppHeapAPI heap_api{};
+    // TLS blocks made with the host's malloc (before the game's heap was known, or when it
+    // returned null): they go back to the host's free, not the game's.
+    std::unordered_set<void*> host_tls_blocks;
     std::vector<std::unique_ptr<Module>> m_modules;
     Loader::SymbolsResolver m_hle_symbols{};
 };

@@ -1,8 +1,7 @@
 // SPDX-FileCopyrightText: Copyright 2024 shadPS4 Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
-#include <unordered_set>
-#include <queue>
+#include <vector>
 #include "shader_recompiler/ir/program.h"
 
 namespace Shader::Optimization {
@@ -10,8 +9,11 @@ namespace Shader::Optimization {
 void DeadCodeEliminationPass(IR::Program& program) {
     // We iterate over the instructions in reverse order.
     // This is because removing an instruction reduces the number of uses for earlier instructions.
-    std::unordered_set<IR::Inst*> live;
-    std::queue<IR::Inst*> worklist;
+    // Live instructions are marked in place rather than kept in a hash set, and the worklist is a
+    // vector stack: this pass runs twice per translation.
+    const u32 live = IR::NextPassEpoch();
+    thread_local std::vector<IR::Inst*> worklist;
+    worklist.clear();
 
     for (IR::Block* block : program.post_order_blocks) {
         auto it{block->end()};
@@ -22,30 +24,30 @@ void DeadCodeEliminationPass(IR::Program& program) {
                 it->Invalidate();
                 it = block->Instructions().erase(it);
             } else if (has_side_effects) {
-                live.insert(&*it);
-                worklist.push(&*it);
+                it->Mark(live);
+                worklist.push_back(&*it);
             }
         }
     }
 
     while (!worklist.empty()) {
-        IR::Inst* inst = worklist.front();
-        worklist.pop();
+        IR::Inst* inst = worklist.back();
+        worklist.pop_back();
 
         for (size_t i = 0; i < inst->NumArgs(); i++) {
             if (inst->Arg(i).IsImmediate()) {
                 continue;
             }
             IR::Inst* operand = inst->Arg(i).Inst();
-            if (live.insert(operand).second) {
-                worklist.push(operand);
+            if (operand->Mark(live)) {
+                worklist.push_back(operand);
             }
         }
     }
 
     for (IR::Block* block : program.post_order_blocks) {
         for (auto it = block->begin(); it != block->end();) {
-            if (live.contains(&*it)) {
+            if (it->IsMarked(live)) {
                 ++it;
             } else {
                 it->Invalidate();

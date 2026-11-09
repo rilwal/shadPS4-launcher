@@ -115,6 +115,17 @@ public:
 
     [[nodiscard]] U32 ReadConst(const Value& base, const U32& offset);
     [[nodiscard]] U32 ReadConstBuffer(const Value& handle, const U32& index, BufferInstInfo info);
+    /// A buffer's stride, read at run time instead of compiled in.
+    [[nodiscard]] U32 BufferStride(const Value& handle);
+    /// The buffer's RuntimeBufferFormat from the stage table.
+    [[nodiscard]] Value BufferFormat(const Value& handle);
+    /// A storage image's swizzle from the stage table (see EncodeImageSwizzle).
+    [[nodiscard]] U32 ImageSwizzle(const Value& image_index);
+    /// A render target's swizzle from the stage table (see StageTable::TargetSwizzlesOffset).
+    [[nodiscard]] U32 TargetSwizzle(const Value& target);
+    /// One of the two uvec4s of a vertex attribute's RuntimeVertexFormat from the stage table,
+    /// indexed by attribute * 2 + half.
+    [[nodiscard]] Value VertexFormat(const Value& index);
 
     [[nodiscard]] U8 LoadBufferU8(const Value& handle, const Value& address, BufferInstInfo info);
     [[nodiscard]] U16 LoadBufferU16(const Value& handle, const Value& address, BufferInstInfo info);
@@ -396,7 +407,7 @@ public:
                                             const U1& skip_mips, TextureInstInfo info);
 
     [[nodiscard]] Value ImageQueryLod(const Value& handle, const Value& coords,
-                                      TextureInstInfo info);
+                                      const Value& sampler, TextureInstInfo info);
     [[nodiscard]] Value ImageGather(const Value& handle, const Value& coords, const Value& offset,
                                     TextureInstInfo info);
     [[nodiscard]] Value ImageGatherDref(const Value& handle, const Value& coords,

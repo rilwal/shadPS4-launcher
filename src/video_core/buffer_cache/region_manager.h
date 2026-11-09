@@ -5,7 +5,7 @@
 
 #include <utility>
 
-#include "common/adaptive_mutex.h"
+#include "common/spin_park_mutex.h"
 #include "common/types.h"
 #include "core/emulator_settings.h"
 #include "video_core/buffer_cache/region_definitions.h"
@@ -13,11 +13,7 @@
 
 namespace VideoCore {
 
-#ifdef PTHREAD_ADAPTIVE_MUTEX_INITIALIZER_NP
-using LockType = Common::AdaptiveMutex;
-#else
-using LockType = std::mutex;
-#endif
+using LockType = Common::SpinParkMutex;
 
 /**
  * Allows tracking CPU and GPU modification of pages in a contigious virtual address region.
@@ -91,8 +87,9 @@ public:
         RegionBits read_prot;
         Bounds watcher_bounds = MIN_BOUNDS;
         if constexpr (locked) {
-            mutex.lock();
+            LockTimingWriteFault(mutex, write_fault_phases.region_lock_ns);
         }
+        RegionLockHoldTimer hold_timer;
         IterateWords(bounds, [&](u64 index, u64 mask) {
             update_watchers |= UpdateProtection<cpu_op, gpu_op>(write_prot, read_prot,
                                                                 watcher_bounds, index, mask);
@@ -100,14 +97,26 @@ public:
         const auto write_op = GetPageOp<Type::CPU>(cpu_op);
         const auto read_op = GetPageOp<Type::GPU>(gpu_op);
         update_watchers &= write_op != PageOp::None || read_op != PageOp::None;
-        if (update_watchers) {
-            tracker->UpdatePageWatchersForRegion(cpu_addr, watcher_bounds, write_prot, read_prot,
-                                                 write_op, read_op);
-        }
         IterateWords(bounds,
                      [&](u64 index, u64 mask) { UpdateState<cpu_op, gpu_op>(index, mask); });
         if constexpr (locked) {
+            hold_timer.Finish(LockOp<Type::None, cpu_op, gpu_op>());
             mutex.unlock();
+            if (update_watchers) {
+                tracker->UpdatePageWatchersForRegion(cpu_addr, watcher_bounds, write_prot,
+                                                     read_prot, write_op, read_op);
+            }
+        } else if (update_watchers) {
+            // The caller holds the lock: Unlock() applies it.
+            ApplyPendingWatchers();
+            pending_watchers = PendingWatchers{
+                .valid = true,
+                .bounds = watcher_bounds,
+                .write_prot = write_prot,
+                .read_prot = read_prot,
+                .write_op = write_op,
+                .read_op = read_op,
+            };
         }
     }
 
@@ -125,8 +134,9 @@ public:
         u64 end_page{};
         Bounds watcher_bounds = MIN_BOUNDS;
         if constexpr (locked) {
-            mutex.lock();
+            LockTimingWriteFault(mutex, write_fault_phases.region_lock_ns);
         }
+        RegionLockHoldTimer hold_timer;
         IterateWords(bounds, [&](u64 index, u64 mask) {
             const u64 base_page = index * PAGES_PER_WORD;
             const u64 word = state[index] & mask;
@@ -151,14 +161,15 @@ public:
         const auto write_op = GetPageOp<Type::CPU>(cpu_op);
         const auto read_op = GetPageOp<Type::GPU>(gpu_op);
         update_watchers &= write_op != PageOp::None || read_op != PageOp::None;
-        if (update_watchers) {
-            tracker->UpdatePageWatchersForRegion(cpu_addr, watcher_bounds, write_prot, read_prot,
-                                                 write_op, read_op);
-        }
         IterateWords(bounds,
                      [&](u64 index, u64 mask) { UpdateState<cpu_op, gpu_op>(index, mask); });
         if constexpr (locked) {
+            hold_timer.Finish(LockOp<type, cpu_op, gpu_op>());
             mutex.unlock();
+        }
+        if (update_watchers) {
+            tracker->UpdatePageWatchersForRegion(cpu_addr, watcher_bounds, write_prot, read_prot,
+                                                 write_op, read_op);
         }
     }
 
@@ -183,14 +194,76 @@ public:
     }
 
     void Lock(const Bounds& bounds) noexcept {
-        mutex.lock();
+        LockTimingWriteFault(mutex, write_fault_phases.region_lock_ns);
+        explicit_hold_timer = RegionLockHoldTimer{};
     }
 
     void Unlock(const Bounds& bounds) noexcept {
+        explicit_hold_timer.Finish(RegionLockOp::Explicit);
+        const PendingWatchers pending = std::exchange(pending_watchers, PendingWatchers{});
         mutex.unlock();
+        if (pending.valid) {
+            tracker->UpdatePageWatchersForRegion(cpu_addr, pending.bounds, pending.write_prot,
+                                                 pending.read_prot, pending.write_op,
+                                                 pending.read_op);
+        }
     }
 
 private:
+    template <Type type, StateOp cpu_op, StateOp gpu_op>
+    static constexpr RegionLockOp LockOp() {
+        if constexpr (type == Type::CPU) {
+            return gpu_op == StateOp::Set ? RegionLockOp::UploadRangesWritten
+                                          : RegionLockOp::UploadRanges;
+        } else if constexpr (type == Type::GPU) {
+            return RegionLockOp::DownloadRanges;
+        } else if constexpr (cpu_op == StateOp::Set && gpu_op == StateOp::None) {
+            return RegionLockOp::CpuSet;
+        } else if constexpr (cpu_op == StateOp::Clear && gpu_op == StateOp::None) {
+            return RegionLockOp::CpuClear;
+        } else if constexpr (cpu_op == StateOp::None && gpu_op == StateOp::Set) {
+            return RegionLockOp::GpuSet;
+        } else if constexpr (cpu_op == StateOp::None && gpu_op == StateOp::Clear) {
+            return RegionLockOp::GpuClear;
+        } else if constexpr (cpu_op == StateOp::Set && gpu_op == StateOp::Clear) {
+            return RegionLockOp::CpuSetGpuClear;
+        } else if constexpr (cpu_op == StateOp::Clear && gpu_op == StateOp::Set) {
+            return RegionLockOp::CpuClearGpuSet;
+        } else {
+            return RegionLockOp::Other;
+        }
+    }
+
+    /// Held by Lock() until Unlock(); only touched with the mutex held.
+    RegionLockHoldTimer explicit_hold_timer;
+
+    /// Page protection changes are applied after the lock is released: they're mprotect calls,
+    /// and guest threads writing to the same region queued behind them (Bloodborne's workers
+    /// spun ~8 us per write fault). That's safe because the page manager counts watchers per
+    /// page and changes protection under page locks: each state change adds or removes one
+    /// watcher, these commute, and so the pages end up protected as the bits say whatever order
+    /// they land in. Until a change lands, a write to a page still protected faults again and
+    /// retries, and an upload copies before it protects, as it did. A change made under an
+    /// explicit Lock() waits here for Unlock(); only touched with the mutex held.
+    struct PendingWatchers {
+        bool valid{};
+        Bounds bounds{};
+        RegionBits write_prot;
+        RegionBits read_prot;
+        PageOp write_op{};
+        PageOp read_op{};
+    };
+    PendingWatchers pending_watchers{};
+
+    void ApplyPendingWatchers() {
+        if (pending_watchers.valid) {
+            tracker->UpdatePageWatchersForRegion(
+                cpu_addr, pending_watchers.bounds, pending_watchers.write_prot,
+                pending_watchers.read_prot, pending_watchers.write_op, pending_watchers.read_op);
+            pending_watchers.valid = false;
+        }
+    }
+
     template <StateOp op>
     constexpr static u64 Apply(u64 word, u64 mask) {
         if constexpr (op == StateOp::Clear) {

@@ -12,6 +12,7 @@
 #include "imgui/renderer/imgui_core.h"
 #include "launcher/overlay.h"
 #include "video_core/amdgpu/liverpool.h"
+#include "video_core/perf_stats.h"
 #include "video_core/renderer_vulkan/vk_presenter.h"
 
 extern std::unique_ptr<Vulkan::Presenter> presenter;
@@ -320,6 +321,7 @@ bool VideoOutDriver::SubmitFlip(VideoOutPort* port, s32 index, s64 flip_arg,
 }
 
 void VideoOutDriver::SubmitFlipInternal(VideoOutPort* port, s32 index, s64 flip_arg, bool is_eop) {
+    const VideoCore::PerfStats::ScopedCost cost{VideoCore::PerfStats::Cost::Flips};
     Vulkan::Frame* frame;
     if (index == -1) {
         frame = presenter->PrepareBlankFrame(false);

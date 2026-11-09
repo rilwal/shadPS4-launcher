@@ -432,6 +432,26 @@ U32 IREmitter::ReadConstBuffer(const Value& handle, const U32& index, BufferInst
     return Inst<U32>(Opcode::ReadConstBuffer, Flags{info}, handle, index);
 }
 
+U32 IREmitter::BufferStride(const Value& handle) {
+    return Inst<U32>(Opcode::BufferStride, handle);
+}
+
+Value IREmitter::BufferFormat(const Value& handle) {
+    return Inst(Opcode::BufferFormat, handle);
+}
+
+U32 IREmitter::ImageSwizzle(const Value& image_index) {
+    return Inst<U32>(Opcode::ImageSwizzle, image_index);
+}
+
+U32 IREmitter::TargetSwizzle(const Value& target) {
+    return Inst<U32>(Opcode::TargetSwizzle, target);
+}
+
+Value IREmitter::VertexFormat(const Value& index) {
+    return Inst(Opcode::VertexFormat, index);
+}
+
 U8 IREmitter::LoadBufferU8(const Value& handle, const Value& address, BufferInstInfo info) {
     return Inst<U8>(Opcode::LoadBufferU8, Flags{info}, handle, address);
 }
@@ -2149,8 +2169,9 @@ Value IREmitter::ImageQueryDimension(const Value& handle, const IR::U32& lod,
     return Inst(Opcode::ImageQueryDimensions, Flags{info}, handle, lod, skip_mips);
 }
 
-Value IREmitter::ImageQueryLod(const Value& handle, const Value& coords, TextureInstInfo info) {
-    return Inst(Opcode::ImageQueryLod, Flags{info}, handle, coords);
+Value IREmitter::ImageQueryLod(const Value& handle, const Value& coords, const Value& sampler,
+                               TextureInstInfo info) {
+    return Inst(Opcode::ImageQueryLod, Flags{info}, handle, coords, sampler);
 }
 
 Value IREmitter::ImageGradient(const Value& handle, const Value& coords,

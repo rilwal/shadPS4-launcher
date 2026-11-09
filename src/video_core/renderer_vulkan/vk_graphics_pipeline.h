@@ -3,6 +3,8 @@
 
 #pragma once
 
+#include <optional>
+
 #include <boost/container/static_vector.hpp>
 #include <xxhash.h>
 
@@ -11,6 +13,7 @@
 #include "video_core/amdgpu/regs_depth.h"
 #include "video_core/amdgpu/regs_primitive.h"
 #include "video_core/renderer_vulkan/vk_pipeline_common.h"
+#include "video_core/renderer_vulkan/vk_pipeline_compiler.h"
 
 namespace VideoCore {
 class BufferCache;
@@ -25,6 +28,7 @@ static constexpr u32 MaxVertexBufferCount = 32;
 class Instance;
 class Scheduler;
 class DescriptorHeap;
+class ShaderObjects;
 
 template <typename T>
 using VertexInputs = boost::container::static_vector<T, MaxVertexBufferCount>;
@@ -90,8 +94,12 @@ public:
                      std::span<const Shader::RuntimeInfo, MaxShaderStages> runtime_infos,
                      const Shader::Gcn::FetchShaderData* fetch_shader,
                      std::span<const vk::ShaderModule> modules, SerializationSupport& sdata,
-                     bool preloading);
+                     bool preloading, PipelineCompileOptions options = {});
     ~GraphicsPipeline();
+
+    /// The vertex input format for an attribute's V#: its own, or its raw bits for a runtime
+    /// vertex format.
+    vk::Format VertexInputFormat(const AmdGpu::Buffer& buffer) const;
 
     const Shader::Gcn::FetchShaderData& GetFetchShader() const noexcept {
         return fetch_shader;
@@ -101,6 +109,38 @@ public:
         return key;
     }
 
+    /// True if it draws with shader objects, bound with BindShaderObjects, instead of a
+    /// pipeline handle.
+    [[nodiscard]] bool UsesShaderObjects() const noexcept {
+        return shader_state != nullptr;
+    }
+
+    /// With shader objects: what BindShaderObjects binds and sets.
+    struct ShaderObjectState {
+        std::array<vk::ShaderStageFlagBits, 5> stages{};
+        std::array<vk::ShaderEXT, 5> shaders{};
+        u32 num_stages{};
+        vk::PrimitiveTopology topology{};
+        u32 patch_control_points{};
+        bool tessellation{};
+        vk::SampleCountFlagBits samples{};
+        vk::PolygonMode polygon_mode{};
+        bool depth_clamp{};
+        bool depth_clip{};
+        vk::ProvokingVertexModeEXT provoking_vertex{};
+        bool negative_one_to_one{};
+        bool logic_op_enable{};
+        vk::LogicOp logic_op{};
+        u32 num_attachments{};
+        std::array<vk::Bool32, AmdGpu::NUM_COLOR_BUFFERS> blend_enables{};
+        std::array<vk::ColorBlendEquationEXT, AmdGpu::NUM_COLOR_BUFFERS> blend_equations{};
+    };
+
+    /// Binds the shader objects and sets the state a pipeline would have baked in. With what
+    /// is bound now (`bound`, null after an invalidation), only the shaders and state that
+    /// differ; then `bound` is set to this pipeline's.
+    void BindShaderObjects(vk::CommandBuffer cmdbuf, std::optional<ShaderObjectState>& bound) const;
+
     /// Gets the attributes and bindings for vertex inputs.
     template <typename Attribute, typename Binding>
     void GetVertexInputs(VertexInputs<Attribute>& attributes, VertexInputs<Binding>& bindings,
@@ -109,9 +149,24 @@ public:
                          u32 step_rate_1) const;
 
 private:
+    struct Build;
+
     void BuildDescSetLayout(bool preloading);
 
+    /// Creates the pipeline in the driver.
+    void Create(const Build& build, bool optimize = true);
+
+    /// Times an unoptimized creation of the same pipeline, then throws it away.
+    static void Probe(const Build& build, u64 optimized_ns,
+                      const std::function<void(u64, u64)>& on_probed);
+
+    /// Takes the shaders and baked state from a filled build, instead of creating a pipeline.
+    /// Runs on a worker with async creation.
+    void CreateShaderObjects(const Build& build, ShaderObjects& objects);
+
 private:
+    std::unique_ptr<ShaderObjectState> shader_state;
+
     GraphicsPipelineKey key;
     Shader::Gcn::FetchShaderData fetch_shader{};
 };

@@ -4,8 +4,10 @@
 #pragma once
 
 #include <array>
+#include <bit>
 #include <unordered_map>
 #include <sirit/sirit.h>
+#include <tsl/robin_map.h>
 
 #include "shader_recompiler/backend/bindings.h"
 #include "shader_recompiler/info.h"
@@ -96,42 +98,57 @@ public:
     }
 
     [[nodiscard]] Id ConstU32(u32 value) {
-        return Constant(U32[1], value);
+        return CachedConstant(U32[1], value);
     }
 
     template <typename... Args>
     [[nodiscard]] Id ConstU32(Args&&... values) {
         constexpr u32 size = static_cast<u32>(sizeof...(values));
         static_assert(size >= 2);
-        const std::array constituents{Constant(U32[1], values)...};
+        const std::array constituents{CachedConstant(U32[1], values)...};
         const Id type = size <= 4 ? U32[size] : TypeArray(U32[1], ConstU32(size));
         return ConstantComposite(type, constituents);
     }
 
     [[nodiscard]] Id ConstS32(s32 value) {
-        return Constant(S32[1], value);
+        return CachedConstant(S32[1], value);
     }
 
     template <typename... Args>
     [[nodiscard]] Id ConstS32(Args&&... values) {
         constexpr u32 size = static_cast<u32>(sizeof...(values));
         static_assert(size >= 2);
-        const std::array constituents{Constant(S32[1], values)...};
+        const std::array constituents{CachedConstant(S32[1], values)...};
         const Id type = size <= 4 ? S32[size] : TypeArray(S32[1], ConstU32(size));
         return ConstantComposite(type, constituents);
     }
 
     [[nodiscard]] Id ConstF32(f32 value) {
-        return Constant(F32[1], value);
+        return CachedConstant(F32[1], value);
     }
 
     template <typename... Args>
     [[nodiscard]] Id ConstF32(Args... values) {
         constexpr u32 size = static_cast<u32>(sizeof...(values));
         static_assert(size >= 2);
-        const std::array constituents{Constant(F32[1], values)...};
+        const std::array constituents{CachedConstant(F32[1], values)...};
         const Id type = size <= 4 ? F32[size] : TypeArray(F32[1], ConstU32(size));
         return ConstantComposite(type, constituents);
+    }
+
+    /// Scalar 32-bit constants, looked up here before Sirit: Sirit deduplicates declarations too,
+    /// but copies each one into a new vector to look it up, and shaders declare the same
+    /// constants over and over. Returns the same ids Sirit would.
+    template <typename T>
+        requires(sizeof(T) == sizeof(u32))
+    [[nodiscard]] Id CachedConstant(Id type, T value) {
+        const u64 key = (u64(type.value) << 32) | std::bit_cast<u32>(value);
+        if (const auto it = constant_ids.find(key); it != constant_ids.end()) {
+            return it->second;
+        }
+        const Id id = Constant(type, value);
+        constant_ids.emplace(key, id);
+        return id;
     }
 
     inline Id AddLabel() {
@@ -198,6 +215,8 @@ public:
 
     Id last_label{};
 
+    tsl::robin_map<u64, Id> constant_ids;
+
     Id void_id{};
     Id U8{};
     Id S8{};
@@ -253,6 +272,8 @@ public:
     Id vertex_index{};
     Id instance_id{};
     Id push_data_block{};
+    /// With VK_EXT_descriptor_heap: this stage's table, which holds its buffer offsets.
+    Id stage_table_block{};
     Id base_vertex{};
     Id base_instance{};
     Id frag_coord{};
@@ -400,6 +421,7 @@ private:
     void DefineVertexBlock();
     void DefineOutputs();
     void DefinePushDataBlock();
+    void DefineStageTable();
     void DefineBuffers();
     void DefineImagesAndSamplers();
     void DefineSharedMemory();

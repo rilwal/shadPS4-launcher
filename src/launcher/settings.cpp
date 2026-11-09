@@ -395,6 +395,12 @@ const std::vector<Entry>& Entries() {
             [](const std::string& value) {
                 EmulatorSettings.SetReadbacksMode(static_cast<u32>(std::stoi(value)), G);
             }));
+        e.push_back(Toggle(
+            "fault-load-emulation", "Finish reads without readbacks", "Accuracy",
+            "With Precise or Fenced readbacks, finish a game read that touches none of the GPU's "
+            "data from memory instead of waiting for the GPU. Experimental; off by default.",
+            [] { return EmulatorSettings.IsFaultLoadEmulation(); },
+            [](bool v) { EmulatorSettings.SetFaultLoadEmulation(v, G); }));
         // A/B testing: flip between two variants of an experiment while the game runs
         // (e.g. Precise vs Fenced readbacks), which compares them with far less noise than
         // separate runs. The active variant shows under the FPS counter.
@@ -435,6 +441,79 @@ const std::vector<Entry>& Entries() {
             "Keep compiled pipelines on disk, so later runs stutter less.",
             [] { return EmulatorSettings.IsPipelineCacheEnabled(); },
             [](bool v) { EmulatorSettings.SetPipelineCacheEnabled(v, G); }));
+        // Read for each new pipeline, so a change applies to the next one
+        e.push_back(
+            Live(Choice(
+                     "async-pipelines", "Shader compiling", "Accuracy",
+                     "How new shaders get compiled. Pausing the game stutters. In the background, "
+                     "what a shader draws is missing for a moment if the game draws it every "
+                     "frame; skip all also skips one-off draws, which can stay wrong. Quick "
+                     "first compiles a slower version at once, then swaps in the full one.",
+                     {{"0", "Pause the game"},
+                      {"1", "In the background"},
+                      {"2", "Quick first"},
+                      {"3", "In the background, skip all"}},
+                     [] { return std::to_string(EmulatorSettings.GetAsyncPipelines()); },
+                     [](const std::string& value) {
+                         EmulatorSettings.SetAsyncPipelines(static_cast<u32>(std::stoi(value)), G);
+                     }),
+                 Nothing));
+        e.push_back(
+            Live(Choice(
+                     "async-pipelines-ab", "Shader compiling: A/B test", "Accuracy",
+                     "Switch shader compiling between pausing and the mode above on a timer, to "
+                     "compare them in one run. The log says which is on.",
+                     {{"0", "Off"}, {"10", "Every 10 s"}, {"30", "Every 30 s"}},
+                     [] { return std::to_string(EmulatorSettings.GetAsyncPipelinesAbSeconds()); },
+                     [](const std::string& value) {
+                         EmulatorSettings.SetAsyncPipelinesAbSeconds(
+                             static_cast<u32>(std::stoi(value)), G);
+                     }),
+                 Nothing));
+        e.push_back(Toggle(
+            "descriptor-heap", "Descriptor heap", "Accuracy",
+            "Give shaders their textures and buffers through the graphics driver's descriptor "
+            "heap, "
+            "where it has one. Experimental: it's the groundwork for compiling shaders ahead of "
+            "time.",
+            [] { return EmulatorSettings.IsDescriptorHeap(); },
+            [](bool v) { EmulatorSettings.SetDescriptorHeap(v, G); }));
+        e.push_back(Toggle(
+            "shader-objects", "Shader objects", "Accuracy",
+            "Compile each shader once and reuse it for every draw, instead of compiling a "
+            "pipeline for each combination. Experimental, and needs the descriptor heap.",
+            [] { return EmulatorSettings.IsShaderObjects(); },
+            [](bool v) { EmulatorSettings.SetShaderObjects(v, G); }));
+        e.push_back(Toggle(
+            "compile-lookahead", "Compile ahead", "Accuracy",
+            "When a draw needs new shaders, read ahead through the frame's commands and start "
+            "compiling the shaders of later draws too. Experimental, and only with a "
+            "background shader compiling mode.",
+            [] { return EmulatorSettings.IsCompileLookahead(); },
+            [](bool v) { EmulatorSettings.SetCompileLookahead(v, G); }));
+        e.push_back(Toggle(
+            "shader-prescan", "Find shaders early", "Accuracy",
+            "Look for the game's shaders in memory as it loads them, before their first draw, "
+            "and remember them for the next launch. Experimental, Linux only.",
+            [] { return EmulatorSettings.IsShaderPrescan(); },
+            [](bool v) { EmulatorSettings.SetShaderPrescan(v, G); }));
+        e.push_back(Toggle(
+            "fewer-shader-variants", "Fewer shader variants", "Accuracy",
+            "Compile one shader for draws that differ only in ways that don't change it, such as "
+            "the exact format they draw to. With the descriptor heap, shaders also read buffer "
+            "formats as they run. Experimental.",
+            [] { return EmulatorSettings.IsFewerShaderVariants(); },
+            [](bool v) { EmulatorSettings.SetFewerShaderVariants(v, G); }));
+        e.push_back(Choice(
+            "shader-precompile-threads", "Compile found shaders early", "Accuracy",
+            "Compile the shaders \"Find shaders early\" finds before the game first draws with "
+            "them, on this many threads. More threads catch up sooner but take more CPU from the "
+            "game. Needs the descriptor heap. Experimental.",
+            {{"0", "Off"}, {"1", "1 thread"}, {"2", "2 threads"}, {"4", "4 threads"}},
+            [] { return std::to_string(EmulatorSettings.GetShaderPrecompileThreads()); },
+            [](const std::string& value) {
+                EmulatorSettings.SetShaderPrecompileThreads(static_cast<u32>(std::stoi(value)), G);
+            }));
 
         // System
         e.push_back(Toggle(

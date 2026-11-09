@@ -3,6 +3,7 @@
 
 #pragma once
 
+#include <functional>
 #include "common/small_vector.h"
 #include "common/types.h"
 #include "shader_recompiler/info.h"
@@ -35,7 +36,40 @@ struct VertexAttribute {
     }
 
     constexpr AmdGpu::Buffer GetSharp(const Shader::Info& info) const noexcept {
-        auto buffer = info.ReadUdReg<AmdGpu::Buffer>(sgpr_base, dword_offset);
+        if (info.guess_state) {
+            // No V# to read: assume 32-bit floats with as many components as the fetch loads,
+            // the rest filled the way the formats fill them.
+            // Non-empty, so the specialisation takes it as bound like the draw's.
+            auto buffer = AmdGpu::Buffer::Placeholder(1);
+            // Aligned, as draws' vertex buffers are, for a runtime format.
+            buffer.base_address = 16;
+            static constexpr std::array<AmdGpu::DataFormat, 5> Formats = {
+                AmdGpu::DataFormat::FormatInvalid, AmdGpu::DataFormat::Format32,
+                AmdGpu::DataFormat::Format32_32, AmdGpu::DataFormat::Format32_32_32,
+                AmdGpu::DataFormat::Format32_32_32_32};
+            buffer.data_format = u32(Formats[std::min<u32>(num_elements, 4)]);
+            buffer.num_format = u32(AmdGpu::NumberFormat::Float);
+            const auto select = [&](u32 i, AmdGpu::CompSwizzle fill) {
+                return u32(i < num_elements ? AmdGpu::CompSwizzle(u32(AmdGpu::CompSwizzle::Red) + i)
+                                            : fill);
+            };
+            buffer.dst_sel_x = select(0, AmdGpu::CompSwizzle::Zero);
+            buffer.dst_sel_y = select(1, AmdGpu::CompSwizzle::Zero);
+            buffer.dst_sel_z = select(2, AmdGpu::CompSwizzle::Zero);
+            buffer.dst_sel_w = select(3, AmdGpu::CompSwizzle::One);
+            return buffer;
+        }
+        AmdGpu::Buffer buffer = AmdGpu::Buffer::Null();
+        if (info.replay) {
+            for (const auto& [offset, recorded] : info.replay->vertex_buffers) {
+                if (offset == dword_offset) {
+                    buffer = recorded;
+                    break;
+                }
+            }
+        } else {
+            buffer = info.ReadUdReg<AmdGpu::Buffer>(sgpr_base, dword_offset);
+        }
         buffer.base_address += inst_offset;
         if (data_format) {
             buffer.data_format = data_format;
@@ -69,5 +103,11 @@ struct FetchShaderData {
 const u32* GetFetchShaderCode(const Info& info, u32 sgpr_base);
 
 bool ParseFetchShader(const Shader::Info& info, FetchShaderData& out_fetch_data);
+
+/// Copies guest code where that's possible without touching the guest's pages, or returns
+/// false. The renderer sets it: the GPU thread parses each draw's fetch shader, and a fetch
+/// shader on a page that also holds GPU-written bytes is read-protected under precise and
+/// fenced readbacks, so read directly it faults on every draw.
+void SetGuestCodeReader(std::function<bool(VAddr address, void* data, u64 size)> reader);
 
 } // namespace Shader::Gcn

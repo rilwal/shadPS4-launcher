@@ -4369,42 +4369,49 @@ constexpr std::array<InstFormat, 1> InstructionFormatEXP = {{
     {InstClass::Exp, InstCategory::Export, 4, 1, ScalarType::Float32, ScalarType::Any},
 }};
 
+/// The table's entry, or an undefined format past its end (garbage code decodes to opcodes
+/// the tables don't have).
+template <size_t N>
+static InstFormat At(const std::array<InstFormat, N>& table, uint32_t opcode) {
+    return opcode < N ? table[opcode] : InstFormat{};
+}
+
 InstFormat InstructionFormat(InstEncoding encoding, uint32_t opcode) {
     switch (encoding) {
     case InstEncoding::SOP1:
-        return InstructionFormatSOP1[opcode];
+        return At(InstructionFormatSOP1, opcode);
     case InstEncoding::SOPP:
-        return InstructionFormatSOPP[opcode];
+        return At(InstructionFormatSOPP, opcode);
     case InstEncoding::SOPC:
-        return InstructionFormatSOPC[opcode];
+        return At(InstructionFormatSOPC, opcode);
     case InstEncoding::VOP1:
-        return InstructionFormatVOP1[opcode];
+        return At(InstructionFormatVOP1, opcode);
     case InstEncoding::VOPC:
-        return InstructionFormatVOPC[opcode];
+        return At(InstructionFormatVOPC, opcode);
     case InstEncoding::VOP3:
-        return InstructionFormatVOP3[opcode];
+        return At(InstructionFormatVOP3, opcode);
     case InstEncoding::VOP3P:
-        return InstructionFormatVOP3P[opcode];
+        return At(InstructionFormatVOP3P, opcode);
     case InstEncoding::EXP:
-        return InstructionFormatEXP[opcode];
+        return At(InstructionFormatEXP, opcode);
     case InstEncoding::VINTRP:
-        return InstructionFormatVINTRP[opcode];
+        return At(InstructionFormatVINTRP, opcode);
     case InstEncoding::DS:
-        return InstructionFormatDS[opcode];
+        return At(InstructionFormatDS, opcode);
     case InstEncoding::MUBUF:
-        return InstructionFormatMUBUF[opcode];
+        return At(InstructionFormatMUBUF, opcode);
     case InstEncoding::MTBUF:
-        return InstructionFormatMTBUF[opcode];
+        return At(InstructionFormatMTBUF, opcode);
     case InstEncoding::MIMG:
-        return InstructionFormatMIMG[opcode];
+        return At(InstructionFormatMIMG, opcode);
     case InstEncoding::SMRD:
-        return InstructionFormatSMRD[opcode];
+        return At(InstructionFormatSMRD, opcode);
     case InstEncoding::SOPK:
-        return InstructionFormatSOPK[opcode];
+        return At(InstructionFormatSOPK, opcode);
     case InstEncoding::SOP2:
-        return InstructionFormatSOP2[opcode];
+        return At(InstructionFormatSOP2, opcode);
     case InstEncoding::VOP2:
-        return InstructionFormatVOP2[opcode];
+        return At(InstructionFormatVOP2, opcode);
     default:
         UNREACHABLE();
     }

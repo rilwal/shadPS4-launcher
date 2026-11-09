@@ -121,6 +121,8 @@ private:
 private:
     float expected_ratio{1920.0 / 1080.0f};
     u32 expected_frame_width{1920};
+    /// How long the last GetRenderFrame spent recreating its frame, for the slow flip log.
+    u64 last_recreate_ns{};
     u32 expected_frame_height{1080};
 
     Frontend::WindowSDL& window;
