@@ -1354,6 +1354,21 @@ void Rasterizer::BindTextures(const Shader::Info& stage, Shader::Backend::Bindin
             continue;
         }
 
+        // GetSharp already nulled a T# that can't be a texture (one in a branch the shader
+        // doesn't take on this dispatch can hold any bits: an uber shader whose table layout
+        // changes per dispatch, The Order: 1886). Null as well what would describe a texture we
+        // can't make: a format pair with no Vulkan format, or the linear general tiling.
+        if (LiverpoolToVK::surface_format_table[LiverpoolToVK::GetSurfaceFormatTableIndex(
+                data_fmt, num_fmt)] == vk::Format::eUndefined ||
+            tsharp.GetTileMode() == AmdGpu::TileMode::DisplayLinearGeneral) {
+            LOG_DEBUG(Render_Vulkan,
+                      "Rejecting T# with unsupported format {}/{} or tile mode {} in shader {:#x}",
+                      u32(data_fmt), u32(num_fmt), u32(tsharp.GetTileMode()), stage.pgm_hash);
+            image_bindings[num_images++].image_id = {};
+            image_descriptor_array_sizes.push_back(1);
+            continue;
+        }
+
         const Shader::MipStorageFallbackMode mip_fallback_mode = image_desc.mip_fallback_mode;
         const u32 num_bindings = image_desc.NumBindings(stage);
 
@@ -1368,6 +1383,22 @@ void Rasterizer::BindTextures(const Shader::Info& stage, Shader::Backend::Bindin
             } else if (mip_fallback_mode == Shader::MipStorageFallbackMode::DynamicIndex) {
                 desc.view_info.range.base.level += i;
                 desc.view_info.range.extent.levels = 1;
+            }
+
+            // And an image that couldn't exist: memory it would cover isn't all mapped, or it's
+            // bigger than an image can be.
+            const auto& info = desc.info;
+            if (!IsMapped(info.guest_address, info.guest_size) ||
+                info.resources.layers > instance.GetMaxImageArrayLayers() ||
+                std::max(info.size.width, info.size.height) > instance.GetMaxImageDimension2D() ||
+                info.size.depth > instance.GetMaxImageDimension3D()) {
+                LOG_DEBUG(Render_Vulkan,
+                          "Rejecting T# address={:#x} size={:#x} {}x{}x{} pitch={} layers={} in "
+                          "shader {:#x}",
+                          info.guest_address, info.guest_size, info.size.width, info.size.height,
+                          info.size.depth, info.pitch, info.resources.layers, stage.pgm_hash);
+                image_id = {};
+                continue;
             }
 
             VideoCore::PerfStats::CountLocal(VideoCore::PerfStats::Cost::BoundImages);

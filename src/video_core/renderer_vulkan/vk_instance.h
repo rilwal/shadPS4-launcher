@@ -421,6 +421,21 @@ public:
         return features.shaderClipDistance;
     }
 
+    /// Returns the largest width or height of a 2D image.
+    u32 GetMaxImageDimension2D() const {
+        return properties.limits.maxImageDimension2D;
+    }
+
+    /// Returns the largest depth of a 3D image.
+    u32 GetMaxImageDimension3D() const {
+        return properties.limits.maxImageDimension3D;
+    }
+
+    /// Returns the most array layers an image can have.
+    u32 GetMaxImageArrayLayers() const {
+        return properties.limits.maxImageArrayLayers;
+    }
+
     /// Returns the maximim viewport width.
     u32 GetMaxViewportWidth() const {
         return properties.limits.maxViewportDimensions[0];

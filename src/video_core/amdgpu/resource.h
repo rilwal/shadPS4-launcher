@@ -4,6 +4,7 @@
 #pragma once
 
 #include <cstring>
+#include <magic_enum/magic_enum.hpp>
 #include "common/alignment.h"
 #include "common/assert.h"
 #include "common/bit_field.h"
@@ -199,6 +200,17 @@ struct Image {
 
     bool Valid() const {
         return (type & 0x8u) != 0;
+    }
+
+    /// Whether the fields could describe a texture at all. A shader's table can hold a T# that it
+    /// only reads in a branch it doesn't take on this draw, with any bits in it: an unknown
+    /// format or tile mode, or tiled rows that don't end on a tile.
+    bool IsPlausible() const {
+        const u32 row = pitch + 1;
+        return magic_enum::enum_contains(DataFormat(data_format)) &&
+               magic_enum::enum_contains(NumberFormat(num_format)) &&
+               magic_enum::enum_contains(GetTileMode()) &&
+               (!IsTiled() || row <= width || row % 8 == 0);
     }
 
     VAddr Address() const {
