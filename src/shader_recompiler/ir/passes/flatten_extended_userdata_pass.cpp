@@ -1,6 +1,8 @@
 // SPDX-FileCopyrightText: Copyright 2024-2026 shadPS4 Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+#include <algorithm>
+#include <cstring>
 #include <mutex>
 #include <unordered_map>
 #include <boost/container/flat_map.hpp>
@@ -37,6 +39,10 @@ static const u8* g_srt_codegen_start = nullptr;
 /// each emission holds this from start to end. The signal handler only reads the buffer's
 /// bounds, which only grow.
 static std::mutex g_srt_codegen_mutex;
+/// Walkers already in the buffer by a hash of their code. Each permutation of a shader is
+/// translated again and makes the same walker; without reuse, a shader with hundreds of
+/// permutations (The Order: 1886) fills the buffer.
+static std::unordered_multimap<u64, std::pair<const u8*, size_t>> g_srt_walkers;
 
 namespace Shader {
 
@@ -686,8 +692,24 @@ static void GenerateSrtProgram(Info& info, PassInfo& pass_info) {
     c.ret();
     c.ready();
 
-    info.srt_info.walker_func_size =
-        c.getCurr() - reinterpret_cast<const u8*>(info.srt_info.walker_func);
+    const auto* code = reinterpret_cast<const u8*>(info.srt_info.walker_func);
+    const size_t code_size = c.getCurr() - code;
+    const u64 code_hash = XXH3_64bits(code, code_size);
+    const auto [first, last] = g_srt_walkers.equal_range(code_hash);
+    const auto same = std::find_if(first, last, [&](const auto& entry) {
+        const auto [other, other_size] = entry.second;
+        return other_size == code_size && std::memcmp(other, code, code_size) == 0;
+    });
+    if (same != last) {
+        // Drop the copy just made. A walker the fault handler patched no longer matches a new
+        // one, so a match has never faulted.
+        c.setSize(c.getSize() - code_size);
+        info.srt_info.walker_func =
+            reinterpret_cast<PFN_SrtWalker>(const_cast<u8*>(same->second.first));
+    } else {
+        g_srt_walkers.emplace(code_hash, std::make_pair(code, code_size));
+    }
+    info.srt_info.walker_func_size = code_size;
 
     if (EmulatorSettings.IsDumpShaders()) {
         DumpSrtProgram(info, reinterpret_cast<const u8*>(info.srt_info.walker_func),
