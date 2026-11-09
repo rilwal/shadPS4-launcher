@@ -239,7 +239,12 @@ struct Image {
         // Depth is the number of layers for Array images.
         u32 slices = depth + 1;
         const auto image_type = GetType();
-        if (image_type == ImageType::Color3D) {
+        if (image_type == ImageType::Color1D || image_type == ImageType::Color2D ||
+            image_type == ImageType::Color2DMsaa) {
+            // The hardware ignores depth for images that aren't arrays. Tearaway Unfolded keeps
+            // 128-bit T#s with unrelated data in the next dwords, read as 256 layers.
+            slices = 1;
+        } else if (image_type == ImageType::Color3D) {
             // Depth is the actual texture depth for 3D images.
             slices = 1;
         } else if (image_type == ImageType::Cube) {
