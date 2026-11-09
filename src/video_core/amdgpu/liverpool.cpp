@@ -486,7 +486,7 @@ bool Liverpool::TestWait(const PM4CmdWaitRegMem* wait) {
                     // Past this wait, hardware would have the label in memory already.
                     // Waiting for it before the command processor's next memory write costs
                     // Bloodborne ~200 waits/s, 3 ms a frame. What it guarded against (a late
-                    // label over memory the guest reused) WriteFenceLabel now prevents, so
+                    // label over memory the guest reused) WriteLabelsEarly now prevents, so
                     // it's off unless SHADPS4_ORDER_AFTER_WAITS=1.
                     static const bool order_after_waits = [] {
                         const char* env = std::getenv("SHADPS4_ORDER_AFTER_WAITS");
