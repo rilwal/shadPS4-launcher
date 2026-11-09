@@ -212,8 +212,8 @@ bool MemoryManager::TryWriteBacking(void* address, const void* data, u64 size) {
                           });
 }
 
-MemoryManager::BackingCas MemoryManager::CompareWriteBacking(VAddr address, u32 expected,
-                                                             u32 value) {
+MemoryManager::BackingCas MemoryManager::CompareWriteBacking(VAddr address, u32 expected, u32 value,
+                                                             u32* left) {
     ASSERT(address % sizeof(u32) == 0);
     BackingCas result = BackingCas::NoBacking;
     u32 found = expected;
@@ -225,6 +225,9 @@ MemoryManager::BackingCas MemoryManager::CompareWriteBacking(VAddr address, u32 
     };
     if (!ForEachBackingPage(impl, address, sizeof(u32), cas)) {
         ForEachBacking(address, sizeof(u32), cas);
+    }
+    if (left) {
+        *left = result == BackingCas::Written ? value : found;
     }
     return result;
 }

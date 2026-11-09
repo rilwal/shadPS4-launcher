@@ -312,9 +312,12 @@ void Liverpool::RecordLabelWrite(LabelWrites& writes, void* address, u64 data, u
 }
 
 thread_local const Liverpool::LabelWrites* Liverpool::running_label_writes = nullptr;
+thread_local const Liverpool::LabelWrites* Liverpool::running_label_after_writes = nullptr;
+thread_local std::atomic<u32>* Liverpool::running_label_after = nullptr;
 
 namespace {
 std::atomic<u64> skipped_label_writes{};
+std::atomic<u64> passed_label_signals{};
 } // namespace
 
 void Liverpool::WriteFenceLabel(void* address, u64 data, u32 num_bytes) {
@@ -322,6 +325,16 @@ void Liverpool::WriteFenceLabel(void* address, u64 data, u32 num_bytes) {
     const auto addr = std::bit_cast<VAddr>(address);
     if (!running_label_writes || addr % sizeof(u32) != 0 || num_bytes % sizeof(u32) != 0) {
         ASSERT(memory->TryWriteBacking(address, &data, num_bytes));
+        if (running_label_after) {
+            for (u32 offset = 0; offset < num_bytes; offset += sizeof(u32)) {
+                const auto it = std::ranges::find(*running_label_after_writes, addr + offset,
+                                                  &LabelWrite::address);
+                if (it != running_label_after_writes->end()) {
+                    running_label_after[it - running_label_after_writes->begin()].store(
+                        static_cast<u32>(data >> (offset * 8)), std::memory_order_release);
+                }
+            }
+        }
         return;
     }
     for (u32 offset = 0; offset < num_bytes; offset += sizeof(u32)) {
@@ -332,14 +345,27 @@ void Liverpool::WriteFenceLabel(void* address, u64 data, u32 num_bytes) {
             ASSERT(memory->TryWriteBacking(std::bit_cast<void*>(dword), &value, sizeof(value)));
             continue;
         }
-        // A label that no longer holds what it held when the signal was recorded was written
-        // since. The guest may have seen the work done some other way and reused the memory
-        // (Bloodborne puts command buffers there), and on hardware the label would have been
-        // written before that. So leave the newer value.
-        const auto result = memory->CompareWriteBacking(dword, it->expected, value);
+        // A queue wait passed on this signal before it landed, and a command processor write
+        // after the wait may have told the guest the work was done. A label that no longer
+        // holds what it held when the signal was recorded was then written since: the guest
+        // may have reused the memory (Bloodborne puts command buffers there), and on hardware
+        // the label would have been written before that. So leave the newer value.
+        const u32 expected =
+            it->after_previous
+                ? it->after_previous[it->previous_index].load(std::memory_order_acquire)
+                : it->expected;
+        u32 left = value;
+        const auto result = memory->CompareWriteBacking(dword, expected, value, &left);
         ASSERT(result != Core::MemoryManager::BackingCas::NoBacking);
         if (result == Core::MemoryManager::BackingCas::Changed) {
             skipped_label_writes.fetch_add(1, std::memory_order_relaxed);
+        }
+        // A later signal to this label recorded before this one landed compares with this,
+        // not with this one's value: else, once one write was left, every later one would be
+        // too, for as long as signals to the label overlap.
+        if (running_label_after) {
+            running_label_after[it - running_label_writes->begin()].store(
+                left, std::memory_order_release);
         }
     }
 }
@@ -357,6 +383,8 @@ bool Liverpool::DeferFenceSignal(Common::UniqueFunction<void>&& signal, bool thr
         const auto it = deferred_labels.find(write.address);
         if (it != deferred_labels.end() && it->second.seq > landed_now) {
             write.expected = it->second.value;
+            write.after_previous = it->second.after;
+            write.previous_index = it->second.index;
         } else {
             auto* memory = Core::Memory::Instance();
             if (!memory->ReadBackingPages(write.address, &write.expected, sizeof(u32)) &&
@@ -366,11 +394,29 @@ bool Liverpool::DeferFenceSignal(Common::UniqueFunction<void>&& signal, bool thr
         }
     }
     const u64 seq = ++deferred_label_seq;
+    // Where this signal notes what it left in each label, for later signals recorded before it
+    // lands. Starts as its values, should the signal not run its label writes.
+    std::shared_ptr<std::atomic<u32>[]> after{new std::atomic<u32>[expected_writes.size()]};
+    for (size_t i = 0; i < expected_writes.size(); ++i) {
+        after[i].store(expected_writes[i].value, std::memory_order_relaxed);
+    }
     const bool deferred = rasterizer->DeferFenceSignal(
-        [this, seq, signal = std::move(signal), writes = std::move(expected_writes)] {
-            running_label_writes = &writes;
+        [this, seq, signal = std::move(signal), writes = std::move(expected_writes), after] {
+            // Nothing told the guest this work was done before the signal: hardware writes the
+            // label over whatever the guest wrote there meanwhile (a label reset for the next
+            // frame, say), and so does this. Comparing for every signal would drop each later
+            // signal to a label once one is left, while signals to it overlap (uncapped).
+            const bool passed = seq <= passed_label_seq.load(std::memory_order_acquire);
+            running_label_writes = passed ? &writes : nullptr;
+            running_label_after_writes = &writes;
+            running_label_after = after.get();
+            if (passed) {
+                passed_label_signals.fetch_add(1, std::memory_order_relaxed);
+            }
             signal();
             running_label_writes = nullptr;
+            running_label_after_writes = nullptr;
+            running_label_after = nullptr;
             // Deferred signals run in order, so this one landing means all before it have.
             landed_label_seq.store(seq, std::memory_order_release);
             landed_label_seq.notify_all();
@@ -387,8 +433,9 @@ bool Liverpool::DeferFenceSignal(Common::UniqueFunction<void>&& signal, bool thr
     if (landed_label_seq.load(std::memory_order_acquire) >= seq) {
         return true;
     }
-    for (const auto& write : writes) {
-        deferred_labels.insert_or_assign(write.address, DeferredLabel{write.value, seq});
+    for (u32 i = 0; i < writes.size(); ++i) {
+        deferred_labels.insert_or_assign(writes[i].address,
+                                         DeferredLabel{writes[i].value, seq, after, i});
     }
     // Labels at many addresses (rings of them) grow the map: drop the landed ones now and then.
     // Not on every signal once it's past the limit, or each would walk the whole map.
@@ -484,6 +531,8 @@ bool Liverpool::TestWait(const PM4CmdWaitRegMem* wait) {
                     }();
                     if (order_after_waits) {
                         cp_order_seq = std::max(cp_order_seq, it->second.seq);
+                    } else if (it->second.seq > passed_label_seq.load(std::memory_order_relaxed)) {
+                        passed_label_seq.store(it->second.seq, std::memory_order_release);
                     }
                     return true;
                 }
@@ -517,6 +566,7 @@ void Liverpool::LogWaitStats() {
     }
     const double seconds = double(now - wait_stats.last_log_ns) / 1e9;
     const u64 skipped = skipped_label_writes.exchange(0, std::memory_order_relaxed);
+    const u64 passed = passed_label_signals.exchange(0, std::memory_order_relaxed);
     if (seconds > 0.5 && (wait_stats.failed_polls != 0 || wait_stats.deferred_label_hits != 0 ||
                           wait_stats.order_waits != 0 || skipped != 0)) {
         const char* variant = Common::AbSwitch::Label();
@@ -525,11 +575,12 @@ void Liverpool::LogWaitStats() {
         }
         LOG_INFO(Render,
                  "Queue waits per second [{}] over {:.1f} s: {:.0f} polls failed, {:.0f} read a "
-                 "deferred label, {:.0f} writes waited for one ({:.2f} ms); {} late label writes "
-                 "skipped (memory rewritten since)",
+                 "deferred label, {:.0f} writes waited for one ({:.2f} ms); {} signals landed "
+                 "after a wait passed on them, {} of their label writes skipped (memory "
+                 "rewritten since)",
                  variant ? variant : "-", seconds, wait_stats.failed_polls / seconds,
                  wait_stats.deferred_label_hits / seconds, wait_stats.order_waits / seconds,
-                 wait_stats.order_wait_ns / 1e6 / seconds, skipped);
+                 wait_stats.order_wait_ns / 1e6 / seconds, passed, skipped);
     }
     wait_stats = WaitStats{.last_log_ns = now, .ab_switches = switches};
 }
