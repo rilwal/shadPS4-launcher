@@ -113,6 +113,7 @@ public:
     }
 
     u32 Add(const ImageResource& desc) {
+        const size_t num_images = image_resources.size();
         const u32 index{Add(image_resources, desc, [&desc](const auto& existing) {
             return desc.sharp_fetch == existing.sharp_fetch && desc.is_array == existing.is_array &&
                    desc.mip_fallback_mode == existing.mip_fallback_mode &&
@@ -120,6 +121,9 @@ public:
                    desc.post_op == existing.post_op;
         })};
         auto& image = image_resources[index];
+        if (image_resources.size() > num_images) {
+            image.predicate = info.image_predicate_seeds[index];
+        }
         image.is_atomic |= desc.is_atomic;
         image.is_written |= desc.is_written;
         return index;

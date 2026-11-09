@@ -44,6 +44,7 @@ struct InfoPersistent {
     ImageResourceList images;
     SamplerResourceList samplers;
     FMaskResourceList fmasks;
+    ResourcePredicate predicates;
 
     u32 fetch_shader_sgpr_base{};
     u32 shared_memory_scratch_size{};
@@ -103,6 +104,10 @@ struct Info : InfoPersistent {
 
     std::span<const u32> user_data;
     std::vector<u32> flattened_ud_buf;
+    /// Image predicates from an earlier translation of the same program, given to images by
+    /// index as they're added, so this translation sees the same null images that lookups and
+    /// binding will. info.predicates holds their nodes until the predicate pass rebuilds them.
+    std::array<u8, NUM_IMAGES> image_predicate_seeds{};
     PersistentSrtInfo srt_info;
 
     AttributeFlags loads{};

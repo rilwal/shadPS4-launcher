@@ -30,6 +30,7 @@ ResourceDiscoveryList ResourceDiscoverPass(IR::Program& program, const Profile& 
 void ResourcePatchingPass(Shader::Info& info, const ResourceDiscoveryList& sharp_usages,
                           const Profile& profile);
 void CollectShaderInfoPass(IR::Program& program, const Profile& profile);
+void ResourcePredicatePass(IR::Program& program);
 void LowerBufferFormatToRaw(IR::Program& program, const Profile& profile);
 void LowerUserClipPlanes(IR::Program& program, const RuntimeInfo& runtime_info);
 void LowerFp64ToFp32(IR::Program& program);

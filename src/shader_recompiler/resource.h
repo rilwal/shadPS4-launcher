@@ -7,7 +7,10 @@
 #include "shader_recompiler/ir/type.h"
 #include "video_core/amdgpu/resource.h"
 
+#include <array>
+#include <bit>
 #include <cstddef>
+#include <span>
 
 #include <boost/container/static_vector.hpp>
 
@@ -139,6 +142,206 @@ enum class MipStorageFallbackMode : u16 {
     ConstantIndex,
 };
 
+/// A uniform condition the shader branches on before it reads a resource, as an expression over
+/// the flattened user data. A table can hold anything in a slot the shader skips on this draw
+/// (The Order: 1886 keeps 16 light probe slots and reads only the first `count`), so a resource
+/// whose condition is false is bound as null instead of being built from whatever is there.
+struct ResourcePredicate {
+    enum class Op : u8 {
+        Imm,  // imm
+        Flat, // flattened_ud_buf[imm]
+        IAdd,
+        ISub,
+        IMul,
+        And,
+        Or,
+        Xor,
+        Not,
+        Shl,
+        Shr,
+        Sar,
+        UMin,
+        UMax,
+        SMin,
+        SMax,
+        BfeU, // a >> b & mask(c)
+        IEq,
+        INe,
+        ULt,
+        ULe,
+        UGt,
+        UGe,
+        SLt,
+        SLe,
+        SGt,
+        SGe,
+        LAnd,
+        LOr,
+        LXor,
+        LNot,
+        Select, // a ? b : c
+        FAdd,
+        FMul,
+        FNeg,
+        FAbs,
+        FMin,
+        FMax,
+        FOrdEq,
+        FOrdNe,
+        FOrdLt,
+        FOrdLe,
+        FOrdGt,
+        FOrdGe,
+        FUnordEq,
+        FUnordNe,
+        FUnordLt,
+        FUnordLe,
+        FUnordGt,
+        FUnordGe,
+    };
+    struct Node {
+        Op op;
+        u8 a, b, c; // operand nodes
+        u32 imm;
+    };
+    static constexpr u32 MaxNodes = 255; // indices are u8, and roots are stored +1
+
+    std::array<Node, MaxNodes> nodes;
+    u8 num_nodes{};
+    u16 max_flat{}; // highest flattened dword read, +1
+
+    /// Whether the resource with predicate `root` (node index + 1, 0 for none) may be read.
+    bool MayRead(u8 root, std::span<const u32> flatbuf) const noexcept {
+        if (root == 0 || flatbuf.size() < max_flat) {
+            return true;
+        }
+        return Eval(root - 1, flatbuf) != 0;
+    }
+
+private:
+    u32 Eval(u8 index, std::span<const u32> flat) const noexcept {
+        const Node& n = nodes[index];
+        const auto u = [&](u8 i) { return Eval(i, flat); };
+        const auto s = [&](u8 i) { return static_cast<s32>(Eval(i, flat)); };
+        const auto f = [&](u8 i) { return std::bit_cast<float>(Eval(i, flat)); };
+        const auto fu = [](float x) { return std::bit_cast<u32>(x); };
+        const auto ord = [&](auto cmp) {
+            const float x = f(n.a), y = f(n.b);
+            return u32(x == x && y == y && cmp(x, y));
+        };
+        const auto unord = [&](auto cmp) {
+            const float x = f(n.a), y = f(n.b);
+            return u32(x != x || y != y || cmp(x, y));
+        };
+        switch (n.op) {
+        case Op::Imm:
+            return n.imm;
+        case Op::Flat:
+            return flat[n.imm];
+        case Op::IAdd:
+            return u(n.a) + u(n.b);
+        case Op::ISub:
+            return u(n.a) - u(n.b);
+        case Op::IMul:
+            return u(n.a) * u(n.b);
+        case Op::And:
+            return u(n.a) & u(n.b);
+        case Op::Or:
+            return u(n.a) | u(n.b);
+        case Op::Xor:
+            return u(n.a) ^ u(n.b);
+        case Op::Not:
+            return ~u(n.a);
+        case Op::Shl:
+            return u(n.a) << (u(n.b) & 31);
+        case Op::Shr:
+            return u(n.a) >> (u(n.b) & 31);
+        case Op::Sar:
+            return u32(s(n.a) >> (u(n.b) & 31));
+        case Op::UMin:
+            return std::min(u(n.a), u(n.b));
+        case Op::UMax:
+            return std::max(u(n.a), u(n.b));
+        case Op::SMin:
+            return u32(std::min(s(n.a), s(n.b)));
+        case Op::SMax:
+            return u32(std::max(s(n.a), s(n.b)));
+        case Op::BfeU: {
+            const u32 count = u(n.c) & 31;
+            const u32 value = u(n.a) >> (u(n.b) & 31);
+            return count == 0 ? 0 : value & (~0u >> (32 - count));
+        }
+        case Op::IEq:
+            return u(n.a) == u(n.b);
+        case Op::INe:
+            return u(n.a) != u(n.b);
+        case Op::ULt:
+            return u(n.a) < u(n.b);
+        case Op::ULe:
+            return u(n.a) <= u(n.b);
+        case Op::UGt:
+            return u(n.a) > u(n.b);
+        case Op::UGe:
+            return u(n.a) >= u(n.b);
+        case Op::SLt:
+            return s(n.a) < s(n.b);
+        case Op::SLe:
+            return s(n.a) <= s(n.b);
+        case Op::SGt:
+            return s(n.a) > s(n.b);
+        case Op::SGe:
+            return s(n.a) >= s(n.b);
+        case Op::LAnd:
+            return u(n.a) && u(n.b);
+        case Op::LOr:
+            return u(n.a) || u(n.b);
+        case Op::LXor:
+            return (u(n.a) != 0) != (u(n.b) != 0);
+        case Op::LNot:
+            return !u(n.a);
+        case Op::Select:
+            return u(n.a) ? u(n.b) : u(n.c);
+        case Op::FAdd:
+            return fu(f(n.a) + f(n.b));
+        case Op::FMul:
+            return fu(f(n.a) * f(n.b));
+        case Op::FNeg:
+            return fu(-f(n.a));
+        case Op::FAbs:
+            return fu(std::abs(f(n.a)));
+        case Op::FMin:
+            return fu(std::min(f(n.a), f(n.b)));
+        case Op::FMax:
+            return fu(std::max(f(n.a), f(n.b)));
+        case Op::FOrdEq:
+            return ord([](float x, float y) { return x == y; });
+        case Op::FOrdNe:
+            return ord([](float x, float y) { return x != y; });
+        case Op::FOrdLt:
+            return ord([](float x, float y) { return x < y; });
+        case Op::FOrdLe:
+            return ord([](float x, float y) { return x <= y; });
+        case Op::FOrdGt:
+            return ord([](float x, float y) { return x > y; });
+        case Op::FOrdGe:
+            return ord([](float x, float y) { return x >= y; });
+        case Op::FUnordEq:
+            return unord([](float x, float y) { return x == y; });
+        case Op::FUnordNe:
+            return unord([](float x, float y) { return x != y; });
+        case Op::FUnordLt:
+            return unord([](float x, float y) { return x < y; });
+        case Op::FUnordLe:
+            return unord([](float x, float y) { return x <= y; });
+        case Op::FUnordGt:
+            return unord([](float x, float y) { return x > y; });
+        case Op::FUnordGe:
+            return unord([](float x, float y) { return x >= y; });
+        }
+        return 1;
+    }
+};
+
 struct ImageResource {
     SharpFetch<AmdGpu::Image> sharp_fetch{};
     bool is_depth{};
@@ -152,6 +355,8 @@ struct ImageResource {
     /// What a translation without the draw's T# takes the image to be, from how the shader
     /// addresses it.
     AmdGpu::ImageType guess_type{AmdGpu::ImageType::Color2D};
+    /// Node of info.predicates (+1) that must hold for the shader to read the image; 0 if none.
+    u8 predicate{};
 
     constexpr AmdGpu::Image GetSharp(const auto& info) const noexcept {
         AmdGpu::Image image{};
@@ -164,7 +369,8 @@ struct ImageResource {
                                  : guess_type);
             return image;
         }
-        if (!Fetch(info.flattened_ud_buf.data(), &image)) {
+        if (!info.predicates.MayRead(predicate, info.flattened_ud_buf) ||
+            !Fetch(info.flattened_ud_buf.data(), &image)) {
             return AmdGpu::Image::Null(is_depth);
         }
         if (post_op == SharpFetchPostOp::ConvertCubeTo2DArray) {

@@ -1110,6 +1110,7 @@ set(SHADER_RECOMPILER src/shader_recompiler/profile.h
                       src/shader_recompiler/ir/passes/resource_discover_pass.cpp
                       src/shader_recompiler/ir/passes/resource_pass.h
                       src/shader_recompiler/ir/passes/resource_patching_pass.cpp
+                      src/shader_recompiler/ir/passes/resource_predicate_pass.cpp
                       src/shader_recompiler/ir/passes/ring_access_elimination.cpp
                       src/shader_recompiler/ir/passes/shader_info_collection_pass.cpp
                       src/shader_recompiler/ir/passes/shared_memory_barrier_pass.cpp

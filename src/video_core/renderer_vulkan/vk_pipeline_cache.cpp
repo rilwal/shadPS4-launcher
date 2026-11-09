@@ -1015,6 +1015,19 @@ bool PipelineCache::RefreshComputeKey() {
     return true;
 }
 
+static bool HasImagePredicates(const Shader::Info& info) {
+    return std::ranges::any_of(info.images, [](const auto& image) { return image.predicate != 0; });
+}
+
+/// Gives a translation the image predicates an earlier one of the same program found.
+static void SeedImagePredicates(Shader::Info& to, const Shader::Info& from) {
+    to.predicates = from.predicates;
+    to.image_predicate_seeds = {};
+    for (size_t i = 0; i < from.images.size(); ++i) {
+        to.image_predicate_seeds[i] = from.images[i].predicate;
+    }
+}
+
 std::pair<vk::ShaderModule, u64> PipelineCache::CompileModule(Shader::Info& info,
                                                               Shader::RuntimeInfo& runtime_info,
                                                               std::span<const u32> guest_code,
@@ -1180,8 +1193,19 @@ PipelineCache::Result PipelineCache::GetProgram(HwStage hw_stage, SwStage sw_sta
         auto& program = it_pgm.value();
         auto start = binding;
         auto compile_info = runtime_info;
-        const auto [module, perm_hash] =
+        auto [module, perm_hash] =
             CompileModule(program->info, compile_info, params.code, 0, binding);
+        if (HasImagePredicates(program->info)) {
+            // The translation found images read only under conditions on this draw's tables, and
+            // read their T#s regardless. Translate again knowing them, so the code matches what
+            // lookups and binding see.
+            Shader::Info seeded{hw_stage, sw_stage, params};
+            SeedImagePredicates(seeded, program->info);
+            binding = start;
+            compile_info = runtime_info;
+            std::tie(module, perm_hash) = CompileModule(seeded, compile_info, params.code, 0, binding);
+            program->info = std::move(seeded);
+        }
         auto spec = Shader::StageSpecialization(program->info, compile_info, profile, start);
         RecordDrawState(program->info, compile_info, spec.fetch_shader_data);
         if (guess_check && shader_scanner && shader_scanner->Find(params.hash)) {
@@ -1287,6 +1311,7 @@ PipelineCache::Result PipelineCache::GetProgram(HwStage hw_stage, SwStage sw_sta
         LOG_INFO(Render_Vulkan, "Variant {} of {} shader {:#x} differs in: {}", perm_idx, hw_stage,
                  params.hash, fmt::join(closest, ", "));
         auto new_info = Shader::Info(hw_stage, sw_stage, params);
+        SeedImagePredicates(new_info, info);
         auto compile_info = runtime_info;
         std::tie(module, perm_hash) =
             CompileModule(new_info, compile_info, params.code, perm_idx, binding);
