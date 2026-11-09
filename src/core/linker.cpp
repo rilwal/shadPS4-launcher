@@ -513,12 +513,15 @@ void* Linker::TlsGetAddr(u64 module_index, u64 offset) {
     }
     if (!dest) {
         dest = reinterpret_cast<u8*>(std::malloc(image_size));
+        ASSERT_MSG(dest, "Allocating the TLS block of {} (index {}, {} bytes) failed", module->name,
+                   module_index, image_size);
+        std::scoped_lock hl{mutex};
+        host_tls_blocks.insert(dest);
     }
-    ASSERT_MSG(dest, "Allocating the TLS block of {} (index {}, {} bytes) failed", module->name,
-               module_index, image_size);
     // If the game's heap used this module's TLS itself, a nested call already made the block,
-    // and the heap may have kept state in it: that one stays (this one is left unused).
+    // and the heap may have kept state in it: that one stays, and this one goes back.
     if (u8* made = GetTcbBase()->tcb_dtv[module_index + 1].pointer) {
+        FreeTlsForNonPrimaryThread(dest);
         return made + offset;
     }
     std::memcpy(dest, src, init_image_size);
@@ -553,12 +556,23 @@ void* Linker::AllocateTlsForThread(bool is_primary) {
             addr_out = heap_api->heap_malloc(total_tls_size);
         } else {
             addr_out = std::malloc(total_tls_size);
+            if (addr_out) {
+                std::scoped_lock lk{mutex};
+                host_tls_blocks.insert(addr_out);
+            }
         }
     }
     return addr_out;
 }
 
 void Linker::FreeTlsForNonPrimaryThread(void* pointer) {
+    {
+        std::scoped_lock lk{mutex};
+        if (host_tls_blocks.erase(pointer)) {
+            std::free(pointer);
+            return;
+        }
+    }
     if (heap_api && heap_api->heap_free) {
         heap_api->heap_free(pointer);
     } else {
