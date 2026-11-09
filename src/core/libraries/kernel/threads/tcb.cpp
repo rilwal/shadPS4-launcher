@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 #include "common/assert.h"
+#include "common/logging/log.h"
 #include "common/singleton.h"
 #include "core/libraries/kernel/threads/pthread.h"
 #include "core/libraries/libs.h"
@@ -20,6 +21,19 @@ Core::Tcb* TcbCtor(Pthread* thread, int initial) {
 
     auto* linker = Common::Singleton<Core::Linker>::Instance();
     auto* addr_out = linker->AllocateTlsForThread(initial);
+    {
+        const u64 n = ++linker->diag_threads;
+        if (n <= 64 || n % 64 == 0) {
+            LOG_INFO(Core_Linker,
+                     "TLS diag: thread #{} (dtors {}), static {} B at {}; dynamic game {} host {} "
+                     "spare {}; thread game {} host {}; frees game {} host {}",
+                     n, linker->diag_dtors.load(), linker->StaticTlsSize(),
+                     static_cast<const void*>(addr_out), linker->diag_dyn_game.load(),
+                     linker->diag_dyn_host.load(), linker->diag_dyn_spare.load(),
+                     linker->diag_thr_game.load(), linker->diag_thr_host.load(),
+                     linker->diag_free_game.load(), linker->diag_free_host.load());
+        }
+    }
     ASSERT_MSG(addr_out, "Unable to allocate guest TCB");
 
     // Initialize allocated memory and allocate DTV table.
@@ -63,6 +77,7 @@ Core::Tcb* TcbCtor(Pthread* thread, int initial) {
 void TcbDtor(Core::Tcb* oldtls) {
     std::scoped_lock lk{RtldLock};
     auto* dtv_table = oldtls->tcb_dtv;
+    Common::Singleton<Core::Linker>::Instance()->diag_dtors++;
 
     auto* linker = Common::Singleton<Core::Linker>::Instance();
     const u32 max_tls_index = linker->MaxTlsIndex();

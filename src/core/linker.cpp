@@ -502,6 +502,10 @@ void* Linker::TlsGetAddr(u64 module_index, u64 offset) {
     u8* dest{};
     if (malloc_fn) {
         dest = reinterpret_cast<u8*>(malloc_fn(image_size));
+        if (dest)
+            diag_dyn_game++;
+        LOG_INFO(Core_Linker, "TLS diag: dynamic block {} ({} bytes) -> {}", module->name,
+                 image_size, static_cast<const void*>(dest));
         if (!dest) {
             // Seen with libc.prx's own block (Bloodborne, ThinLTO builds): the game's heap
             // returned null for 1184 bytes. The block works the same anywhere in memory.
@@ -517,10 +521,12 @@ void* Linker::TlsGetAddr(u64 module_index, u64 offset) {
                    module_index, image_size);
         std::scoped_lock hl{mutex};
         host_tls_blocks.insert(dest);
+        diag_dyn_host++;
     }
     // If the game's heap used this module's TLS itself, a nested call already made the block,
     // and the heap may have kept state in it: that one stays, and this one goes back.
     if (u8* made = GetTcbBase()->tcb_dtv[module_index + 1].pointer) {
+        diag_dyn_spare++;
         FreeTlsForNonPrimaryThread(dest);
         return made + offset;
     }
@@ -554,11 +560,13 @@ void* Linker::AllocateTlsForThread(bool is_primary) {
     } else {
         if (heap_api && heap_api->heap_malloc) {
             addr_out = heap_api->heap_malloc(total_tls_size);
+            diag_thr_game++;
         } else {
             addr_out = std::malloc(total_tls_size);
             if (addr_out) {
                 std::scoped_lock lk{mutex};
                 host_tls_blocks.insert(addr_out);
+                diag_thr_host++;
             }
         }
     }
@@ -570,10 +578,12 @@ void Linker::FreeTlsForNonPrimaryThread(void* pointer) {
         std::scoped_lock lk{mutex};
         if (host_tls_blocks.erase(pointer)) {
             std::free(pointer);
+            diag_free_host++;
             return;
         }
     }
     if (heap_api && heap_api->heap_free) {
+        diag_free_game++;
         heap_api->heap_free(pointer);
     } else {
         std::free(pointer);

@@ -4,6 +4,7 @@
 #pragma once
 
 #include <algorithm>
+#include <atomic>
 #include <mutex>
 #include <unordered_set>
 #include <vector>
@@ -175,6 +176,13 @@ private:
     // TLS blocks made with the host's malloc (before the game's heap was known, or when it
     // returned null): they go back to the host's free, not the game's.
     std::unordered_set<void*> host_tls_blocks;
+
+public:
+    // Diagnostic counters (tls-diag branch only).
+    std::atomic<u64> diag_dyn_game{}, diag_dyn_host{}, diag_dyn_spare{}, diag_thr_game{},
+        diag_thr_host{}, diag_free_game{}, diag_free_host{}, diag_threads{}, diag_dtors{};
+
+private:
     std::vector<std::unique_ptr<Module>> m_modules;
     Loader::SymbolsResolver m_hle_symbols{};
 };
