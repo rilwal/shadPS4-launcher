@@ -481,6 +481,7 @@ struct GPUSettings {
     Setting<u32> shader_precompile_threads{0};
     /// Seconds between automatic A/B switches (0 = only on the hotkey).
     Setting<u32> ab_switch_seconds{0};
+    Setting<u32> submit_draw_interval{0};
 
     std::vector<OverrideItem> GetOverrideableFields() const {
         return std::vector<OverrideItem>{
@@ -524,6 +525,7 @@ struct GPUSettings {
             make_override<GPUSettings>("fewer_shader_variants",
                                        &GPUSettings::fewer_shader_variants),
             make_override<GPUSettings>("ab_switch_seconds", &GPUSettings::ab_switch_seconds),
+            make_override<GPUSettings>("submit_draw_interval", &GPUSettings::submit_draw_interval),
         };
     }
 };
@@ -535,7 +537,7 @@ NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE(
     rcas_enabled, rcas_attenuation, userfaultfd, inline_fetch_shader, fast_shader_math,
     async_pipelines, async_pipeline_wait_ms, async_pipelines_ab_seconds, pipeline_compile_probe,
     descriptor_heap, shader_objects, compile_lookahead, shader_prescan, fewer_shader_variants,
-    gpu_timing, shader_precompile_threads, ab_switch_seconds)
+    gpu_timing, shader_precompile_threads, ab_switch_seconds, submit_draw_interval)
 
 // -------------------------------
 // Vulkan settings
@@ -867,6 +869,7 @@ public:
     SETTING_FORWARD_BOOL(m_gpu, FewerShaderVariants, fewer_shader_variants)
     SETTING_FORWARD_BOOL(m_gpu, GpuTiming, gpu_timing)
     SETTING_FORWARD(m_gpu, ShaderPrecompileThreads, shader_precompile_threads)
+    SETTING_FORWARD(m_gpu, SubmitDrawInterval, submit_draw_interval)
 
     u32 GetVblankFrequency() {
         if (m_gpu.vblank_frequency.value < 30) {

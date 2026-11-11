@@ -209,6 +209,8 @@ private:
 
     void ResetBindings(bool is_compute);
 
+    void FlushPeriodically();
+
     bool IsComputeMetaClear(const Pipeline* pipeline);
     bool IsComputeImageCopy(const Pipeline* pipeline);
     bool IsComputeImageClear(const Pipeline* pipeline);
@@ -269,6 +271,9 @@ private:
     u64 unsubmitted_signal_tick{};
     std::chrono::steady_clock::time_point unsubmitted_signal_since{};
     std::atomic<u32> throttled_fences_in_flight{0};
+    const u32 submit_draw_interval;
+    u64 last_submit_tick{};
+    u32 draws_since_submit{};
 
     struct ImageBinding {
         VideoCore::ImageId image_id;

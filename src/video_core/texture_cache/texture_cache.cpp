@@ -125,12 +125,22 @@ bool TextureCache::ProcessDownloadImages(bool priority) {
     if (download_images.empty()) {
         return false;
     }
-    const auto flags = priority ? DownloadMemoryFlags::Priority : DownloadMemoryFlags::Sync;
-    for (const ImageId image_id : download_images) {
-        DownloadImageMemory(image_id, flags);
+    if (priority) {
+        for (const ImageId image_id : download_images) {
+            DownloadImageMemory(image_id, DownloadMemoryFlags::Priority);
+        }
+    } else {
+        // Wait once for all of them rather than once per image.
+        for (const ImageId image_id : download_images) {
+            DownloadImageMemory(image_id);
+        }
     }
     download_images.clear();
     any_download_images.store(false, std::memory_order_relaxed);
+    if (!priority) {
+        scheduler.Finish();
+        scheduler.PopPendingOperations();
+    }
     return true;
 }
 
@@ -259,15 +269,22 @@ void TextureCache::InvalidateMemory(VAddr addr, size_t size) {
 }
 
 void TextureCache::InvalidateMemoryFromGPU(VAddr address, size_t max_size) {
-    ForEachImageInRegion(address, max_size, [&](ImageId image_id, Image& image) {
-        // Only consider images that match base address.
-        // TODO: Maybe also consider subresources
-        if (image.info.guest_address != address) {
-            return;
-        }
-        // Ensure image is reuploaded when accessed again.
-        image.flags |= ImageFlagBits::GpuDirty;
-    });
+    // Mark the image at the written address, then follow images stored right after it
+    // (e.g. the chroma planes after a luma plane).
+    const VAddr end = address + max_size;
+    VAddr next = address;
+    while (next < end) {
+        VAddr next_end = 0;
+        ForEachImageWithAddress(next, [&](ImageId image_id, Image& image) {
+            if (image.info.guest_address != next) {
+                return;
+            }
+            // Ensure image is reuploaded when accessed again.
+            image.flags |= ImageFlagBits::GpuDirty;
+            next_end = std::max<VAddr>(next_end, next + image.info.guest_size);
+        });
+        next = next_end > next ? next_end : end;
+    }
 }
 
 void TextureCache::MarkAsMaybeGpuDirty(VAddr addr, size_t size) {
@@ -653,11 +670,18 @@ ImageId TextureCache::FindImage(ImageDesc& desc, bool exact_fmt) {
     // The last one wins, as in the full search below, which walks every page of the image and
     // runs only when there's none.
     ImageId image_id{};
+    ImageId subrect_source{};
     ForEachImageWithAddress(info.guest_address, [&](ImageId cache_id, Image& cache_image) {
+        if (desc.IsSubrectTexture(cache_image.info) && cache_image.HasGpuValidData()) {
+            subrect_source = cache_id;
+        }
         if (is_perfect_match(cache_image)) {
             image_id = cache_id;
         }
     });
+    if (!image_id) {
+        image_id = subrect_source;
+    }
 
     SmallVector<ImageId, 8> image_ids;
     if (!image_id) {

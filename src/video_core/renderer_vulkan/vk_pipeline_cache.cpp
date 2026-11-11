@@ -107,6 +107,8 @@ PipelineCache::PipelineCache(const Instance& instance_, Scheduler& scheduler_,
         .supports_buffer_fp32_atomic_min_max =
             instance_.IsShaderAtomicFloatBuffer32MinMaxSupported(),
         .supports_image_fp32_atomic_min_max = instance_.IsShaderAtomicFloatImage32MinMaxSupported(),
+        .supports_shared_fp32_atomic_min_max =
+            instance_.IsShaderAtomicFloatShared32MinMaxSupported(),
         .supports_buffer_int64_atomics = instance_.IsBufferInt64AtomicsSupported(),
         .supports_shared_int64_atomics = instance_.IsSharedInt64AtomicsSupported(),
         .supports_workgroup_explicit_memory_layout =
@@ -717,6 +719,10 @@ bool PipelineCache::RefreshGraphicsKey() {
     key.logic_op = regs.color_control.rop3;
     key.depth_samples = db_enabled ? regs.depth_buffer.NumSamples() : 1;
     key.num_samples = key.depth_samples;
+    key.sample_mask = 0;
+    for (const u16 pixel_mask : regs.aa_mask.pixel) {
+        key.sample_mask |= pixel_mask;
+    }
     key.cb_shader_mask = regs.color_shader_mask;
 
     const bool skip_cb_binding =
@@ -735,7 +741,8 @@ bool PipelineCache::RefreshGraphicsKey() {
     bool all_color_samples_same = true;
     for (s32 cb = 0; cb < key.num_color_attachments && !skip_cb_binding; ++cb) {
         const auto& col_buf = regs.color_buffers[cb];
-        const u32 target_mask = regs.color_target_mask.GetMask(cb);
+        const u32 target_mask =
+            regs.color_target_mask.GetMask(cb) & regs.color_shader_mask.GetMask(cb);
         if (!col_buf || !target_mask) {
             continue;
         }
