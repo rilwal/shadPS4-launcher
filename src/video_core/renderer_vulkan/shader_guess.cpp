@@ -598,7 +598,9 @@ Shader::PsColorBuffer ShaderColorBuffer(const Shader::Profile& profile,
 /// memory on a graphics stage means the shader is really a hull, local or export shader.
 bool GuessTranslated(const Shader::Info& info, HwStage hw_stage) {
     return !info.translation_failed &&
-           (hw_stage == HwStage::Compute || static_cast<u32>(info.shared_types) == 0);
+           (hw_stage == HwStage::Compute ||
+            (static_cast<u32>(info.shared_guest_segment.used_types) == 0 &&
+             static_cast<u32>(info.shared_scratch_segment.used_types) == 0));
 }
 
 /// The stages whose register state a shader's struct gives.
