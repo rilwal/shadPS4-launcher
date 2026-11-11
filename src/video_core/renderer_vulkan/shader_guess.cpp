@@ -127,6 +127,20 @@ std::vector<std::string> SpecDifferences(const Shader::StageSpecialization& a,
         check(fa.clip_distance_emulation == fb.clip_distance_emulation,
               "fs.clip_distance_emulation");
         check(fa.depth_before_shader == fb.depth_before_shader, "fs.depth_before_shader");
+        check(fa.alpha_to_mask_enable == fb.alpha_to_mask_enable, "fs.alpha_to_mask_enable");
+        check(fa.coverage_to_mask_enable == fb.coverage_to_mask_enable,
+              "fs.coverage_to_mask_enable");
+        check(fa.alpha_to_mask_eqaa_disable == fb.alpha_to_mask_eqaa_disable,
+              "fs.alpha_to_mask_eqaa_disable");
+        check(fa.alpha_to_mask_num_samples == fb.alpha_to_mask_num_samples,
+              "fs.alpha_to_mask_num_samples");
+        check(fa.msaa_num_samples == fb.msaa_num_samples, "fs.msaa_num_samples");
+        check(fa.alpha_to_mask_offsets == fb.alpha_to_mask_offsets, "fs.alpha_to_mask_offsets");
+        check(fa.mrt0_export_format == fb.mrt0_export_format, "fs.mrt0_export_format");
+        check(fa.aa_mask_per_pixel == fb.aa_mask_per_pixel && fa.aa_mask == fb.aa_mask,
+              "fs.aa_mask");
+        check(fa.mask_export_num_samples == fb.mask_export_num_samples,
+              "fs.mask_export_num_samples");
         break;
     }
     case HwStage::Vertex: {
@@ -908,6 +922,12 @@ std::optional<Shader::RuntimeInfo> GuessRuntimeInfo(const ShaderHost& host, HwSt
             db.stencil_op_val_export_enable | db.stencil_test_val_export_enable;
         fs.mrtz_mask = db.z_export_enable | (stencil_export << 1) | (db.mask_export_enable << 2) |
                        (db.coverage_to_mask_enable << 3);
+        // As FillRuntimeInfo sets them, with the alpha-to-mask and EQAA registers unknown (and
+        // assumed off, like multisampling).
+        fs.coverage_to_mask_enable = db.coverage_to_mask_enable;
+        if (fs.coverage_to_mask_enable) {
+            fs.mrt0_export_format = col_format.GetFormat(0);
+        }
         // Unknown without the draw: which vertex outputs the inputs read (from the semantics,
         // once draws have shown how they map), the render targets (assumed 8-bit unorm wherever
         // the shader exports), multisampling and blending (assumed off).

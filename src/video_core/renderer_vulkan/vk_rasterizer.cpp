@@ -186,7 +186,9 @@ boost::container::static_vector<VAddr, AmdGpu::NUM_COLOR_BUFFERS + 2> Rasterizer
     if (regs.color_control.mode != AmdGpu::ColorControl::OperationMode::Disable) {
         for (s32 cb = 0; cb < std::bit_width(key.mrt_mask); ++cb) {
             const auto& col_buf = regs.color_buffers[cb];
-            if (col_buf && regs.color_target_mask.GetMask(cb) && (key.mrt_mask & (1 << cb))) {
+            if (col_buf &&
+                (regs.color_target_mask.GetMask(cb) & regs.color_shader_mask.GetMask(cb)) &&
+                (key.mrt_mask & (1 << cb))) {
                 targets.push_back(col_buf.Address());
             }
         }
