@@ -66,7 +66,7 @@ public:
         const VAddr start = page + PageManager::GetPageSize();
         std::scoped_lock lock{mutex};
         ++tick;
-        Run* run = std::ranges::find(runs, page, &Run::end);
+        auto run = std::ranges::find(runs, page, &Run::end);
         if (run == runs.end()) {
             // A new run, replacing the one used longest ago.
             run = std::ranges::min_element(runs, {}, &Run::last_use);
