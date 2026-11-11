@@ -436,6 +436,16 @@ const std::vector<Entry>& Entries() {
             "Copy the game's command buffers before running them, for games that rewrite them.",
             [] { return EmulatorSettings.IsCopyGpuBuffers(); },
             [](bool v) { EmulatorSettings.SetCopyGpuBuffers(v, G); }));
+        e.push_back(Steps(
+            "submit-draw-interval", "Submit GPU work every", "Accuracy",
+            "Send recorded GPU work to the driver every this many draws or dispatches, instead of "
+            "only when the game submits. A per-game workaround; off by default.",
+            {0, 25, 50, 100, 200},
+            [](long v) { return v == 0 ? std::string{"Off"} : fmt::format("{} draws", v); },
+            [] { return static_cast<long>(EmulatorSettings.GetSubmitDrawInterval()); },
+            [](long v) {
+                EmulatorSettings.SetSubmitDrawInterval(static_cast<u32>(std::max(v, 0L)), G);
+            }));
         e.push_back(Toggle(
             "pipeline-cache", "Pipeline cache", "Accuracy",
             "Keep compiled pipelines on disk, so later runs stutter less.",
@@ -584,10 +594,11 @@ const std::vector<Entry>& Entries() {
             "Japanese-style buttons: Circle confirms and Cross cancels, in games that ask.",
             [] { return EmulatorSettings.IsCircleEnter(); },
             [](bool v) { EmulatorSettings.SetCircleEnter(v, G); }));
-        e.push_back(Toggle("motion-controls", "Motion controls", "Controls",
-                           "Pass the controller's gyro and accelerometer to games.",
-                           [] { return EmulatorSettings.IsMotionControlsEnabled(); },
-                           [](bool v) { EmulatorSettings.SetMotionControlsEnabled(v, G); }));
+        e.push_back(Toggle(
+            "motion-controls", "Motion controls", "Controls",
+            "Pass the controller's gyro and accelerometer to games.",
+            [] { return EmulatorSettings.IsMotionControlsEnabled(); },
+            [](bool v) { EmulatorSettings.SetMotionControlsEnabled(v, G); }));
         e.push_back(Live(Toggle(
                              "background-input", "Input in the background", "Controls",
                              "Keep reading the controller while the game window isn't focused.",

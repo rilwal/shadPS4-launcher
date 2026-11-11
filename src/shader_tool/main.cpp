@@ -268,7 +268,7 @@ int Bench(const Game& game, const Options& options, Summary& summary) {
 /// Translates a recorded draw state the way the precompile workers replay it.
 std::optional<Translated> TranslateRecorded(const Game& game, Shader::Pools& pools,
                                             const Files::ListedShader& shader,
-                                            const DrawState& state) {
+                                            const RecordedDrawState& state) {
     const Shader::ShaderParams params{
         .user_data = state.user_data,
         .code = shader.code,

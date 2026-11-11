@@ -127,6 +127,20 @@ std::vector<std::string> SpecDifferences(const Shader::StageSpecialization& a,
         check(fa.clip_distance_emulation == fb.clip_distance_emulation,
               "fs.clip_distance_emulation");
         check(fa.depth_before_shader == fb.depth_before_shader, "fs.depth_before_shader");
+        check(fa.alpha_to_mask_enable == fb.alpha_to_mask_enable, "fs.alpha_to_mask_enable");
+        check(fa.coverage_to_mask_enable == fb.coverage_to_mask_enable,
+              "fs.coverage_to_mask_enable");
+        check(fa.alpha_to_mask_eqaa_disable == fb.alpha_to_mask_eqaa_disable,
+              "fs.alpha_to_mask_eqaa_disable");
+        check(fa.alpha_to_mask_num_samples == fb.alpha_to_mask_num_samples,
+              "fs.alpha_to_mask_num_samples");
+        check(fa.msaa_num_samples == fb.msaa_num_samples, "fs.msaa_num_samples");
+        check(fa.alpha_to_mask_offsets == fb.alpha_to_mask_offsets, "fs.alpha_to_mask_offsets");
+        check(fa.mrt0_export_format == fb.mrt0_export_format, "fs.mrt0_export_format");
+        check(fa.aa_mask_per_pixel == fb.aa_mask_per_pixel && fa.aa_mask == fb.aa_mask,
+              "fs.aa_mask");
+        check(fa.mask_export_num_samples == fb.mask_export_num_samples,
+              "fs.mask_export_num_samples");
         break;
     }
     case HwStage::Vertex: {
@@ -375,6 +389,42 @@ void FillRuntimeInfo(const ShaderHost& host, Shader::RuntimeInfo& info, HwStage 
                                (stencil_ref_export_enable << 1) |
                                (regs.depth_shader_control.mask_export_enable << 2) |
                                (regs.depth_shader_control.coverage_to_mask_enable << 3);
+        const u32 sample_bits = (1u << (1u << regs.aa_config.msaa_num_samples)) - 1u;
+        std::array<u16, 4> aa_mask;
+        for (u32 pixel = 0; pixel < 4; ++pixel) {
+            aa_mask[pixel] = regs.aa_mask.pixel[pixel] & sample_bits;
+        }
+        info.hw.fs.aa_mask_per_pixel =
+            !std::ranges::all_of(aa_mask, [&](u16 mask) { return mask == aa_mask[0]; });
+        if (info.hw.fs.aa_mask_per_pixel) {
+            info.hw.fs.aa_mask = aa_mask;
+        }
+        const auto mrt0_export_format = regs.color_export_format.GetFormat(0);
+        const bool mrt0_alpha = mrt0_export_format >= AmdGpu::ShaderExportFormat::AR_32 &&
+                                mrt0_export_format <= AmdGpu::ShaderExportFormat::ABGR_32;
+        info.hw.fs.alpha_to_mask_enable =
+            regs.alpha_to_mask.enable && !regs.depth_shader_control.alpha_to_mask_disable &&
+            mrt0_alpha &&
+            (regs.color_shader_mask.GetMask(0) & AmdGpu::ColorBufferMask::ComponentA) != 0;
+        info.hw.fs.coverage_to_mask_enable = regs.depth_shader_control.coverage_to_mask_enable;
+        if (info.hw.fs.alpha_to_mask_enable || info.hw.fs.coverage_to_mask_enable ||
+            regs.depth_shader_control.mask_export_enable) {
+            info.hw.fs.msaa_num_samples = regs.aa_config.msaa_num_samples;
+        }
+        if (regs.depth_shader_control.mask_export_enable) {
+            info.hw.fs.mask_export_num_samples = regs.depth_eqaa.mask_export_num_samples;
+        }
+        if (info.hw.fs.alpha_to_mask_enable || info.hw.fs.coverage_to_mask_enable) {
+            info.hw.fs.alpha_to_mask_num_samples =
+                std::min<u32>(regs.depth_eqaa.alpha_to_mask_num_samples, 4);
+            info.hw.fs.alpha_to_mask_eqaa_disable = regs.depth_eqaa.alpha_to_mask_eqaa_disable;
+            u32 offsets = 0;
+            for (u32 pixel = 0; pixel < 4; ++pixel) {
+                offsets |= regs.alpha_to_mask.Offset(pixel) << (3 * pixel);
+            }
+            info.hw.fs.alpha_to_mask_offsets = offsets;
+            info.hw.fs.mrt0_export_format = mrt0_export_format;
+        }
         const auto& cb0_blend = regs.blend_control[0];
         if (cb0_blend.enable) {
             info.hw.fs.dual_source_blending =
@@ -502,7 +552,8 @@ void FillColorBuffers(const AmdGpu::Regs& regs, ColorBuffers& color_buffers) {
     }
     for (s32 cb = 0; cb < AmdGpu::NUM_COLOR_BUFFERS; ++cb) {
         const auto& col_buf = regs.color_buffers[cb];
-        if (!col_buf || !regs.color_target_mask.GetMask(cb)) {
+        if (!col_buf ||
+            !(regs.color_target_mask.GetMask(cb) & regs.color_shader_mask.GetMask(cb))) {
             // No attachment bound or writing to it is disabled.
             continue;
         }
@@ -561,7 +612,9 @@ Shader::PsColorBuffer ShaderColorBuffer(const Shader::Profile& profile,
 /// memory on a graphics stage means the shader is really a hull, local or export shader.
 bool GuessTranslated(const Shader::Info& info, HwStage hw_stage) {
     return !info.translation_failed &&
-           (hw_stage == HwStage::Compute || static_cast<u32>(info.shared_types) == 0);
+           (hw_stage == HwStage::Compute ||
+            (static_cast<u32>(info.shared_guest_segment.used_types) == 0 &&
+             static_cast<u32>(info.shared_scratch_segment.used_types) == 0));
 }
 
 /// The stages whose register state a shader's struct gives.
@@ -638,7 +691,7 @@ std::vector<Shader::Info::GuessedImage> ReflectedImages(HwStage stage, std::span
     return images;
 }
 
-std::optional<DrawState> ParseDrawState(const ShaderHost& host, std::span<const u8> in) {
+std::optional<RecordedDrawState> ParseDrawState(const ShaderHost& host, std::span<const u8> in) {
     u32 format{};
     u64 key{};
     u8 hw{};
@@ -647,7 +700,7 @@ std::optional<DrawState> ParseDrawState(const ShaderHost& host, std::span<const 
         !GetState(in, hw) || !GetState(in, sw)) {
         return std::nullopt;
     }
-    DrawState state{};
+    RecordedDrawState state{};
     state.hw_stage = static_cast<HwStage>(hw);
     state.sw_stage = static_cast<SwStage>(sw);
     // Only the stages compiled early: the others need more than registers (the hull shader's
@@ -869,6 +922,12 @@ std::optional<Shader::RuntimeInfo> GuessRuntimeInfo(const ShaderHost& host, HwSt
             db.stencil_op_val_export_enable | db.stencil_test_val_export_enable;
         fs.mrtz_mask = db.z_export_enable | (stencil_export << 1) | (db.mask_export_enable << 2) |
                        (db.coverage_to_mask_enable << 3);
+        // As FillRuntimeInfo sets them, with the alpha-to-mask and EQAA registers unknown (and
+        // assumed off, like multisampling).
+        fs.coverage_to_mask_enable = db.coverage_to_mask_enable;
+        if (fs.coverage_to_mask_enable) {
+            fs.mrt0_export_format = col_format.GetFormat(0);
+        }
         // Unknown without the draw: which vertex outputs the inputs read (from the semantics,
         // once draws have shown how they map), the render targets (assumed 8-bit unorm wherever
         // the shader exports), multisampling and blending (assumed off).

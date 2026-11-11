@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: Copyright 2024 shadPS4 Emulator Project
+// SPDX-FileCopyrightText: Copyright 2024-2026 shadPS4 Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 #include <algorithm>
@@ -197,6 +197,7 @@ GraphicsPipeline::GraphicsPipeline(
                 fs_info.addr_flags.persp_sample_ena || fs_info.addr_flags.linear_sample_ena,
         };
     }
+    sdata.multisampling.pSampleMask = &key.sample_mask;
     b.multisampling = sdata.multisampling;
 
     b.clip_control = vk::PipelineViewportDepthClipControlCreateInfoEXT{
@@ -650,6 +651,7 @@ void GraphicsPipeline::CreateShaderObjects(const Build& b, ShaderObjects& object
     st->topology = st->tessellation ? vk::PrimitiveTopology::ePatchList : b.input_assembly.topology;
     st->patch_control_points = b.tessellation_state.patchControlPoints;
     st->samples = b.multisampling.rasterizationSamples;
+    st->sample_mask = key.sample_mask;
     st->polygon_mode = raster.polygonMode;
     st->depth_clamp = raster.depthClampEnable;
     st->depth_clip =
@@ -708,8 +710,9 @@ void GraphicsPipeline::BindShaderObjects(vk::CommandBuffer cmdbuf,
     }
     if (!prev || prev->samples != st.samples) {
         cmdbuf.setRasterizationSamplesEXT(st.samples);
-        const std::array<vk::SampleMask, 2> sample_mask = {~0u, ~0u};
-        cmdbuf.setSampleMaskEXT(st.samples, sample_mask.data());
+    }
+    if (!prev || prev->samples != st.samples || prev->sample_mask != st.sample_mask) {
+        cmdbuf.setSampleMaskEXT(st.samples, &st.sample_mask);
     }
     if (!prev) {
         cmdbuf.setAlphaToCoverageEnableEXT(false);
