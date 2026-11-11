@@ -1796,7 +1796,7 @@ Liverpool::Task Liverpool::ProcessCompute(std::span<const u32> acb, u32 vqid) {
                 if (rasterizer) {
                     rasterizer->OnFence();
                 }
-                OrderCpWrite(write_data->Address<VAddr>(), data_size);
+                OrderCpWrite(write_data->Address<u64>(), data_size);
                 std::memcpy(write_data->Address<void*>(), write_data->data, data_size);
             } else {
                 UNREACHABLE();
