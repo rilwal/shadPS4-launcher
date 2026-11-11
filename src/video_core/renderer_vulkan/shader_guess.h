@@ -129,8 +129,8 @@ bool GetState(std::span<const u8>& in, T& value) {
     return true;
 }
 
-/// A recorded draw state, rebuilt.
-struct DrawState {
+/// A recorded draw state, rebuilt. (Not named DrawState: windows.h defines that as a macro.)
+struct RecordedDrawState {
     Shader::HwStage hw_stage;
     Shader::SwStage sw_stage;
     Shader::RuntimeInfo runtime_info;
@@ -140,6 +140,6 @@ struct DrawState {
     std::optional<Shader::Gcn::FetchShaderData> fetch;
     std::vector<std::pair<u32, AmdGpu::Buffer>> vertex_buffers;
 };
-std::optional<DrawState> ParseDrawState(const ShaderHost& host, std::span<const u8> blob);
+std::optional<RecordedDrawState> ParseDrawState(const ShaderHost& host, std::span<const u8> blob);
 
 } // namespace Vulkan

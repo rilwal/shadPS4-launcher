@@ -691,7 +691,7 @@ std::vector<Shader::Info::GuessedImage> ReflectedImages(HwStage stage, std::span
     return images;
 }
 
-std::optional<DrawState> ParseDrawState(const ShaderHost& host, std::span<const u8> in) {
+std::optional<RecordedDrawState> ParseDrawState(const ShaderHost& host, std::span<const u8> in) {
     u32 format{};
     u64 key{};
     u8 hw{};
@@ -700,7 +700,7 @@ std::optional<DrawState> ParseDrawState(const ShaderHost& host, std::span<const 
         !GetState(in, hw) || !GetState(in, sw)) {
         return std::nullopt;
     }
-    DrawState state{};
+    RecordedDrawState state{};
     state.hw_stage = static_cast<HwStage>(hw);
     state.sw_stage = static_cast<SwStage>(sw);
     // Only the stages compiled early: the others need more than registers (the hull shader's
