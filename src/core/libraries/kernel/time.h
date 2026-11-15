@@ -67,6 +67,10 @@ constexpr int ORBIS_CLOCK_EXT_RAW_NETWORK = 19;
 namespace Dev {
 u64& GetInitialPtc();
 
+// Moves the process time and process time counter bases forward by a pause of host_ticks host
+// TSC ticks, so neither clock advances while guest threads are paused.
+void ShiftForPause(u64 host_ticks);
+
 Common::NativeClock* GetClock();
 } // namespace Dev
 

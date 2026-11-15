@@ -56,7 +56,7 @@ u64 PS4_SYSV_ABI sceKernelGetCpuFrequency() {
 }
 
 u64 PS4_SYSV_ABI sceKernelGetProcessTime() {
-    // TODO: this timer should support suspends, so initial ptc needs to be updated on wake up
+    // Dev::ShiftForPause moves initial_host_uptime past emulator pauses.
     return clock->GetTimeUS(initial_host_uptime);
 }
 
@@ -68,17 +68,21 @@ u64 PS4_SYSV_ABI sceKernelGetProcessTimeCounterFrequency() {
     return sceKernelGetTscFrequency();
 }
 
-u64 PS4_SYSV_ABI sceKernelReadTsc() {
+// Converts host TSC ticks to guest TSC ticks.
+static u64 HostToGuestTicks(u64 host_ticks) {
 #ifdef __SIZEOF_INT128__
-    const auto product = static_cast<unsigned __int128>(clock->GetUptime()) *
+    const auto product = static_cast<unsigned __int128>(host_ticks) *
                          static_cast<unsigned __int128>(Core::GetGuestTscMultiplier());
     return static_cast<u64>(product >> Core::GuestTscMultiplierShift);
 #else
-    const u128 product =
-        Common::Multiply64Into128(clock->GetUptime(), Core::GetGuestTscMultiplier());
+    const u128 product = Common::Multiply64Into128(host_ticks, Core::GetGuestTscMultiplier());
     return (product[1] << (64 - Core::GuestTscMultiplierShift)) |
            (product[0] >> Core::GuestTscMultiplierShift);
 #endif
+}
+
+u64 PS4_SYSV_ABI sceKernelReadTsc() {
+    return HostToGuestTicks(clock->GetUptime());
 }
 
 static s32 posix_nanosleep_impl(const OrbisKernelTimespec* rqtp, OrbisKernelTimespec* rmtp,
@@ -520,6 +524,13 @@ s32 PS4_SYSV_ABI sceKernelConvertLocaltimeToUtc(time_t param_1, int64_t param_2,
 namespace Dev {
 u64& GetInitialPtc() {
     return initial_ptc;
+}
+
+void ShiftForPause(u64 host_ticks) {
+    // Each base is in its own units: process time counts host ticks, the process time counter
+    // counts guest ticks.
+    initial_host_uptime += host_ticks;
+    initial_ptc += HostToGuestTicks(host_ticks);
 }
 
 Common::NativeClock* GetClock() {
