@@ -27,19 +27,38 @@ static std::pair<Id, Id> BufferAtomicArgs(EmitContext& ctx) {
     return {scope, semantics};
 }
 
+static Id FixImageAtomicCoords(EmitContext& ctx, Id coords, AmdGpu::ImageType image_type) {
+    switch (image_type) {
+    case AmdGpu::ImageType::Color1D: {
+        // Lowered to 2D with height 1
+        const auto x = coords;
+        return ctx.OpCompositeConstruct(ctx.U32[2], x, ctx.u32_zero_value);
+    }
+    case AmdGpu::ImageType::Color1DArray: {
+        // Lowered to 2D array with height 1
+        const auto x = ctx.OpCompositeExtract(ctx.U32[1], coords, 0U);
+        const auto slice = ctx.OpCompositeExtract(ctx.U32[1], coords, 1U);
+        return ctx.OpCompositeConstruct(ctx.U32[3], x, ctx.u32_zero_value, slice);
+    }
+    default:
+        return coords;
+    }
+}
+
 static Id GetImageAtomicPointer(EmitContext& ctx, u32 handle, Id coords, bool is_float) {
     const auto& texture = ctx.images[handle & 0xFFFF];
+    const Id fixed_coords{FixImageAtomicCoords(ctx, coords, texture.view_type)};
     const Id spv_pointer_type = is_float ? ctx.image_f32 : ctx.image_u32;
-    return ctx.OpImageTexelPointer(spv_pointer_type, texture.id, coords, ctx.ConstU32(0U));
+    return ctx.OpImageTexelPointer(spv_pointer_type, texture.id, fixed_coords, ctx.ConstU32(0U));
 }
 
 static Id SharedAtomicB32(EmitContext& ctx, Id offset, Id value, AtomicFunc atomic_func,
                           bool is_float = false) {
     const Id type = is_float ? ctx.F32[1] : ctx.U32[1];
-    PointerType pointer_type = is_float ? PointerType::F32 : PointerType::U32;
-    const Id pointer = ctx.EmitSharedMemoryAccess(offset, PointerType::U32);
+    const PointerType pointer_type = is_float ? PointerType::F32 : PointerType::U32;
+    const Id pointer = ctx.EmitSharedMemoryAccess(offset, pointer_type);
     const auto [scope, semantics]{SharedAtomicArgs(ctx)};
-    return (ctx.*atomic_func)(ctx.U32[1], pointer, scope, semantics, value);
+    return (ctx.*atomic_func)(type, pointer, scope, semantics, value);
 }
 
 Id SharedAtomicU32IncDec(EmitContext& ctx, Id offset, AtomicIncDecFunc atomic_func) {
@@ -103,29 +122,12 @@ Id BufferAtomicU64(EmitContext& ctx, u32 handle, Id address, Id value, AtomicFun
     return (ctx.*atomic_func)(ctx.U64, ptr, scope, semantics, value);
 }
 
-Id FixImageAtomicCoords(EmitContext& ctx, Id coords, AmdGpu::ImageType image_type) {
-    switch (image_type) {
-    case AmdGpu::ImageType::Color1D: {
-        // Lowered to 2D with height 1
-        const auto x = coords;
-        return ctx.OpCompositeConstruct(ctx.U32[2], x, ctx.u32_zero_value);
-    }
-    case AmdGpu::ImageType::Color1DArray: {
-        // Lowered to 2D array with height 1
-        const auto x = ctx.OpCompositeExtract(ctx.U32[1], coords, 0U);
-        const auto slice = ctx.OpCompositeExtract(ctx.U32[1], coords, 1U);
-        return ctx.OpCompositeConstruct(ctx.U32[3], x, ctx.u32_zero_value, slice);
-    }
-    default:
-        return coords;
-    }
-}
-
 Id ImageAtomicB32(EmitContext& ctx, IR::Inst* inst, u32 handle, Id coords, Id value,
                   AtomicFunc atomic_func, bool is_float = false) {
+    const Id type = is_float ? ctx.F32[1] : ctx.U32[1];
     const Id pointer{GetImageAtomicPointer(ctx, handle, coords, is_float)};
     const auto [scope, semantics]{BufferAtomicArgs(ctx)};
-    return (ctx.*atomic_func)(ctx.U32[1], pointer, scope, semantics, value);
+    return (ctx.*atomic_func)(type, pointer, scope, semantics, value);
 }
 
 Id ImageAtomicU32CmpSwap(EmitContext& ctx, IR::Inst* inst, u32 handle, Id coords, Id value,
@@ -373,8 +375,9 @@ Id EmitDataConsume(EmitContext& ctx, Id gds_dw_offset, Id exec) {
     UNREACHABLE_MSG("SPIR-V Instruction");
 }
 
-static Id FMinMaxFallback(EmitContext& ctx, Id ptr, Id value, bool is_min) {
-    const auto [scope, semantics]{BufferAtomicArgs(ctx)};
+static Id FMinMaxFallback(EmitContext& ctx, Id ptr, Id value, bool is_min,
+                          std::pair<Id, Id> atomic_args) {
+    const auto [scope, semantics]{atomic_args};
 
     // TODO there is a potential issue with phis, for the current IR block, there may
     // be phis in successor blocks that reference this one. We may need to redirect
@@ -417,7 +420,7 @@ static Id ImageAtomicFMinMax(EmitContext& ctx, IR::Inst* inst, u32 handle, Id co
         return ImageAtomicB32(ctx, inst, handle, coords, value, atomic_fn, true);
     } else {
         const Id ptr{GetImageAtomicPointer(ctx, handle, coords, false)};
-        return FMinMaxFallback(ctx, ptr, value, is_min);
+        return FMinMaxFallback(ctx, ptr, value, is_min, BufferAtomicArgs(ctx));
     }
 }
 
@@ -436,7 +439,7 @@ static Id BufferAtomicFMinMax(EmitContext& ctx, u32 handle, Id address, Id value
                                true);
     } else {
         const Id ptr{ctx.EmitBufferAccess(handle, address, PointerType::U32)};
-        return FMinMaxFallback(ctx, ptr, value, is_min);
+        return FMinMaxFallback(ctx, ptr, value, is_min, BufferAtomicArgs(ctx));
     }
 }
 
@@ -454,7 +457,7 @@ static Id SharedAtomicFMinMax(EmitContext& ctx, Id offset, Id value, bool is_min
         return SharedAtomicB32(ctx, offset, value, atomic_fn, true);
     } else {
         const Id ptr{ctx.EmitSharedMemoryAccess(offset, PointerType::U32)};
-        return FMinMaxFallback(ctx, ptr, value, is_min);
+        return FMinMaxFallback(ctx, ptr, value, is_min, SharedAtomicArgs(ctx));
     }
 }
 
