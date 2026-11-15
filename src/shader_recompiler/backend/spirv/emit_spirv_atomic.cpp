@@ -379,9 +379,6 @@ static Id FMinMaxFallback(EmitContext& ctx, Id ptr, Id value, bool is_min,
                           std::pair<Id, Id> atomic_args) {
     const auto [scope, semantics]{atomic_args};
 
-    // TODO there is a potential issue with phis, for the current IR block, there may
-    // be phis in successor blocks that reference this one. We may need to redirect
-    // those phis to the new merge block. Need to see if this is an issue
     const Id true_label{ctx.OpLabel()};
     const Id false_label{ctx.OpLabel()};
     const Id merge_label{ctx.OpLabel()};
