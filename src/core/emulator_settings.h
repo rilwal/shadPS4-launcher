@@ -914,6 +914,13 @@ public:
     void SetCircleEnterRegionDefault(bool v) {
         m_circle_enter_region_default = v;
     }
+    // The game-specific value, which wins over the region default
+    std::optional<bool> GetCircleEnterOverride() const {
+        return m_input.is_circle_enter.game_specific_value;
+    }
+    void ResetCircleEnterOverride() {
+        m_input.is_circle_enter.reset_game_specific();
+    }
     SETTING_FORWARD_BOOL(m_input, MiceUsedAsMice, use_mice_as_mice)
     SETTING_FORWARD_BOOL(m_input, KeyboardUsedAsKeyboard, use_keyboard_as_keyboard)
 
