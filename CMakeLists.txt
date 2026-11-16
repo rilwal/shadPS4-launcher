@@ -6,6 +6,7 @@ cmake_minimum_required(VERSION 3.24)
 
 set(CMAKE_CXX_STANDARD 23)
 set(CMAKE_CXX_STANDARD_REQUIRED True)
+set(CMAKE_CXX_SCAN_FOR_MODULES OFF)
 
 if(APPLE)
     list(APPEND ADDITIONAL_LANGUAGES OBJC)
@@ -672,6 +673,7 @@ set(NP_LIBS src/core/libraries/np/np_error.h
             src/core/libraries/np/np_handler/np_handler_auth.cpp
             src/core/libraries/np/np_handler/np_handler_invitation.cpp
             src/core/libraries/np/np_handler/np_handler_game_custom_data.cpp
+            src/core/libraries/np/np_handler/np_handler_profile.cpp
             src/core/libraries/np/np_handler/np_handler_score.cpp
             src/core/libraries/np/np_handler/np_handler_trophy.cpp
             src/core/libraries/np/np_handler/np_handler_tus.cpp
