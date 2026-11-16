@@ -591,7 +591,8 @@ const std::vector<Entry>& Entries() {
         // Controls
         e.push_back(Toggle(
             "circle-enter", "Confirm with Circle", "Controls",
-            "Japanese-style buttons: Circle confirms and Cross cancels, in games that ask.",
+            "Japanese-style buttons: Circle confirms and Cross cancels, in games that ask. On by "
+            "default for Japanese games.",
             [] { return EmulatorSettings.IsCircleEnter(); },
             [](bool v) { EmulatorSettings.SetCircleEnter(v, G); }));
         e.push_back(Toggle(
