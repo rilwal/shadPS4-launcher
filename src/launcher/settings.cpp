@@ -589,22 +589,11 @@ const std::vector<Entry>& Entries() {
             }));
 
         // Controls
-        // Auto leaves shadPS4 to choose, which picks Circle for Japanese games (by CONTENT_ID).
-        e.push_back(Choice(
-            "confirm-button", "Confirm button", "Controls",
-            "Which button confirms in games that ask. Japanese games usually use Circle.",
-            {{"auto", "Circle in Japanese games"}, {"circle", "Circle"}, {"cross", "Cross"}},
-            [] {
-                const auto set = EmulatorSettings.GetCircleEnterOverride();
-                return set ? (*set ? "circle" : "cross") : "auto";
-            },
-            [](const std::string& value) {
-                if (value == "auto") {
-                    EmulatorSettings.ResetCircleEnterOverride();
-                } else {
-                    EmulatorSettings.SetCircleEnter(value == "circle", G);
-                }
-            }));
+        e.push_back(Toggle(
+            "circle-enter", "Confirm with Circle", "Controls",
+            "Japanese-style buttons: Circle confirms and Cross cancels, in games that ask.",
+            [] { return EmulatorSettings.IsCircleEnter(); },
+            [](bool v) { EmulatorSettings.SetCircleEnter(v, G); }));
         e.push_back(Toggle(
             "motion-controls", "Motion controls", "Controls",
             "Pass the controller's gyro and accelerometer to games.",
