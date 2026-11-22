@@ -21,7 +21,8 @@ constexpr u64 MaxSaveSize = (u64{1} << 30);
 /// The recorded draw states, in their own file with no shader code: magic, version, size,
 /// then compressed per shader its hash, a count and the states, each a size and its bytes.
 constexpr u32 StatesMagic = 0x41545353; // "SSTA"
-constexpr u32 StatesVersion = 2;
+// 3: states recorded before upstream 9ac8b23 hold runtime info from zeroed CLEAR_STATE masks.
+constexpr u32 StatesVersion = 3;
 
 /// Reads a file Save wrote: its entries, uncompressed, if the magic and version match.
 std::optional<std::vector<u8>> ReadSaved(const std::filesystem::path& path, u32 want_magic,
