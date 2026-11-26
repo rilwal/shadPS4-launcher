@@ -99,8 +99,8 @@ void DebugStateImpl::ResumeGuestThreads() {
         return;
     }
 
-    u64 delta_time = Libraries::Kernel::Dev::GetClock()->GetUptime() - pause_time;
-    Libraries::Kernel::Dev::GetInitialPtc() += delta_time;
+    const u64 delta_time = Libraries::Kernel::Dev::GetClock()->GetUptime() - pause_time;
+    Libraries::Kernel::Dev::ShiftForPause(delta_time);
 #ifndef _WIN32
     Core::SetGuestSleep(false);
 #endif
