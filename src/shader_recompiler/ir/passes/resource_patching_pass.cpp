@@ -117,7 +117,8 @@ public:
             return desc.sharp_fetch == existing.sharp_fetch && desc.is_array == existing.is_array &&
                    desc.mip_fallback_mode == existing.mip_fallback_mode &&
                    desc.constant_mip_index == existing.constant_mip_index &&
-                   desc.post_op == existing.post_op;
+                   desc.post_op == existing.post_op &&
+                   desc.post_op_dw1_mask == existing.post_op_dw1_mask;
         })};
         auto& image = image_resources[index];
         image.is_atomic |= desc.is_atomic;
@@ -379,6 +380,9 @@ void PatchImageSharp(const ResourceDiscovery& resource, Info& info, Descriptors&
         .guess_type = inst_info.is_array          ? AmdGpu::ImageType::Color2DArray
                       : UsesCubeCoordinates(inst) ? AmdGpu::ImageType::Cube
                                                   : AmdGpu::ImageType::Color2D,
+        .post_op_dw1_mask = resource.sharps[0].post_op == SharpFetchPostOp::BitwiseAndDw1WithImm
+                                ? resource.sharps[0].post_op_data.dw1_mask
+                                : 0u,
     };
     if (info.guess_state) {
         if (const auto reflected = ReflectedImageType(image_res.sharp_fetch, info)) {
